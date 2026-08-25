@@ -1,0 +1,19 @@
+# ============================================================
+# backend/.dockerignore — Exclusion des fichiers du contexte
+# ============================================================
+
+# Environnements virtuels
+venv/
+.venv/
+
+# Caches Python
+__pycache__/
+*.pyc
+
+# Tests (Exclus de l'image finale)
+**/tests/
+.pytest_cache/
+.coverage
+
+# Variables locales
+.env

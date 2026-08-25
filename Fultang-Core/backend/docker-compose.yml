@@ -1,0 +1,129 @@
+services:
+  api-gateway:
+    build: ./api-gateway
+    container_name: fultang-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - SERVICE_PERSONNEL_URL=http://fultang-personnel:8000
+      - SERVICE_MEDICAL_URL=http://fultang-medical-backend:8000
+      - SERVICE_INFRASTRUCTURE_URL=http://fultang-infrastructure-web:8000
+      - SERVICE_COMPTA_FINANCIERE_URL=http://fultang-compta-financiere-backend:8000
+      - SERVICE_COMPTA_MATIERE_URL=http://fultang-compta-matiere-backend:8000
+    depends_on:
+      - service-personnel
+    networks:
+      - fultang_shared_network
+
+  service-personnel:
+    build: ./service-personnel
+    container_name: fultang-personnel
+    environment:
+      - POSTGRES_DB=service_personnel
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+    # Bind-mount du code source (comme les autres microservices) : les modifs
+    # sont prises en compte par runserver sans rebuild d'image.
+    volumes:
+      - ./service-personnel:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/', timeout=3)\" 2>/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - fultang_shared_network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: fultang-postgres
+    environment:
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=service_personnel
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d service_personnel"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - fultang_shared_network
+
+  tampon-db:
+    image: postgres:15-alpine
+    container_name: fultang-tampon-db
+    environment:
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=tampon_clinical_cases
+    ports:
+      - "5436:5432"
+    volumes:
+      - tampon_postgres_data:/var/lib/postgresql/data
+    networks:
+      - fultang_shared_network
+
+  clinical-agent:
+    build: ./clinical-agent
+    container_name: fultang-clinical-agent
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./certs:/app/certs:ro
+    environment:
+      - MAIN_DB_URL=postgresql://fultang_user:fultang_password_here@fultang-medical-db-server:5432/fultang_medical_monitoring
+      - TAMPON_DB_URL=postgresql://admin:password@fultang-tampon-db:5432/tampon_clinical_cases
+      - MEDTUTOR_API_KEY_HASH=${MEDTUTOR_API_KEY_HASH}
+      - FULTANG_RATE_LIMIT_REQUESTS=${FULTANG_RATE_LIMIT_REQUESTS}
+      - FULTANG_RATE_LIMIT_WINDOW_SECONDS=${FULTANG_RATE_LIMIT_WINDOW_SECONDS}
+    depends_on:
+      - tampon-db
+    networks:
+      - fultang_shared_network
+    restart: unless-stopped
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: fultang-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - fultang_shared_network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: fultang-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: fultang-zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://fultang-kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+    networks:
+      - fultang_shared_network
+
+volumes:
+  postgres_data:
+  tampon_postgres_data:
+
+networks:
+  fultang_shared_network:
+    name: fultang_shared_network
+    external: true

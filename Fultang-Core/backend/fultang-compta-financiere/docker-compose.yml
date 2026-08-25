@@ -1,0 +1,53 @@
+services:
+  compta-financiere-db:
+    image: postgres:15-alpine
+    container_name: fultang-compta-financiere-db
+    environment:
+      POSTGRES_DB: fultang_compta_financiere
+      POSTGRES_USER: fultang_user
+      POSTGRES_PASSWORD: fultang2026
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fultang_user -d fultang_compta_financiere"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - fultang_shared_network
+
+  backend:
+    build: .
+    container_name: fultang-compta-financiere-backend
+    ports:
+      - "8004:8000"
+    environment:
+      DB_NAME: fultang_compta_financiere
+      DB_USER: fultang_user
+      DB_PASSWORD: fultang2026
+      DB_HOST: compta-financiere-db
+      DB_PORT: 5432
+      SECRET_KEY: dev-secret-key-change-in-production
+      DEBUG: "True"
+      ALLOWED_HOSTS: "localhost,127.0.0.1,0.0.0.0"
+      USE_KAFKA: "True"
+      KAFKA_BROKER_URL: fultang-kafka:9092
+      SERVICE_MEDICAL_URL: http://fultang-medical-backend:8000
+      MEDICAL_GATEWAY_URL: http://api-gateway:8080/medical
+    depends_on:
+      compta-financiere-db:
+        condition: service_healthy
+    networks:
+      - fultang_shared_network
+    volumes:
+      - .:/app
+
+volumes:
+  postgres_data:
+
+networks:
+  fultang_shared_network:
+    name: fultang_shared_network
+    external: true

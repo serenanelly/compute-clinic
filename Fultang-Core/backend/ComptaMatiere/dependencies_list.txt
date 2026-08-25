@@ -1,0 +1,33 @@
+LISTE DES DÉPENDANCES - BACKEND COMPTAMATIERE
+
+-----------------------------------------
+FRAMEWORK ET API
+-----------------------------------------
+Django: 4.2.7
+Django REST Framework: 3.14.0
+Simple JWT (Auth): 5.3.1
+
+-----------------------------------------
+BASE DE DONNÉES
+-----------------------------------------
+Psycopg2-binary (PostgreSQL): 2.9.7
+dj-database-url: 2.1.0
+
+-----------------------------------------
+CONFIGURATION ET ENVIRONNEMENT
+-----------------------------------------
+Python-decouple: 3.8
+Django-environ: 0.11.2
+Python-dotenv: 1.0.0
+
+-----------------------------------------
+SÉCURITÉ ET UTILITAIRES
+-----------------------------------------
+Django-cors-headers: 4.2.0
+Django-filter: 23.5
+DRF-spectacular (Swagger/OpenAPI): 0.27.2
+
+-----------------------------------------
+DÉPLOIEMENT
+-----------------------------------------
+Gunicorn: 21.2.0

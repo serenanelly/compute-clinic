@@ -1,0 +1,97 @@
+# ============================================================
+# requirements.txt — Dépendances Python du backend Fultang
+# Medical-Monitoring
+# ============================================================
+# Toutes les versions sont épinglées (==) pour garantir la
+# reproductibilité des builds. Mettre à jour avec précaution
+# après avoir testé la compatibilité entre les packages.
+# ============================================================
+
+
+# ------------------------------------------------------------
+# Framework principal
+# ------------------------------------------------------------
+
+# Django : le framework web principal. Version 5.x (LTS),
+# la plus récente et stable à ce jour.
+Django==5.1.7
+
+# Django REST Framework : transforme Django en API REST.
+# Fournit les serializers, les ViewSets, les routers, etc.
+djangorestframework==3.15.2
+
+# ------------------------------------------------------------
+# Connexion PostgreSQL
+# ------------------------------------------------------------
+
+# psycopg2-binary : adaptateur PostgreSQL pour Python.
+# La version "binary" embarque les librairies C nécessaires
+# directement dans le wheel — pas besoin d'installer
+# libpq-dev séparément dans le conteneur.
+psycopg2-binary==2.9.10
+
+# ------------------------------------------------------------
+# Variables d'environnement
+# ------------------------------------------------------------
+
+# django-environ : charge proprement les variables du fichier
+# .env dans les settings Django. Évite de hardcoder les
+# credentials dans le code source.
+django-environ==0.11.2
+
+# ------------------------------------------------------------
+# API & Sécurité
+# ------------------------------------------------------------
+
+# djangorestframework-simplejwt : authentification par tokens
+# JWT (JSON Web Token). Permet à chaque acteur (réceptionniste,
+# médecin, infirmier, pharmacien) de s'authentifier et d'obtenir
+# un token d'accès et un token de rafraîchissement.
+djangorestframework-simplejwt==5.3.1
+
+# django-cors-headers : gère les en-têtes CORS (Cross-Origin
+# Resource Sharing). Indispensable pour que le frontend
+# (qui tournera sur un domaine/port différent) puisse
+# appeler l'API sans être bloqué par le navigateur.
+django-cors-headers==4.6.0
+
+# ------------------------------------------------------------
+# Validation & Utilitaires
+# ------------------------------------------------------------
+
+# Pillow : librairie de traitement d'images Python.
+# Nécessaire pour gérer les champs ImageField de Django
+# (photo du patient, photo de la personne à prévenir, etc.)
+Pillow==11.1.0
+
+# django-filter : ajoute des capacités de filtrage avancé
+# aux endpoints de l'API REST (filtrer les patients par nom,
+# les consultations par date, etc.)
+django-filter==24.3
+
+# ------------------------------------------------------------
+# Documentation de l'API
+# ------------------------------------------------------------
+
+# drf-spectacular : génère automatiquement une documentation
+# OpenAPI 3.0 (Swagger / ReDoc) à partir du code Django REST
+# Framework. Très utile pour partager l'API avec le frontend.
+drf-spectacular==0.28.0
+
+# ------------------------------------------------------------
+# Serveur de production
+# ------------------------------------------------------------
+
+# gunicorn : serveur WSGI de production pour Django.
+# Remplace le serveur de développement intégré (manage.py runserver)
+# qui n'est pas adapté à un environnement de production.
+gunicorn==23.0.0
+
+# ------------------------------------------------------------
+# Internationalisation & Dates
+# ------------------------------------------------------------
+
+# pytz : librairie de gestion des fuseaux horaires.
+# Utilisée en interne par Django pour les conversions
+# de dates/heures (notamment avec USE_TZ = True).
+pytz==2025.1

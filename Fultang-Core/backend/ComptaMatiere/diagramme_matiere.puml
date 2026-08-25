@@ -1,0 +1,135 @@
+@startuml ComptabiliteMatiere
+
+skinparam ClassAttributeIconSize 0
+skinparam theme materia-outline
+skinparam packageStyle rectangle
+
+package "Modèles de Base" {
+    abstract class Materiel {
+        + idMateriel : AutoField <<PK>>
+        + code_materiel : CharField
+        + nom_Materiel : CharField
+        + prix_achat_unitaire : DecimalField
+        + quantite_stock : IntegerField
+        + date_derniere_modification : DateTimeField
+    }
+
+    class MaterielMedical {
+        + categorie : ChoiceField
+        + unite_mesure : ChoiceField
+        + prix_vente_unitaire : DecimalField
+        --
+        + calculer_marge() : Decimal
+    }
+
+    class MaterielDurable {
+        + Etat : ChoiceField
+        + localisation : CharField
+        + date_Enregistrement : DateField
+        --
+        + mettre_en_reparation()
+        + remettre_en_service()
+    }
+
+    Materiel <|-- MaterielMedical
+    Materiel <|-- MaterielDurable
+}
+
+package "Flux Operationnels" {
+    class Besoin {
+        + idBesoin : AutoField <<PK>>
+        + date_creation_besoin : DateTimeField
+        + idPersonnel_emetteur : Integer
+        + motif : TextField
+        + statut : ChoiceField
+        + date_traitement_directeur : DateTimeField
+    }
+
+    class LigneBesoin {
+        + id_ligne_besoin : AutoField <<PK>>
+        + materiel_nom : CharField
+        + quantite_demandee : PositiveInteger
+        + priorite : ChoiceField
+        + quantite_accordee : PositiveInteger
+    }
+
+    class Livraison {
+        + idLivraison : AutoField <<PK>>
+        + bon_livraison_numero : CharField
+        + nom_fournisseur : CharField
+        + contact_fournisseur : CharField
+        + date_reception : DateTimeField
+        + montant_total : DecimalField
+    }
+
+    class LigneLivraison {
+        + type_materiel : ChoiceField
+        + quantite_conforme : PositiveInteger
+        + quantite_non_conforme : PositiveInteger
+        + prix_unitaire_achat : DecimalField
+        + date_peremption : DateField
+    }
+
+    class Sortie {
+        + idSortie : AutoField <<PK>>
+        + numero_sortie : CharField
+        + date_sortie : DateTimeField
+        + motif_sortie : ChoiceField
+        + idPersonnel : Integer
+        + montant_total : DecimalField
+    }
+
+    class LigneSortie {
+        + type_materiel : ChoiceField
+        + quantite : PositiveInteger
+        + prix_unitaire : DecimalField
+        + sous_total : DecimalField
+    }
+
+    Besoin "1" *-- "0..*" LigneBesoin
+    Livraison "1" *-- "0..*" LigneLivraison
+    Sortie "1" *-- "0..*" LigneSortie
+
+    LigneLivraison --> Materiel
+    LigneSortie --> Materiel
+}
+
+package "Inventaire et Rapports" {
+    class ArchiveInventaire {
+        + id_archive : AutoField <<PK>>
+        + code_archive : CharField
+        + date_creation : DateTimeField
+        + date_termine : DateTimeField
+        + statut : ChoiceField
+    }
+
+    class LigneArchiveInventaire {
+        + quantite_ancien_stock : PositiveInteger
+        + quantite_nouveau_stock : PositiveInteger
+        + difference : Integer
+        + statut_difference : ChoiceField
+    }
+
+    class Rapport {
+        + code_rapport : CharField
+        + objet : CharField
+        + corps : TextField
+        + id_expediteur : Integer
+        + id_destinataire : Integer
+        + est_lu : Boolean
+        + type_rapport : ChoiceField
+    }
+
+    class PieceJointeRapport {
+        + type_piece : ChoiceField
+        + nom_fichier : CharField
+        + donnees_json : JSONField
+    }
+
+    ArchiveInventaire "1" *-- "0..*" LigneArchiveInventaire
+    LigneArchiveInventaire --> Materiel
+    Rapport "1" *-- "0..*" PieceJointeRapport
+    Rapport "0..1" -- "0..1" ArchiveInventaire : référence
+}
+
+@enduml

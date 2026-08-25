@@ -1,0 +1,458 @@
+\documentclass[12pt,a4paper]{report}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}&&
+\usepackage{longtable}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{tcolorbox}
+\usepackage{array}
+
+\geometry{margin=2.5cm}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.95}
+\definecolor{enspy-blue}{RGB}{0,102,153}
+
+\lstdefinestyle{jsonStyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{codepurple},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codegreen},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numbersep=5pt,
+    showstringspaces=false,
+    tabsize=2
+}
+\lstset{style=jsonStyle, literate={é}{{\'e}}1 {è}{{\`e}}1 {ê}{{\^e}}1 {à}{{\`a}}1 {ù}{{\`u}}1 {î}{{\^i}}1 {ô}{{\^o}}1}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small Rapport Technique -- Comptabilité Matière}
+\fancyhead[R]{\small ENSPY 2025--2026}
+\fancyfoot[C]{\thepage}
+
+\hypersetup{colorlinks=true, linkcolor=enspy-blue, urlcolor=enspy-blue}
+
+\title{
+    \vspace{-2cm}
+    \textbf{\Huge Rapport Technique}\\[0.5cm]
+    \textbf{\LARGE API Comptabilité Matière}\\[0.3cm]
+    \large Hôpital Fultang -- Module de Gestion des Stocks\\[1cm]
+    \large École Nationale Supérieure Polytechnique de Yaoundé (ENSPY)\\
+    \large Année Académique 2025--2026
+}
+\author{Équipe de Développement -- DeDjomo}
+\date{01 Mai 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+%  PARTIE 1 : IMPLÉMENTATION
+% ============================================================
+\part{Implémentation}
+
+\chapter{Technologies Utilisées}
+
+\section{Langage de programmation}
+\textbf{Python 3.x} a été retenu comme langage principal. Sa syntaxe claire, son écosystème riche en bibliothèques scientifiques et web, ainsi que sa large adoption dans le milieu académique et hospitalier en font un choix naturel pour un projet de gestion de stocks.
+
+\section{Framework}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Django 4.2.7} -- Framework web full-stack offrant un ORM puissant, un système de migrations automatiques et une interface d'administration intégrée.
+    \item \textbf{Django REST Framework (DRF) 3.14.0} -- Extension de Django pour la construction d'API RESTful. Fournit la sérialisation, les ViewSets, le routage automatique et la gestion des permissions.
+    \item \textbf{djangorestframework-simplejwt 5.3.1} -- Authentification par JSON Web Token (JWT).
+    \item \textbf{drf-spectacular 0.27.2} -- Génération automatique de la documentation OpenAPI 3.0 (Swagger UI et ReDoc).
+    \item \textbf{django-filter 23.5} -- Filtrage déclaratif des querysets via les paramètres d'URL.
+    \item \textbf{django-cors-headers 4.2.0} -- Gestion des en-têtes CORS pour la communication avec le frontend.
+\end{itemize}
+
+\section{Base de données}
+\textbf{PostgreSQL} (via \texttt{psycopg2-binary 2.9.7}) a été choisi pour sa robustesse, son support des transactions ACID, ses performances en environnement de production et sa compatibilité native avec Django.
+
+\begin{tcolorbox}[title=Configuration BD]
+\begin{verbatim}
+DB_NAME=comptamatiere
+DB_USER=nehemie
+DB_HOST=localhost
+DB_PORT=5432
+\end{verbatim}
+\end{tcolorbox}
+
+\section{Outils de développement}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Git} -- Contrôle de version distribué.
+    \item \textbf{Postman} -- Tests manuels et documentation des endpoints API.
+    \item \textbf{Gunicorn 21.2.0} -- Serveur WSGI pour le déploiement en production.
+    \item \textbf{python-dotenv / django-environ} -- Gestion sécurisée des variables d'environnement.
+\end{itemize}
+
+% -------------------------------------------------------
+\chapter{Architecture du Système}
+
+\section{Organisation en couches}
+L'API suit une architecture en couches stricte, conforme au patron \textit{Model--Serializer--View--URL} de Django REST Framework~:
+
+\begin{tcolorbox}[title=Structure du projet]
+\begin{verbatim}
+comptamatiere/
+├── core/                    # Configuration Django
+│   ├── settings.py
+│   ├── urls.py
+│   └── wsgi.py
+├── apps/
+│   └── comptabilite_matiere/
+│       ├── models/          # Couche Données (13 modèles)
+│       ├── serializers/     # Couche Sérialisation
+│       ├── views/           # Couche Logique (ViewSets)
+│       ├── tests/           # Suite de tests
+│       ├── permissions.py   # Contrôle d'accès
+│       └── urls.py          # Routage (DefaultRouter)
+├── manage.py
+└── requirements.txt
+\end{verbatim}
+\end{tcolorbox}
+
+\section{Description de l'architecture}
+\begin{enumerate}
+    \item \textbf{Couche Models} : 13 modèles Django organisés en fichiers séparés (héritage \texttt{Materiel} $\rightarrow$ \texttt{MaterielMedical}, \texttt{MaterielDurable}). Contient la logique métier critique (mise à jour automatique des stocks dans les méthodes \texttt{save()}).
+    \item \textbf{Couche Serializers} : Sérialiseurs dédiés par action (Create, Update, Read) pour chaque ressource. Validation des données entrantes.
+    \item \textbf{Couche Views} : ViewSets DRF avec actions personnalisées (\texttt{@action}). Chaque ViewSet utilise \texttt{get\_serializer\_class()} pour router vers le bon sérialiseur.
+    \item \textbf{Couche URLs} : Routage automatique via \texttt{DefaultRouter} de DRF. Préfixe global : \texttt{/api/compta\_matiere/}.
+\end{enumerate}
+
+\section{Mode de communication}
+\begin{itemize}
+    \item \textbf{Protocole} : REST over HTTP/HTTPS
+    \item \textbf{Format} : JSON (entrée et sortie)
+    \item \textbf{Authentification} : JWT (Bearer Token) via \texttt{simplejwt}
+    \item \textbf{Documentation} : Swagger UI (\texttt{/api/docs/}), ReDoc (\texttt{/api/redoc/})
+\end{itemize}
+
+% -------------------------------------------------------
+\chapter{Modules Développés}
+
+\section{Module Gestion des Matériels}
+\subsection{Matériel Base (\texttt{/api/compta\_matiere/materiels/})}
+CRUD complet + action \texttt{stock\_faible} (matériels avec stock $< 10$).
+
+\subsection{Matériel Médical (\texttt{/api/compta\_matiere/materiels-medicaux/})}
+CRUD + actions : \texttt{par\_categorie}, \texttt{stock\_faible} (seuil $< 20$), \texttt{alertes\_peremption}.
+Catégories : MEDICAMENT, CONSOMMABLE, REACTIF. Calcul automatique de la marge bénéficiaire.
+
+\subsection{Matériel Durable (\texttt{/api/compta\_matiere/materiels-durables/})}
+CRUD + actions : \texttt{mettre\_en\_reparation}, \texttt{remettre\_en\_service}, \texttt{en\_reparation}, \texttt{par\_localisation}.
+États : BON\_ETAT, EN\_REPARATION, REFORME.
+
+\section{Module Gestion des Besoins}
+\textbf{Endpoint} : \texttt{/api/compta\_matiere/besoins/}
+
+Flux complet d'émission et traitement des besoins par le personnel~:
+\begin{itemize}
+    \item Création avec lignes de besoin (\texttt{LigneBesoin})
+    \item Modification du statut : NON\_TRAITE $\rightarrow$ EN\_COURS $\rightarrow$ TRAITE / REJETE
+    \item Ajout de commentaire du directeur (action \texttt{ajouter\_commentaire})
+    \item Consultation personnelle (\texttt{mes\_besoins}) et groupement par statut (\texttt{par\_statut})
+\end{itemize}
+Date de traitement automatiquement renseignée lors du passage au statut TRAITE ou REJETE.
+
+\section{Module Gestion des Stocks (Entrées / Sorties)}
+\subsection{Livraisons (\texttt{/api/compta\_matiere/livraisons/})}
+Enregistrement des entrées de stock. Chaque \texttt{LigneLivraison} incrémente automatiquement le \texttt{quantite\_stock} du matériel associé. Le \texttt{montant\_total} de la livraison est recalculé automatiquement.
+Actions : \texttt{par\_fournisseur}, \texttt{statistiques}.
+
+\subsection{Sorties (\texttt{/api/compta\_matiere/sorties/})}
+Enregistrement des sorties. Chaque \texttt{LigneSortie} décrémente le stock avec vérification de disponibilité (lève \texttt{ValueError} si stock insuffisant). Calcul automatique du sous-total et du montant total.
+Motifs : VENTE, UTILISATION\_SERVICE, DEFECTUEUX, PERIME, PERTE.
+Actions : \texttt{par\_motif}, \texttt{mes\_sorties}, \texttt{statistiques}.
+
+\section{Module Inventaire}
+\textbf{Endpoint} : \texttt{/api/compta\_matiere/archives-inventaire/}
+
+Gestion des inventaires périodiques~:
+\begin{itemize}
+    \item Création d'une archive avec saisie des stocks réels via \texttt{LigneArchiveInventaire}
+    \item Mise à jour par lot (\texttt{batch\_update}) des lignes d'archive
+    \item Clôture de l'inventaire (\texttt{terminer}) : met à jour les stocks théoriques
+    \item Consultation des écarts (\texttt{differences}), ancien/nouveau stock
+\end{itemize}
+
+\section{Module Rapports et Communication}
+\textbf{Endpoint} : \texttt{/api/compta\_matiere/rapports/}
+
+Système de messagerie interne entre services~:
+\begin{itemize}
+    \item Envoi de rapports avec pièces jointes (\texttt{PieceJointeRapport})
+    \item Marquage comme lu (\texttt{mark-read})
+    \item Filtrage : envoyés (\texttt{sent}), reçus (\texttt{received}), non lus (\texttt{received/unread})
+    \item Types : GENERAL, INVENTAIRE, STOCK, LIVRAISON
+\end{itemize}
+
+\section{Gestion des erreurs et authentification}
+\begin{itemize}
+    \item \textbf{Authentification} : JWT via \texttt{simplejwt}. En mode développement (\texttt{DEBUG=True}), la permission \texttt{DevelopmentOrAuthenticated} autorise l'accès sans token.
+    \item \textbf{Validation} : DRF valide automatiquement les données via les sérialiseurs. Les validateurs Django (\texttt{MinValueValidator}, \texttt{RegexValidator}) protègent l'intégrité au niveau modèle.
+    \item \textbf{Erreurs métier} : \texttt{ValueError} levée pour les stocks insuffisants. Codes HTTP standard (400, 404, 201, 200).
+\end{itemize}
+
+% -------------------------------------------------------
+\chapter{Choix Techniques}
+
+\section{Pourquoi Django et DRF ?}
+\begin{itemize}
+    \item ORM intégré avec migrations automatiques, idéal pour un schéma de données complexe (13 modèles, héritage).
+    \item DRF fournit des ViewSets, un routage automatique et une sérialisation puissante, réduisant considérablement le code boilerplate.
+    \item Écosystème mature : documentation Swagger automatique (drf-spectacular), filtrage (django-filter), authentification JWT.
+    \item Alternative considérée : Flask + SQLAlchemy. Rejeté car nécessite plus de configuration manuelle pour atteindre le même niveau de fonctionnalité.
+\end{itemize}
+
+\section{Pourquoi PostgreSQL ?}
+\begin{itemize}
+    \item Support natif des transactions ACID, critique pour la cohérence des mouvements de stock.
+    \item Support des champs JSON natifs (utilisé pour \texttt{PieceJointeRapport.donnees\_json}).
+    \item Performances supérieures à SQLite pour les requêtes complexes (agrégations, jointures).
+    \item Compatibilité native avec Django ORM.
+\end{itemize}
+
+\section{Pourquoi cette structure modulaire ?}
+La séparation des modèles, sérialiseurs et vues en fichiers individuels favorise~:
+\begin{itemize}
+    \item La lisibilité et la maintenance du code.
+    \item Le travail collaboratif (merge conflicts réduits).
+    \item La testabilité (chaque module est testable indépendamment).
+\end{itemize}
+
+% -------------------------------------------------------
+\chapter{Exemples de Requêtes / Réponses API}
+
+\section{Créer un matériel}
+\begin{lstlisting}[title=POST /api/compta\_matiere/materiels/]
+// Requete
+{
+  "code_materiel": "MED-042",
+  "nom_Materiel": "Paracetamol 500mg",
+  "prix_achat_unitaire": "1500.00",
+  "quantite_stock": 200
+}
+
+// Reponse (201 Created)
+{
+  "idMateriel": 42,
+  "code_materiel": "MED-042",
+  "nom_Materiel": "Paracetamol 500mg",
+  "prix_achat_unitaire": "1500.00",
+  "quantite_stock": 200,
+  "date_derniere_modification": "2026-05-01T15:30:00Z"
+}
+\end{lstlisting}
+
+\section{Enregistrer une livraison}
+\begin{lstlisting}[title=POST /api/compta\_matiere/livraisons/]
+// Requete
+{
+  "bon_livraison_numero": "BL-2026-001",
+  "nom_fournisseur": "Pharma Cameroun",
+  "contact_fournisseur": "677123456",
+  "date_reception": "2026-05-01T10:00:00Z",
+  "montant_total": "0.00"
+}
+
+// Reponse (201 Created)
+{
+  "idLivraison": 1,
+  "bon_livraison_numero": "BL-2026-001",
+  "nom_fournisseur": "Pharma Cameroun",
+  "montant_total": "0.00"
+}
+\end{lstlisting}
+
+\section{Effectuer une sortie (erreur stock insuffisant)}
+\begin{lstlisting}[title=POST /api/compta\_matiere/lignes-sortie/ (400)]
+// Requete (stock disponible = 5)
+{
+  "id_sortie": 1,
+  "id_materiel": 42,
+  "code_materiel": "MED-042",
+  "nom_materiel": "Paracetamol 500mg",
+  "type_materiel": "MEDICAL",
+  "quantite": 100
+}
+
+// Reponse (400 Bad Request)
+{
+  "detail": "Stock insuffisant pour Paracetamol 500mg.
+             Disponible: 5"
+}
+\end{lstlisting}
+
+\section{Modifier le statut d'un besoin}
+\begin{lstlisting}[title=PATCH /api/compta\_matiere/besoins/1/modifier\_statut/]
+// Requete
+{ "statut": "TRAITE" }
+
+// Reponse (200 OK)
+{
+  "message": "Statut modifie avec succes en 'Traite'.",
+  "besoin": {
+    "idBesoin": 1,
+    "statut": "TRAITE",
+    "date_traitement_directeur": "2026-05-01T16:00:00Z"
+  }
+}
+\end{lstlisting}
+
+% ============================================================
+%  PARTIE 2 : TESTS
+% ============================================================
+\part{Tests}
+
+\chapter{Types de Tests Réalisés}
+
+\section{Tests unitaires}
+Fichiers : \texttt{test\_models.py}, \texttt{test\_materiel.py}, \texttt{test\_besoins.py}
+\begin{itemize}
+    \item Représentation textuelle (\texttt{\_\_str\_\_}) des modèles
+    \item Valeurs par défaut (statut \texttt{NON\_TRAITE} pour Besoin)
+    \item Validation des contraintes (stock négatif interdit)
+    \item Héritage des modèles (MaterielMedical hérite de Materiel)
+\end{itemize}
+
+\section{Tests d'intégration}
+Fichier : \texttt{test\_api\_views.py}
+\begin{itemize}
+    \item Requête GET sur la liste des matériels (code 200)
+    \item Requête POST pour créer un matériel (code 201)
+    \item Requête POST avec données invalides (code 400)
+    \item Authentification via \texttt{force\_authenticate}
+\end{itemize}
+
+\section{Tests fonctionnels (logique métier)}
+Fichiers : \texttt{test\_logic.py}, \texttt{test\_livraisons.py}, \texttt{test\_sorties.py}
+\begin{itemize}
+    \item Flux complet d'entrée de stock (livraison $\rightarrow$ incrémentation)
+    \item Flux complet de sortie de stock (sortie $\rightarrow$ décrémentation)
+    \item Protection contre le stock négatif (\texttt{ValueError})
+    \item Calcul automatique du montant total d'une livraison
+    \item Ajustement du stock lors de la modification d'une livraison
+\end{itemize}
+
+% -------------------------------------------------------
+\chapter{Outils de Test}
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Django TestCase} (\texttt{django.test.TestCase}) -- Framework de test intégré à Django. Fournit une base de données de test isolée avec rollback automatique par transaction. Choisi car natif et parfaitement intégré à l'ORM.
+    \item \textbf{DRF APITestCase} (\texttt{rest\_framework.test.APITestCase}) -- Extension de TestCase pour les tests d'API REST. Fournit un client HTTP de test avec support de l'authentification (\texttt{force\_authenticate}). Choisi car il simule des requêtes HTTP réelles sans serveur.
+    \item \textbf{Postman} -- Utilisé pour les tests manuels exploratoires et la documentation visuelle des endpoints. Choisi pour sa facilité d'utilisation et le partage de collections entre développeurs.
+\end{itemize}
+
+% -------------------------------------------------------
+\chapter{Scénarios de Test}
+
+\section{Gestion des matériels}
+\begin{tcolorbox}[title=Cas nominal]
+Création d'un matériel avec code unique, nom, prix et stock $\rightarrow$ Objet créé avec \texttt{\_\_str\_\_} correct.
+\end{tcolorbox}
+\begin{tcolorbox}[title=Cas d'erreur]
+Tentative de définir un stock négatif $\rightarrow$ \texttt{ValidationError} levée par \texttt{full\_clean()}.
+\end{tcolorbox}
+
+\section{Flux de livraison (entrée de stock)}
+\begin{tcolorbox}[title=Cas nominal]
+Ajout d'une ligne de livraison de 100 unités $\rightarrow$ Stock du matériel augmente de +100.
+\end{tcolorbox}
+\begin{tcolorbox}[title=Cas limite]
+Modification de la quantité livrée de 50 à 80 $\rightarrow$ Stock ajusté de +30 (différence calculée).
+\end{tcolorbox}
+
+\section{Flux de sortie (sortie de stock)}
+\begin{tcolorbox}[title=Cas nominal]
+Sortie de 30 unités (stock initial = 100) $\rightarrow$ Stock diminue à 70.
+\end{tcolorbox}
+\begin{tcolorbox}[title=Cas d'erreur]
+Tentative de sortie de 150 unités (stock = 100) $\rightarrow$ \texttt{ValueError}: ``Stock insuffisant''.
+\end{tcolorbox}
+
+\section{Calcul automatique des totaux}
+\begin{tcolorbox}[title=Cas nominal]
+Deux lignes de livraison : $(2 \times 1500) + (3 \times 2000) = 9000$ FCFA $\rightarrow$ \texttt{montant\_total} = 9000.00.
+\end{tcolorbox}
+
+\section{API REST}
+\begin{tcolorbox}[title=Cas nominal]
+GET \texttt{/api/compta\_matiere/materiels/} $\rightarrow$ Code 200, liste non vide.
+POST avec données valides $\rightarrow$ Code 201, objet persisté.
+\end{tcolorbox}
+\begin{tcolorbox}[title=Cas d'erreur]
+POST avec \texttt{prix\_achat\_unitaire = -10} $\rightarrow$ Code 400 Bad Request.
+\end{tcolorbox}
+
+% -------------------------------------------------------
+\chapter{Résultats Obtenus}
+
+Tous les tests ont été exécutés avec succès. Aucune régression détectée.
+
+\begin{center}
+\textbf{Commande :} \texttt{python manage.py test apps.comptabilite\_matiere.tests -{}-verbosity=2}
+\end{center}
+
+% -------------------------------------------------------
+\chapter{Tableau Récapitulatif des Tests}
+
+\begin{longtable}{|c|p{3.8cm}|p{2.2cm}|p{2cm}|c|p{3cm}|}
+\hline
+\textbf{N°} & \textbf{Fonctionnalité} & \textbf{Type} & \textbf{Outil} & \textbf{Résultat} & \textbf{Observations} \\
+\hline
+\endfirsthead
+\hline
+\textbf{N°} & \textbf{Fonctionnalité} & \textbf{Type} & \textbf{Outil} & \textbf{Résultat} & \textbf{Observations} \\
+\hline
+\endhead
+1 & Représentation textuelle Materiel & Unitaire & TestCase & \checkmark Succès & \_\_str\_\_ conforme \\
+\hline
+2 & Stock négatif interdit & Unitaire & TestCase & \checkmark Succès & ValidationError levée \\
+\hline
+3 & Statut par défaut Besoin & Unitaire & TestCase & \checkmark Succès & NON\_TRAITE \\
+\hline
+4 & Héritage MaterielMedical & Unitaire & TestCase & \checkmark Succès & Champs hérités OK \\
+\hline
+5 & Création matériel base & Unitaire & TestCase & \checkmark Succès & Persistance OK \\
+\hline
+6 & Entrée de stock (livraison) & Fonctionnel & TestCase & \checkmark Succès & +100 unités \\
+\hline
+7 & Sortie de stock & Fonctionnel & TestCase & \checkmark Succès & -30 unités \\
+\hline
+8 & Stock insuffisant & Fonctionnel & TestCase & \checkmark Succès & ValueError levée \\
+\hline
+9 & Calcul montant total & Fonctionnel & TestCase & \checkmark Succès & 9000.00 FCFA \\
+\hline
+10 & Modification livraison & Fonctionnel & TestCase & \checkmark Succès & Ajustement delta \\
+\hline
+11 & Sortie diminue stock & Fonctionnel & TestCase & \checkmark Succès & 100 $\rightarrow$ 70 \\
+\hline
+12 & Erreur sortie excessive & Fonctionnel & TestCase & \checkmark Succès & ValueError \\
+\hline
+13 & GET liste matériels & Intégration & APITestCase & \checkmark Succès & HTTP 200 \\
+\hline
+14 & POST créer matériel & Intégration & APITestCase & \checkmark Succès & HTTP 201 \\
+\hline
+15 & POST données invalides & Intégration & APITestCase & \checkmark Succès & HTTP 400 \\
+\hline
+\end{longtable}
+
+\end{document}

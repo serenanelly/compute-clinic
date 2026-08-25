@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose *)",
+      "Bash(docker exec *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" -X POST http://localhost:8080/auth/login -H \"Content-Type: application/json\" -d '{\"email\":\"x\",\"password\":\"y\"}')"
+    ]
+  }
+}

@@ -1,0 +1,40 @@
+# ============================================================
+# docker-compose.override.yml — Configuration de développement
+# Fultang / Medical-Monitoring
+# ============================================================
+# Ce fichier surcharge docker-compose.yml pour le développement.
+# Docker Compose le charge automatiquement s'il est présent.
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  # Surcharge du service medical-db
+  # ----------------------------------------------------------
+  medical-db:
+    # Publication du port pour permettre le debug depuis l'hôte
+    # (5434 côté hôte pour éviter un conflit avec d'autres projets sur 5433 ;
+    #  le backend joint la DB via le réseau interne medical-db:5432, non impacté)
+    ports:
+      - "5437:5432"
+
+  # ----------------------------------------------------------
+  # Surcharge du service backend
+  # ----------------------------------------------------------
+  backend:
+    # Montage du code source pour le rechargement à chaud (Hot Reload)
+    volumes:
+      - ./backend:/app
+
+    # Publication du port de l'application
+    ports:
+      - "8000:8000"
+
+    # Variables d'environnement spécifiques au dev
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - DEBUG=True
+
+    # Commande pour le développement : supporte le Hot Reload et sert les fichiers CSS
+    command: python manage.py runserver 0.0.0.0:8000

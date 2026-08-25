@@ -1,0 +1,47 @@
+services:
+  compta-matiere-db:
+    image: postgres:15-alpine
+    container_name: fultang-compta-matiere-db
+    environment:
+      POSTGRES_DB: comptamatiere
+      POSTGRES_USER: nehemie
+      POSTGRES_PASSWORD: nehemie
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nehemie -d comptamatiere"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - fultang_shared_network
+
+  backend:
+    build: .
+    container_name: fultang-compta-matiere-backend
+    ports:
+      - "8003:8000"
+    environment:
+      DB_NAME: comptamatiere
+      DB_USER: nehemie
+      DB_PASSWORD: nehemie
+      DB_HOST: compta-matiere-db
+      DB_PORT: 5432
+      DJANGO_SECRET_KEY: django-insecure-m-t$k@#v@q^4-@-(0*@d7o#*e^p-@!#0*(0-@*0*@*0*@*0*
+      DJANGO_DEBUG: "True"
+      DJANGO_ALLOWED_HOSTS: "*"
+    depends_on:
+      compta-matiere-db:
+        condition: service_healthy
+    networks:
+      - fultang_shared_network
+    volumes:
+      - .:/app
+
+volumes:
+  postgres_data:
+
+networks:
+  fultang_shared_network:
+    name: fultang_shared_network
+    external: true

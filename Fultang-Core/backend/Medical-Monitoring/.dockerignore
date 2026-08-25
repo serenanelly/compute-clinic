@@ -1,0 +1,51 @@
+# ============================================================
+# backend/.dockerignore — Fichiers exclus du contexte Docker
+# ============================================================
+# Lors du "docker build", Docker envoie le contenu du dossier
+# "backend/" au daemon Docker (c'est le "contexte de build").
+# Ce fichier liste ce qui doit être EXCLU de ce contexte,
+# pour accélérer le build et réduire la taille de l'image.
+# ============================================================
+
+# Environnements virtuels Python (souvent volumineux)
+venv/
+env/
+.venv/
+
+# Fichiers Python compilés (inutiles dans l'image)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Fichiers de configuration IDE
+.idea/
+.vscode/
+
+# Variables d'environnement (ne JAMAIS inclure dans l'image)
+.env
+*.env
+
+# Fichiers Git
+.git/
+.gitignore
+
+# Fichiers statiques déjà collectés localement
+staticfiles/
+mediafiles/
+
+# Logs
+*.log
+
+# Tests et couverture
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Documentation
+*.md
+docs/
+
+# Fichier Docker lui-même (inutile dans l'image)
+Dockerfile
+.dockerignore

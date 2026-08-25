@@ -1,0 +1,111 @@
+# ============================================================
+# docker-compose.yml — Orchestration des conteneurs
+# Fultang / Medical-Monitoring
+# ============================================================
+# Ce fichier définit et coordonne les deux services :
+#   - db       : le conteneur PostgreSQL
+#   - backend  : le conteneur Django + Gunicorn
+# Les deux communiquent via un réseau Docker interne.
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  # Service : base de données PostgreSQL
+  # ----------------------------------------------------------
+  medical-db:
+    # On utilise notre Dockerfile personnalisé plutôt que
+    # l'image officielle directement, car on a un script
+    # d'init et des configurations spécifiques.
+    build:
+      context: ./database
+      dockerfile: Dockerfile
+
+    # Nom du conteneur (facilite les commandes docker exec)
+    container_name: fultang-medical-db-server
+
+    # Chargement des variables d'environnement depuis .env
+    # Ces variables surchargent les valeurs par défaut du
+    # Dockerfile (POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD)
+    env_file:
+      - .env
+
+    # Persistance des données : même si le conteneur est
+    # supprimé et recréé, les données survivent dans le volume.
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+
+
+    # Réseau interne : seuls les conteneurs du même réseau
+    # peuvent communiquer entre eux.
+    networks:
+      - fultang_shared_network
+
+    # Vérification de santé : Docker considère le service
+    # "healthy" uniquement quand pg_isready répond.
+    # Le backend attendra que ce healthcheck passe.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ----------------------------------------------------------
+  # Service : backend Django
+  # ----------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
+    container_name: fultang-medical-backend
+
+    # Dépendance avec condition : le backend ne démarre que
+    # lorsque le service "db" est considéré comme "healthy"
+    # (le healthcheck ci-dessus a réussi).
+    depends_on:
+      medical-db:
+        condition: service_healthy
+
+    env_file:
+      - .env
+
+    environment:
+      - CLINICAL_AGENT_URL=http://fultang-clinical-agent:9000
+      - ALLOWED_HOSTS=localhost,127.0.0.1,backend,fultang-medical-backend
+
+    # Les volumes et ports sont définis dans docker-compose.override.yml
+    # pour le développement local afin de respecter les bonnes pratiques.
+
+    networks:
+      - fultang_shared_network
+
+    # Redémarrage automatique en cas de crash (utile en prod)
+    restart: unless-stopped
+
+
+# ============================================================
+# Volumes nommés
+# ============================================================
+# Les volumes nommés sont gérés par Docker et persistent
+# indépendamment du cycle de vie des conteneurs.
+# ============================================================
+volumes:
+  postgres_data:
+    name: fultang_medical_postgres_data
+  static_files:
+    name: fultang_medical_static_files
+
+
+# ============================================================
+# Réseau interne
+# ============================================================
+# Un réseau bridge dédié isole nos conteneurs du reste
+# des conteneurs Docker de la machine.
+# ============================================================
+networks:
+  fultang_shared_network:
+    name: fultang_shared_network
+    external: true

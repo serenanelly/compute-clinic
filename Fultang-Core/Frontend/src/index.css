@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* AntD 5.25+ : le sélecteur de taille de page (5/10/20 par page) est devenu
+   un champ de recherche, ce qui affichait une loupe/zone de saisie déroutante.
+   On le rend comme une simple liste déroulante (sécurité globale, en complément
+   de showSizeChanger:{showSearch:false} posé sur les tableaux). */
+.ant-pagination-options .ant-select-selection-search {
+    display: none !important;
+}
+.ant-pagination-options .ant-select-selector {
+    cursor: pointer !important;
+}
+
+@layer utilities {
+    /* Largeur de la barre de défilement */
+    .scrollbar::-webkit-scrollbar {
+        width: 5px;
+        height: 5px;
+    }
+
+    /* Piste de la barre de défilement */
+    .scrollbar::-webkit-scrollbar-track {
+        border-radius: 100vh;
+        background: #f7f4ed;
+    }
+
+    /* Pouce de la barre de défilement */
+    .scrollbar::-webkit-scrollbar-thumb {
+
+        border-radius: 100vh;
+        border: 2px solid #f6f7ed;
+    }
+
+    /* Effet hover sur le pouce */
+    .scrollbar::-webkit-scrollbar-thumb:hover {
+        background: linear-gradient(to bottom, #3d9d94, #1976D2);
+    }
+
+    /* Animations pour les modales */
+    .animate-fade-in {
+        animation: fadeIn 0.2s ease-out;
+    }
+
+    .animate-fade-in-up {
+        animation: fadeInUp 0.3s ease-out;
+    }
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: scale(0.95);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Pour Firefox */
+@supports (scrollbar-color: #E5E7EB #f6f7ed) {
+    * {
+        scrollbar-color:#E5E7EB #f6f7ed;
+        scrollbar-width: thin;
+    }
+}

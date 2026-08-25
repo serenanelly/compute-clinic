@@ -1,0 +1,509 @@
+' ============================================================
+' DIAGRAMMES DE SÉQUENCE SYSTÈME (DSS) - Comptabilité Matière
+' ============================================================
+
+' ============================================================
+' 1. INVENTAIRE ET MAINTENANCE
+' ============================================================
+
+@startuml DSS_Gerer_Cycle_Reparation
+title DSS - Gérer le cycle de réparation (Matériel Durable)
+actor "Comptable" as U
+participant "Système" as S
+
+U -> S : demanderListeMatérielsDurables()
+S --> U : listeMatérielsDurables
+
+U -> S : mettreEnRéparation(idMateriel)
+S --> U : confirmation("Matériel mis en réparation")
+
+note right of S : État passe de BON_ETAT à EN_REPARATION
+
+U -> S : remettreEnService(idMateriel)
+S --> U : confirmation("Matériel remis en service")
+
+note right of S : État passe de EN_REPARATION à BON_ETAT
+
+U -> S : consulterMatérielsEnRéparation()
+S --> U : listeMatérielsEnRéparation
+@enduml
+
+@startuml DSS_Realiser_Inventaire
+title DSS - Réaliser un inventaire périodique
+actor "Comptable" as U
+participant "Système" as S
+
+U -> S : créerArchiveInventaire(codeArchive, idResponsable)
+S --> U : archiveCréée(id, statut=OUVERT)
+
+U -> S : saisirStocksRéels(idArchive, lignes[])
+note right of U : <<extend>> Saisie batch update
+S --> U : lignesMisesÀJour
+
+U -> S : consulterDifférences(idArchive)
+S --> U : listeÉcarts(ancien, nouveau, différence)
+
+U -> S : validerÉcartsInventaire(idArchive)
+note right of U : <<include>> Valider les écarts
+S -> S : terminer() : mettre à jour stocks théoriques
+S --> U : archiveClôturée(statut=CLOTURE)
+@enduml
+
+@startuml DSS_Valider_Ecarts
+title DSS - Valider les écarts d'inventaire (include)
+actor "Comptable" as U
+participant "Système" as S
+
+U -> S : consulterAncienStock(idArchive)
+S --> U : listeAncienStock
+
+U -> S : consulterNouveauStock(idArchive)
+S --> U : listeNouveauStock
+
+U -> S : consulterDifférences(idArchive)
+S --> U : listeÉcarts(matériel, ancienStock, nouveauStock, différence, statut)
+
+U -> S : terminerInventaire(idArchive)
+S -> S : boucle sur lignes : materiel.quantite_stock = nouveau_stock
+S -> S : statut = CLOTURE, date_termine = now()
+S --> U : confirmation("Inventaire clôturé, stocks mis à jour")
+@enduml
+
+@startuml DSS_Batch_Update
+title DSS - Saisir les stocks réels - Batch update (extend)
+actor "Comptable" as U
+participant "Système" as S
+
+U -> S : préparerLignesInventaire(idArchive)
+S --> U : listeLignesVides(matériels actuels)
+
+U -> S : batchUpdate(idArchive, [{idMateriel, quantiteNouveauStock}, ...])
+S -> S : pour chaque ligne : maj quantite_nouveau_stock et calcul différence
+S --> U : confirmation(nbLignesMisesÀJour)
+@enduml
+
+
+' ============================================================
+' 2. REPORTING ET COMMUNICATION
+' ============================================================
+
+@startuml DSS_Consulter_Stats
+title DSS - Consulter les statistiques globales
+actor "Directeur" as U
+participant "Système" as S
+
+U -> S : consulterStatistiquesLivraisons()
+S --> U : stats(sommeMontants, nombreTotal, moyenne)
+
+U -> S : consulterStatistiquesSorties()
+S --> U : statsParMotif(VENTE, PERTE, CASSE, ...)
+
+U -> S : consulterAlerteStockFaible()
+S --> U : listeMatérielsStockFaible(stock < 20)
+@enduml
+
+@startuml DSS_Generer_Rapport
+title DSS - Générer un rapport d'activité
+actor "Comptable" as U
+participant "Système" as S
+
+U -> S : créerRapport(objet, corps, typeRapport, idDestinataire)
+S -> S : générerCodeRapport(RPT-YYYY-XXX)
+S --> U : rapportCréé(codeRapport)
+
+U -> S : ajouterPièceJointe(idRapport, typePiece, nomFichier, donneesJSON)
+S --> U : pièceJointeAjoutée
+
+U -> S : associerArchive(idRapport, idArchive)
+S --> U : confirmation
+@enduml
+
+@startuml DSS_Communiquer_Rapports
+title DSS - Communiquer par rapports internes
+actor "Expéditeur" as Exp
+actor "Destinataire" as Dest
+participant "Système" as S
+
+Exp -> S : envoyerRapport(objet, corps, idDestinataire)
+S --> Exp : rapportEnvoyé(code, date)
+
+Dest -> S : consulterRapportsReçus()
+S --> Dest : listeRapportsReçus
+
+Dest -> S : consulterRapportsNonLus()
+S --> Dest : listeRapportsNonLus
+
+Dest -> S : marquerCommeLu(idRapport)
+S -> S : est_lu=true, date_lecture=now()
+S --> Dest : confirmation("Rapport marqué comme lu")
+
+Exp -> S : consulterRapportsEnvoyés()
+S --> Exp : listeRapportsEnvoyés
+@enduml
+
+
+' ============================================================
+' 3. GESTION DES STOCKS
+' ============================================================
+
+@startuml DSS_Enregistrer_Livraison
+title DSS - Enregistrer une livraison (Entrée)
+actor "Comptable" as U
+participant "Système" as S
+
+U -> S : créerLivraison(bonNumero, fournisseur, contact, dateReception)
+S --> U : livraisonCréée(idLivraison)
+
+loop pour chaque matériel livré
+    U -> S : ajouterLigneLivraison(idLivraison, idMateriel, type, qteConforme, qteNonConforme, prixUnitaire)
+    S -> S : materiel.quantite_stock += qteConforme
+    S -> S : livraison.montant_total = somme(lignes)
+    S --> U : ligneLivraisonCréée
+end
+
+U -> S : consulterLivraison(idLivraison)
+S --> U : détailsLivraison(lignes, montantTotal)
+@enduml
+
+@startuml DSS_Effectuer_Sortie
+title DSS - Effectuer une sortie de matériel
+actor "Comptable" as U
+participant "Système" as S
+
+U -> S : créerSortie(numero, dateSortie, motif, idPersonnel)
+S --> U : sortieCréée(idSortie)
+
+loop pour chaque matériel sorti
+    U -> S : ajouterLigneSortie(idSortie, idMateriel, type, quantite, prixUnitaire)
+    alt stock suffisant
+        S -> S : materiel.quantite_stock -= quantite
+        S -> S : sousTotal = quantite * prixUnitaire
+        S -> S : sortie.montant_total = somme(lignes)
+        S --> U : ligneSortieCréée
+    else stock insuffisant
+        S --> U : erreur("Stock insuffisant. Disponible: X")
+    end
+end
+@enduml
+
+@startuml DSS_Gerer_Catalogue
+title DSS - Gérer le catalogue (Médical / Durable)
+actor "Comptable" as U
+participant "Système" as S
+
+== Matériel Médical ==
+U -> S : créerMatérielMédical(code, nom, prixAchat, prixVente, catégorie, unité)
+S --> U : matérielMédicalCréé
+
+U -> S : consulterParCatégorie()
+S --> U : matérielsGroupésParCatégorie(MEDICAMENT, CONSOMMABLE, REACTIF)
+
+== Matériel Durable ==
+U -> S : créerMatérielDurable(code, nom, prixAchat, localisation)
+S --> U : matérielDurableCréé(état=BON_ETAT)
+
+U -> S : consulterParLocalisation()
+S --> U : matérielsGroupésParLocalisation
+@enduml
+
+@startuml DSS_Alertes_Stock
+title DSS - Consulter les alertes stock faible
+actor "Comptable" as U
+participant "Système" as S
+
+U -> S : consulterAlertesStockFaible()
+S -> S : filtrer matériels où quantite_stock < 10
+S --> U : listeAlertes(count, matériels)
+
+U -> S : consulterAlertesStockMédical()
+S -> S : filtrer matériels médicaux où quantite_stock < 20
+S --> U : listeAlertesMédical(count, matériels)
+
+U -> S : consulterAlertesPeremption()
+S -> S : filtrer lignes avec date_peremption < now() + 30 jours
+S --> U : listeAlertesPeremption(count, alertes)
+@enduml
+
+
+' ============================================================
+' 4. GESTION DES BESOINS
+' ============================================================
+
+@startuml DSS_Valider_Rejeter_Besoin
+title DSS - Valider / Rejeter un besoin
+actor "Directeur" as U
+participant "Système" as S
+
+U -> S : consulterBesoinsParStatut()
+S --> U : besoinsGroupés(NON_TRAITE, EN_COURS, TRAITE, REJETE)
+
+U -> S : consulterDétailBesoin(idBesoin)
+S --> U : détailBesoin(lignes, motif, émetteur)
+
+U -> S : modifierStatut(idBesoin, "TRAITE")
+S -> S : date_traitement_directeur = now()
+S --> U : confirmation("Statut modifié en Traité")
+
+U -> S : ajouterCommentaireDécision(idBesoin, commentaire)
+note right of U : <<include>> Ajouter commentaire
+S -> S : commentaire_directeur = commentaire
+S --> U : confirmation("Commentaire ajouté")
+@enduml
+
+@startuml DSS_Ajouter_Commentaire
+title DSS - Ajouter un commentaire de décision (include)
+actor "Directeur" as U
+participant "Système" as S
+
+U -> S : ajouterCommentaire(idBesoin, commentaireDirecteur)
+S -> S : besoin.commentaire_directeur = commentaire
+S -> S : besoin.date_traitement_directeur = now()
+S --> U : besoinMisÀJour(commentaire, dateTraitement)
+@enduml
+
+@startuml DSS_Emettre_Besoin
+title DSS - Émettre un besoin (Lignes de besoin)
+actor "Personnel" as U
+participant "Système" as S
+
+U -> S : créerBesoin(motif, idPersonnelEmetteur)
+S -> S : statut = NON_TRAITE, date = now()
+S --> U : besoinCréé(idBesoin)
+
+loop pour chaque ligne de besoin
+    U -> S : ajouterLigneBesoin(idBesoin, nomMatériel, quantitéDemandée, priorité)
+    S --> U : ligneBesoinCréée
+end
+
+U -> S : consulterMonBesoin(idBesoin)
+S --> U : détailBesoin(lignes, statut)
+@enduml
+
+@startuml DSS_Consulter_Historique_Besoins
+title DSS - Consulter l'historique de ses besoins
+actor "Personnel" as U
+participant "Système" as S
+
+U -> S : consulterMesBesoins()
+S -> S : filtrer par idPersonnel_emetteur = utilisateur connecté
+S --> U : listeBesoins(date, motif, statut, commentaire)
+
+U -> S : filtrerParStatut(statut)
+S --> U : besoinsFiltres
+
+U -> S : consulterDétailBesoin(idBesoin)
+S --> U : détailComplet(lignes, commentaireDirecteur, dateTraitement)
+@enduml
+
+
+' ============================================================
+' DIAGRAMMES DE SÉQUENCE TECHNIQUE
+' ============================================================
+
+@startuml Tech_Livraison
+title Diagramme de Séquence Technique - Enregistrer une Livraison
+actor "Client HTTP" as C
+participant "DRF Router" as R
+participant "LivraisonViewSet" as V
+participant "LivraisonSerializer" as LS
+participant "LigneLivraisonSerializer" as LLS
+participant "Livraison" as LM
+participant "LigneLivraison" as LLM
+participant "Materiel" as M
+database "PostgreSQL" as DB
+
+C -> R : POST /api/compta_matiere/livraisons/
+R -> V : create(request)
+V -> LS : LivraisonSerializer(data=request.data)
+LS -> LS : is_valid(raise_exception=True)
+LS -> LM : Livraison.objects.create(...)
+LM -> DB : INSERT INTO comptabilite_matiere_livraison
+DB --> LM : OK
+LM --> LS : instance
+LS --> V : serializer.data
+V --> C : Response(201 Created)
+
+C -> R : POST /api/compta_matiere/lignes-livraison/
+R -> V : create(request)
+V -> LLS : LigneLivraisonSerializer(data=request.data)
+LLS -> LLS : is_valid()
+LLS -> LLM : LigneLivraison.objects.create(...)
+LLM -> LLM : save() - hook personnalisé
+LLM -> M : materiel.quantite_stock += qte_conforme
+M -> DB : UPDATE comptabilite_matiere_materiel SET quantite_stock=...
+DB --> M : OK
+LLM -> LM : livraison.montant_total = sum(lignes)
+LM -> DB : UPDATE comptabilite_matiere_livraison SET montant_total=...
+DB --> LM : OK
+LLM -> DB : INSERT INTO comptabilite_matiere_ligne_livraison
+DB --> LLM : OK
+LLM --> V : instance
+V --> C : Response(201 Created)
+@enduml
+
+@startuml Tech_Sortie
+title Diagramme de Séquence Technique - Effectuer une Sortie
+actor "Client HTTP" as C
+participant "DRF Router" as R
+participant "SortieViewSet" as V
+participant "LigneSortieSerializer" as LSS
+participant "LigneSortie" as LS
+participant "Materiel" as M
+database "PostgreSQL" as DB
+
+C -> R : POST /api/compta_matiere/lignes-sortie/
+R -> V : create(request)
+V -> LSS : LigneSortieSerializer(data=request.data)
+LSS -> LSS : is_valid()
+LSS -> LS : LigneSortie.objects.create(...)
+LS -> LS : save() - hook personnalisé
+
+alt materiel.quantite_stock >= quantite
+    LS -> M : materiel.quantite_stock -= quantite
+    M -> DB : UPDATE SET quantite_stock=...
+    DB --> M : OK
+    LS -> LS : sous_total = quantite * prix_unitaire
+    LS -> DB : INSERT INTO comptabilite_matiere_ligne_sortie
+    DB --> LS : OK
+    LS --> V : instance
+    V --> C : Response(201 Created)
+else stock insuffisant
+    LS --> V : raise ValueError("Stock insuffisant")
+    V --> C : Response(400 Bad Request)
+end
+@enduml
+
+@startuml Tech_Besoin_Statut
+title Diagramme de Séquence Technique - Modifier Statut Besoin
+actor "Client HTTP" as C
+participant "DRF Router" as R
+participant "BesoinViewSet" as V
+participant "ModifierStatutSerializer" as MSS
+participant "BesoinSerializer" as BS
+participant "Besoin" as B
+database "PostgreSQL" as DB
+
+C -> R : PATCH /api/compta_matiere/besoins/{id}/modifier_statut/
+R -> V : modifier_statut(request, pk)
+V -> V : get_object() -> besoin
+V -> MSS : ModifierStatutSerializer(besoin, data=request.data)
+MSS -> MSS : is_valid()
+
+alt valide
+    MSS -> B : besoin.statut = nouveau_statut
+    B -> B : save() - hook personnalisé
+    alt statut in [TRAITE, REJETE] and not date_traitement
+        B -> B : date_traitement_directeur = timezone.now()
+    end
+    B -> DB : UPDATE comptabilite_matiere_besoin SET statut=...
+    DB --> B : OK
+    V -> BS : BesoinSerializer(besoin)
+    BS --> V : serialized data
+    V --> C : Response(200 OK, {message, besoin})
+else invalide
+    V --> C : Response(400 Bad Request, errors)
+end
+@enduml
+
+@startuml Tech_Inventaire_Terminer
+title Diagramme de Séquence Technique - Terminer un Inventaire
+actor "Client HTTP" as C
+participant "DRF Router" as R
+participant "ArchiveInventaireViewSet" as V
+participant "ArchiveInventaire" as A
+participant "LigneArchiveInventaire" as L
+participant "Materiel" as M
+database "PostgreSQL" as DB
+
+C -> R : POST /api/compta_matiere/archives-inventaire/{id}/terminer/
+R -> V : terminer(request, pk)
+V -> V : get_object() -> archive
+
+alt archive.statut == OUVERT
+    V -> A : archive.terminer()
+    A -> A : self.lignes.all()
+    
+    loop pour chaque ligne
+        A -> L : ligne.quantite_nouveau_stock
+        A -> M : materiel.quantite_stock = nouveau_stock
+        M -> DB : UPDATE comptabilite_matiere_materiel
+        DB --> M : OK
+    end
+    
+    A -> A : statut = CLOTURE
+    A -> A : date_termine = timezone.now()
+    A -> DB : UPDATE comptabilite_matiere_archive_inventaire
+    DB --> A : OK
+    A --> V : OK
+    V --> C : Response(200 OK, "Inventaire clôturé")
+else archive déjà clôturée
+    V --> C : Response(400 Bad Request, "Inventaire déjà clôturé")
+end
+@enduml
+
+@startuml Tech_Rapport_MarkRead
+title Diagramme de Séquence Technique - Marquer un Rapport comme Lu
+actor "Client HTTP" as C
+participant "DRF Router" as R
+participant "RapportViewSet" as V
+participant "Rapport" as Rp
+database "PostgreSQL" as DB
+
+C -> R : POST /api/compta_matiere/rapports/{id}/mark-read/
+R -> V : mark_read(request, pk)
+V -> V : get_object() -> rapport
+
+alt not rapport.est_lu
+    V -> Rp : rapport.marquer_comme_lu()
+    Rp -> Rp : est_lu = True
+    Rp -> Rp : statut = "lu"
+    Rp -> Rp : date_lecture = timezone.now()
+    Rp -> DB : UPDATE comptabilite_matiere_rapport
+    DB --> Rp : OK
+    Rp --> V : OK
+    V --> C : Response(200 OK, "Rapport marqué comme lu")
+else déjà lu
+    V --> C : Response(200 OK, "Rapport déjà lu")
+end
+@enduml
+
+@startuml Tech_Reparation
+title Diagramme de Séquence Technique - Gérer Cycle de Réparation
+actor "Client HTTP" as C
+participant "DRF Router" as R
+participant "MaterielDurableViewSet" as V
+participant "MaterielDurableSerializer" as S
+participant "MaterielDurable" as MD
+database "PostgreSQL" as DB
+
+== Mettre en réparation ==
+C -> R : POST /api/compta_matiere/materiels-durables/{id}/mettre_en_reparation/
+R -> V : mettre_en_reparation(request, pk)
+V -> V : get_object() -> materiel
+
+alt materiel.Etat != EN_REPARATION
+    V -> MD : materiel.mettre_en_reparation()
+    MD -> MD : Etat = EN_REPARATION
+    MD -> DB : UPDATE SET Etat='EN_REPARATION'
+    DB --> MD : OK
+    V -> S : MaterielDurableSerializer(materiel)
+    V --> C : Response(200 OK, {message, materiel})
+else déjà en réparation
+    V --> C : Response(400 Bad Request, "Déjà en réparation")
+end
+
+== Remettre en service ==
+C -> R : POST /api/compta_matiere/materiels-durables/{id}/remettre_en_service/
+R -> V : remettre_en_service(request, pk)
+V -> V : get_object() -> materiel
+
+alt materiel.Etat != BON_ETAT
+    V -> MD : materiel.remettre_en_service()
+    MD -> MD : Etat = BON_ETAT
+    MD -> DB : UPDATE SET Etat='BON_ETAT'
+    DB --> MD : OK
+    V --> C : Response(200 OK, {message, materiel})
+else déjà en bon état
+    V --> C : Response(400 Bad Request, "Déjà en bon état")
+end
+@enduml
