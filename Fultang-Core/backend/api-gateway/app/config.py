@@ -13,7 +13,8 @@ class Settings(BaseSettings):
     SERVICE_INFRASTRUCTURE_URL: str = "http://fultang-infrastructure-web:8000"
     SERVICE_COMPTA_FINANCIERE_URL: str = "http://fultang-compta-financiere-backend:8000"
     SERVICE_COMPTA_MATIERE_URL: str = "http://fultang-compta-matiere-backend:8000"
-    
+    SERVICE_TENANT_URL: str = "http://fultang-tenant-web:8000"
+
     class Config:
         env_file = ".env"
 

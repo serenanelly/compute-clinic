@@ -39,6 +39,7 @@ app = FastAPI(
       - `/personnel/**` → Service Personnel
       - `/medical/**` → Medical Monitoring
       - `/infrastructure/**` → Gestion Infrastructures
+      - `/tenants/**` → Tenant Management (Phase 1 — Tenant Registry)
     * **Le Rate Limiting** pour la sécurité
     
     ### Documentation des services
@@ -423,6 +424,24 @@ async def root_hub():
                 </div>
                 <a href="/compta-matiere/docs/" target="_blank" class="btn btn-primary">Consulter Swagger UI ➔</a>
             </div>
+
+            <!-- Tenant Management -->
+            <div class="card">
+                <div>
+                    <div class="card-header">
+                        <div>
+                            <span class="service-prefix">multitenant</span>
+                            <h2 class="service-title">Tenant Management</h2>
+                        </div>
+                        <div class="status-badge" id="badge-fultang-tenant-web">
+                            <span class="status-dot"></span>
+                            <span class="status-text">Vérification...</span>
+                        </div>
+                    </div>
+                    <p class="service-desc">Tient le registre des établissements de santé (tenants) de l'écosystème FullTang — métadonnées uniquement.</p>
+                </div>
+                <a href="/tenants/docs/" target="_blank" class="btn btn-primary">Consulter Swagger UI ➔</a>
+            </div>
         </div>
     </div>
 
@@ -598,7 +617,7 @@ async def refresh_token(body: RefreshRequest):
 async def debug_dns():
     import socket
     results = {}
-    for host in ["fultang-personnel", "fultang-medical-backend", "fultang-infrastructure-web", "fultang-compta-financiere-backend", "fultang-compta-matiere-backend"]:
+    for host in ["fultang-personnel", "fultang-medical-backend", "fultang-infrastructure-web", "fultang-compta-financiere-backend", "fultang-compta-matiere-backend", "fultang-tenant-web"]:
         try:
             ip = socket.gethostbyname(host)
             results[host] = f"OK ({ip})"
@@ -626,6 +645,8 @@ async def smart_schema_proxy(request: Request):
         target_url = f"{settings.SERVICE_COMPTA_FINANCIERE_URL}/api/schema/"
     elif "compta-matiere" in referer:
         target_url = f"{settings.SERVICE_COMPTA_MATIERE_URL}/api/schema/"
+    elif "tenants" in referer:
+        target_url = f"{settings.SERVICE_TENANT_URL}/api/schema/"
 
     if target_url:
         async with httpx.AsyncClient() as c:
@@ -656,6 +677,7 @@ async def proxy_catch_all(path: str, request: Request):
     - `/personnel/**` → **Service Personnel** (`/api/**`)
     - `/medical/**` → **Medical Monitoring** (`/api/medical-monitoring/**`)
     - `/infrastructure/**` → **Gestion Infrastructures** (`/api/**`)
+    - `/tenants/**` → **Tenant Management** (`/api/**`)
 
     ### Exemples :
     - `GET /personnel/medecins/` → `GET http://fultang-personnel:8000/api/medecins/`
@@ -705,10 +727,16 @@ async def proxy_catch_all(path: str, request: Request):
             internal_path = f"api/compta_matiere/{sub_path}"
         target_url = f"{settings.SERVICE_COMPTA_MATIERE_URL}/{internal_path}"
 
+    # --- Tenant Management : /tenants/<sub_path> → /api/<sub_path>
+    elif path.startswith("tenants"):
+        sub_path = path[len("tenants"):].lstrip("/")
+        internal_path = sub_path if sub_path.startswith("api") else f"api/{sub_path}"
+        target_url = f"{settings.SERVICE_TENANT_URL}/{internal_path}"
+
     if not target_url:
         raise HTTPException(
             status_code=404,
-            detail=f"Route '/{path}' introuvable. Préfixes valides : /personnel/, /medical/, /infrastructure/, /compta-financiere/, /compta-matiere/"
+            detail=f"Route '/{path}' introuvable. Préfixes valides : /personnel/, /medical/, /infrastructure/, /compta-financiere/, /compta-matiere/, /tenants/"
         )
 
     return await _forward(request, target_url)

@@ -87,6 +87,9 @@ run_compose "Comptabilité Financière" "fultang-compta-financiere/docker-compos
 # 5. Comptabilité Matière
 run_compose "Comptabilité Matière" "ComptaMatiere/docker-compose.yml"
 
+# 6. Tenant Management (Tenant Registry)
+run_compose "Tenant Management" "tenant-service/docker-compose.yml"
+
 echo -e "\n${BLUE}======================================================${NC}"
 echo -e "${GREEN}🎉 Tous les microservices ont été lancés !${NC}"
 echo -e "${CYAN}👉 Hub Développeur : http://localhost:8080/${NC}"
