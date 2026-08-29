@@ -97,6 +97,11 @@ DATABASES = {
     }
 }
 
+# Jeton partagé pour la communication interne Gateway → Tenant Service
+# (voir tenants.permissions.IsInternalService). Jamais de valeur en dur ici :
+# non défini = accès refusé par défaut sur GET /tenants/resolve/.
+TENANT_SERVICE_INTERNAL_TOKEN = os.environ.get('TENANT_SERVICE_INTERNAL_TOKEN', '')
+
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators

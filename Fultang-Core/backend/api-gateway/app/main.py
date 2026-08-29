@@ -4,6 +4,12 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.auth.jwt_handler import decode_token, create_access_token, create_refresh_token
+from app.tenant.resolver import (
+    TenantInactiveError,
+    TenantNotFoundError,
+    TenantResolutionError,
+    TenantResolver,
+)
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -72,6 +78,15 @@ app.add_middleware(
 
 # Shared HTTP client for proxying
 client = httpx.AsyncClient()
+
+# Résolution hostname → tenant (Phase 2.1). Le Tenant Service reste la
+# seule source de vérité — voir app/tenant/resolver.py.
+tenant_resolver = TenantResolver(
+    client,
+    settings.SERVICE_TENANT_URL,
+    settings.TENANT_ROOT_DOMAIN,
+    settings.TENANT_SERVICE_INTERNAL_TOKEN,
+)
 
 
 @app.get("/", response_class=HTMLResponse, tags=["Hub"])
@@ -687,7 +702,28 @@ async def proxy_catch_all(path: str, request: Request):
     ### Headers injectés par la Gateway :
     - `X-User-ID`: ID de l'utilisateur (si authentifié)
     - `X-User-Roles`: Rôles de l'utilisateur (si authentifié)
+
+    ### Tenant Resolution (Phase 2.1) :
+    Le hostname de la requête (`<tenant_identifier>.fulltang.com`) est
+    résolu auprès du Tenant Service avant le routage. Un hostname hors
+    convention (ex: `localhost`, utilisé en développement) n'est PAS une
+    erreur : la requête continue simplement sans contexte tenant, comme
+    avant cette phase.
     """
+    # --- Tenant Resolution : hostname → TenantContext -------------------
+    # Résultat disponible pour la suite du traitement de la requête
+    # (request.state) — pas encore propagé aux microservices ni utilisé
+    # pour une vérification d'autorisation utilisateur (Phase 2.2).
+    hostname = request.headers.get("host", "")
+    try:
+        request.state.tenant_context = await tenant_resolver.resolve(hostname)
+    except TenantNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except TenantInactiveError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except TenantResolutionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
     target_url = None
 
     # --- Service Personnel : /personnel/<sub_path> → /api/<sub_path>

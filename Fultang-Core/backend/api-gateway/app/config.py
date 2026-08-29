@@ -15,6 +15,16 @@ class Settings(BaseSettings):
     SERVICE_COMPTA_MATIERE_URL: str = "http://fultang-compta-matiere-backend:8000"
     SERVICE_TENANT_URL: str = "http://fultang-tenant-web:8000"
 
+    # Domaine racine utilisé pour la résolution de tenant par sous-domaine
+    # (Phase 2.1) : <tenant_identifier>.TENANT_ROOT_DOMAIN
+    TENANT_ROOT_DOMAIN: str = "fulltang.com"
+
+    # Jeton partagé prouvant au Tenant Service que l'appelant est la
+    # Gateway (communication interne, GET /tenants/resolve/). Pas de valeur
+    # en dur : doit être fourni via variable d'environnement / secret, et
+    # identique à TENANT_SERVICE_INTERNAL_TOKEN côté tenant-service.
+    TENANT_SERVICE_INTERNAL_TOKEN: str = ""
+
     class Config:
         env_file = ".env"
 

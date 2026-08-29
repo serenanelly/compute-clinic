@@ -1,5 +1,6 @@
 from rest_framework import status
 from rest_framework.test import APITestCase
+from django.test import override_settings
 
 from .models import Tenant, TenantStatus
 from .services import TenantService
@@ -10,6 +11,9 @@ ADMIN_HEADERS = {'HTTP_X_USER_ID': 'test-user', 'HTTP_X_USER_ROLES': 'Admin'}
 PLATFORM_ADMIN_HEADERS = {'HTTP_X_USER_ID': 'platform-admin-test', 'HTTP_X_USER_ROLES': 'PLATFORM_ADMIN'}
 OTHER_ROLE_HEADERS = {'HTTP_X_USER_ID': 'medecin-test', 'HTTP_X_USER_ROLES': 'Medecin'}
 MULTI_ROLE_PLATFORM_ADMIN_HEADERS = {'HTTP_X_USER_ID': 'multi-role-test', 'HTTP_X_USER_ROLES': 'Medecin,PLATFORM_ADMIN'}
+
+# Jeton de test pour la communication interne Gateway → Tenant Service.
+TEST_INTERNAL_TOKEN = 'test-internal-service-token'
 
 
 class TenantServiceUnitTests(APITestCase):
@@ -157,3 +161,76 @@ class TenantManagementAuthorizationTests(APITestCase):
         self.client.credentials(**MULTI_ROLE_PLATFORM_ADMIN_HEADERS)
         response = self.client.get('/api/tenants/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+@override_settings(TENANT_SERVICE_INTERNAL_TOKEN=TEST_INTERNAL_TOKEN)
+class TenantResolveEndpointTests(APITestCase):
+    """
+    GET /api/tenants/resolve/ — réservé à la communication interne
+    Gateway → Tenant Service (Phase 2.1, correction post-review).
+
+    N'est PAS protégé par PLATFORM_ADMIN (la résolution a lieu avant toute
+    authentification utilisateur) mais n'est PAS public pour autant : il
+    exige le jeton de service interne partagé (IsInternalService).
+    """
+
+    def setUp(self):
+        self.tenant = Tenant.objects.create(name='Clinique Fultang', identifier='fultang')
+
+    def _resolve(self, identifier, token=None):
+        credentials = {}
+        if token is not None:
+            credentials['HTTP_X_INTERNAL_SERVICE_TOKEN'] = token
+        self.client.credentials(**credentials)
+        return self.client.get('/api/tenants/resolve/', {'identifier': identifier})
+
+    def test_valid_internal_token_is_authorized(self):
+        response = self._resolve('fultang', token=TEST_INTERNAL_TOKEN)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_missing_token_is_rejected(self):
+        response = self._resolve('fultang', token=None)
+        self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_wrong_token_is_rejected(self):
+        response = self._resolve('fultang', token='wrong-token')
+        self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_resolve_returns_minimal_fields_only(self):
+        response = self._resolve('fultang', token=TEST_INTERNAL_TOKEN)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(set(response.data.keys()), {'id', 'identifier', 'status'})
+        self.assertNotIn('name', response.data)
+
+    def test_resolve_unknown_identifier_returns_404(self):
+        response = self._resolve('does-not-exist', token=TEST_INTERNAL_TOKEN)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_resolve_without_identifier_param_returns_400(self):
+        self.client.credentials(HTTP_X_INTERNAL_SERVICE_TOKEN=TEST_INTERNAL_TOKEN)
+        response = self.client.get('/api/tenants/resolve/')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_resolve_reports_inactive_status_without_refusing(self):
+        """resolve() renvoie le statut tel quel : la politique d'accès est du ressort de l'appelant (Gateway)."""
+        self.tenant.status = TenantStatus.INACTIVE
+        self.tenant.save(update_fields=['status'])
+
+        response = self._resolve('fultang', token=TEST_INTERNAL_TOKEN)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], TenantStatus.INACTIVE)
+
+
+class TenantResolveWithoutConfiguredTokenTests(APITestCase):
+    """
+    Si TENANT_SERVICE_INTERNAL_TOKEN n'est pas configuré côté Tenant
+    Service (valeur par défaut : chaîne vide), resolve() doit refuser
+    l'accès — jamais accepter par défaut faute de configuration.
+    """
+
+    @override_settings(TENANT_SERVICE_INTERNAL_TOKEN='')
+    def test_resolve_denied_when_no_token_configured(self):
+        Tenant.objects.create(name='Clinique Fultang', identifier='fultang')
+        self.client.credentials(HTTP_X_INTERNAL_SERVICE_TOKEN='anything')
+        response = self.client.get('/api/tenants/resolve/', {'identifier': 'fultang'})
+        self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))

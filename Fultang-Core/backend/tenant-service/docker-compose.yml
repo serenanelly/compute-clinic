@@ -29,6 +29,10 @@ services:
       - "8005:8000"
     environment:
       - DB_HOST=tenant-db
+      # Jeton service-to-service Gateway → Tenant Service (Phase 2.1).
+      # Dev uniquement : à surcharger via un .env / secret en production.
+      # Doit être identique à la valeur utilisée par api-gateway.
+      - TENANT_SERVICE_INTERNAL_TOKEN=${TENANT_SERVICE_INTERNAL_TOKEN:-dev-local-only-shared-secret-change-me}
     depends_on:
       tenant-db:
         condition: service_healthy

@@ -24,13 +24,23 @@ FullTang distingue désormais deux niveaux d'identité :
     il n'introduit aucune notion de tenant courant.
 
 Ce module s'appuie exclusivement sur les headers X-User-ID / X-User-Roles
-déjà injectés par l'API Gateway (voir config.authentication) : aucun
-nouveau mécanisme d'authentification n'est introduit ici.
+déjà injectés par l'API Gateway (voir config.authentication) pour le CRUD
+Tenant Management, et sur un jeton interne partagé pour la communication
+service-to-service (résolution hostname → tenant, voir IsInternalService
+ci-dessous) : aucun nouveau protocole d'authentification n'est introduit,
+seulement une deuxième vérification par header, dans le même esprit que
+GatewayHeaderAuthentication.
 """
+import hmac
+
+from django.conf import settings
 from rest_framework.permissions import BasePermission
 
 # Rôle plateforme requis pour toute opération de Tenant Management.
 PLATFORM_ADMIN_ROLE = 'PLATFORM_ADMIN'
+
+# Header transportant le jeton interne Gateway → Tenant Service.
+INTERNAL_SERVICE_TOKEN_HEADER = 'X-Internal-Service-Token'
 
 
 class IsPlatformAdmin(BasePermission):
@@ -47,3 +57,29 @@ class IsPlatformAdmin(BasePermission):
     def has_permission(self, request, view):
         roles = getattr(request.user, 'roles', None) or []
         return PLATFORM_ADMIN_ROLE in roles
+
+
+class IsInternalService(BasePermission):
+    """
+    Autorise uniquement les appels porteurs du jeton interne partagé entre
+    la Gateway et le Tenant Service — utilisé exclusivement par
+    GET /tenants/resolve/ (Phase 2.1).
+
+    Ce jeton ne représente PAS un utilisateur : il prouve que l'appelant
+    est la Gateway elle-même (communication service-to-service), pas un
+    rôle métier. Comparaison en temps constant (hmac.compare_digest) pour
+    éviter les attaques par timing. Si aucun jeton n'est configuré côté
+    Tenant Service (TENANT_SERVICE_INTERNAL_TOKEN vide), l'accès est
+    refusé par défaut plutôt qu'accepté silencieusement.
+    """
+
+    message = "Jeton de service interne manquant ou invalide."
+
+    def has_permission(self, request, view):
+        expected = getattr(settings, 'TENANT_SERVICE_INTERNAL_TOKEN', '') or ''
+        provided = request.headers.get(INTERNAL_SERVICE_TOKEN_HEADER, '') or ''
+
+        if not expected:
+            return False
+
+        return hmac.compare_digest(provided, expected)

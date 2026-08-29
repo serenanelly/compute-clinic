@@ -10,6 +10,10 @@ services:
       - SERVICE_INFRASTRUCTURE_URL=http://fultang-infrastructure-web:8000
       - SERVICE_COMPTA_FINANCIERE_URL=http://fultang-compta-financiere-backend:8000
       - SERVICE_COMPTA_MATIERE_URL=http://fultang-compta-matiere-backend:8000
+      # Jeton service-to-service Gateway → Tenant Service (Phase 2.1).
+      # Dev uniquement : à surcharger via un .env / secret en production.
+      # Doit être identique à la valeur utilisée par tenant-service.
+      - TENANT_SERVICE_INTERNAL_TOKEN=${TENANT_SERVICE_INTERNAL_TOKEN:-dev-local-only-shared-secret-change-me}
     depends_on:
       - service-personnel
     networks:
