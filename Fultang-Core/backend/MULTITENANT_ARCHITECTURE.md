@@ -1,0 +1,875 @@
+# Architecture Multitenant — FullTang
+
+Documentation de référence technique. Retrace l'intégralité du travail multitenant depuis son démarrage, phase par phase, avec statut honnête de chaque brique : **Implémenté et testé**, **Partiellement implémenté**, ou **Non implémenté**.
+
+> Convention utilisée dans tout ce document : aucune fonctionnalité n'est présentée comme terminée si elle ne l'est pas réellement. Une brique "Partiellement implémentée" signifie qu'une partie fonctionne mais qu'il manque une étape connue et documentée.
+
+---
+
+## Sommaire
+
+1. [Architecture initiale](#1-architecture-initiale)
+2. [Architecture multitenant retenue](#2-architecture-multitenant-retenue)
+3. [Tenant Management](#3-tenant-management)
+4. [Tenant Identification](#4-tenant-identification)
+5. [Tenant Resolution](#5-tenant-resolution)
+6. [Authentification Tenant-Aware](#6-authentification-tenant-aware)
+7. [Gestion des utilisateurs](#7-gestion-des-utilisateurs)
+8. [Propagation du contexte](#8-propagation-du-contexte)
+9. [Bases de données](#9-bases-de-données)
+10. [Provisioning](#10-provisioning)
+11. [Migration](#11-migration)
+12. [Service-to-Service](#12-service-to-service)
+13. [Medical Monitoring / Clinical Agent](#13-medical-monitoring--clinical-agent)
+14. [Configuration Tenant](#14-configuration-tenant)
+15. [Sécurité](#15-sécurité)
+16. [Tests et validation](#16-tests-et-validation)
+17. [Historique des modifications](#17-historique-des-modifications)
+18. [Ce qui a été conservé](#18-ce-qui-a-été-conservé)
+19. [Ce qui reste à faire](#19-ce-qui-reste-à-faire)
+
+---
+
+## 1. Architecture initiale
+
+Avant tout travail multitenant, FullTang était un système **monotenant**, organisé en microservices indépendants.
+
+### 1.1 Organisation des services
+
+```
+                        ┌─────────────────────────┐
+   Client  ───────────► │   API Gateway (FastAPI)  │  :8080
+                        │   JWT + routage + rate   │
+                        │   limiting               │
+                        └────────────┬─────────────┘
+                                     │ proxy HTTP direct (catch-all)
+        ┌────────────────┬──────────┼───────────┬──────────────────┐
+        ▼                ▼          ▼           ▼                  ▼
+  service-personnel  Medical-   Gestion-    ComptaMatiere   fultang-compta-
+  (Django/DRF)       Monitoring Infrastructures (Django)    financiere
+  :8000              (Django)   (Django)                    (Django)
+        │
+        ▼ (DB propre à chaque service, PostgreSQL)
+```
+
+Chaque service métier possède sa **propre base PostgreSQL** (déjà "un service = une base", mais pas encore "un tenant = une base" — voir [§9](#9-bases-de-données)). `clinical-agent` (FastAPI + SQLAlchemy) communique directement avec `Medical-Monitoring` et une base tampon, hors du passage par la Gateway (voir [§12](#12-service-to-service)).
+
+### 1.2 Authentification initiale (avant multitenant)
+
+```
+Client → POST /auth/login {email, password}
+           │
+           ▼
+   API Gateway ── POST /api/auth/verify/ ──► service-personnel
+           │                                  (cherche email dans TOUS
+           │                                   les modèles de rôle,
+           │                                   sans aucune notion de
+           │                                   tenant)
+           ▼
+   JWT { sub, roles, email, nom, prenom }
+           │
+           ▼
+Requêtes suivantes → Gateway décode le JWT → injecte
+X-User-ID / X-User-Roles → service métier
+```
+
+- **JWT** : HS256, `python-jose`, access token (30 min) + refresh token (7 jours). Fichier : `api-gateway/app/auth/jwt_handler.py`.
+- **Confiance Gateway → services** : chaque service Django est protégé par une classe DRF maison, `GatewayHeaderAuthentication`, qui **fait confiance aveuglément** aux headers `X-User-ID`/`X-User-Roles` qu'elle reçoit — elle ne revérifie jamais le JWT elle-même. Ce fichier est dupliqué (copié-collé, pas de librairie partagée) dans **6 services** : `service-personnel`, `tenant-service`, `Gestion-Infrastructures`, `ComptaMatiere`, `Medical-Monitoring`, `fultang-compta-financiere` — avec des variantes de style mineures (voir [§17](#17-historique-des-modifications)).
+
+### 1.3 Organisation initiale des utilisateurs
+
+Le modèle `Personnel` (abstrait, `service-personnel/api/models.py`) est hérité par 10 modèles concrets (`Medecin`, `Infirmiere`, `Admin`, `Directeur`, ...), **chacun sa propre table** (héritage multi-table Django). Avant le multitenant :
+
+- `email` et `matricule` étaient **`unique=True` globalement, par table de rôle** — un `Medecin` et une `Infirmiere` pouvaient partager un email (tables distinctes), mais deux `Medecin` ne le pouvaient jamais, où qu'ils travaillent.
+- **Aucune notion d'établissement** n'existait : un seul pool d'utilisateurs pour tout FullTang.
+
+---
+
+## 2. Architecture multitenant retenue
+
+Décision structurante, actée dès la Phase 1 et respectée depuis :
+
+```
+Tenant (établissement de santé indépendant)
+  └── Users (personnel de CET établissement uniquement)
+```
+
+**Le tenant est au-dessus de l'utilisateur.** Il n'existe aucun pool d'utilisateurs partagé entre tenants.
+
+> **Une même personne travaillant dans deux établissements = deux comptes/utilisateurs distincts dans le système.** Pas de compte unique multi-tenant, pas de SSO cross-tenant (voir [§18](#18-ce-qui-a-été-conservé) — aucun système SSO n'a été introduit).
+
+Direction architecturale retenue à terme : **Database per Tenant** (chaque établissement aura sa propre base de données métier). **Non implémentée à ce stade** — voir [§9](#9-bases-de-données).
+
+Roadmap complète (12 phases) :
+
+| # | Phase | Statut |
+|---|---|---|
+| 1 | Tenant Management | Partiellement implémenté |
+| 2 | Tenant Identification & Resolution | Implémenté et testé |
+| 3 | Tenant-Aware Authentication | Implémenté et testé |
+| 4 | Tenant Context Propagation | Implémenté et testé pour les services métier classiques (4/4) ; Medical Monitoring / Clinical Agent exclus par décision architecturale, voir [§13](#13-medical-monitoring--clinical-agent) |
+| 5 | Tenant Database Management | Implémenté et testé (registre logique `TenantDatabase`/`PlatformService`) — voir [§9.1](#91-phase-5--tenant-database-management-registre-logique) |
+| 6 | Dynamic Database Routing | Non implémenté |
+| 7 | Tenant Provisioning | Non implémenté |
+| 8 | Data Migration | Non implémenté |
+| 9 | Tenant Configuration | Non implémenté |
+| 10 | Tenant Isolation & Security Testing | Non implémenté |
+| 11 | Tenant Lifecycle Management | Non implémenté |
+| 12 | Multi-Tenant Operations | Non implémenté |
+
+---
+
+## 3. Tenant Management
+
+**Statut : Partiellement implémenté** (structure + CRUD complets, configuration métier non commencée).
+
+### 3.1 Le service `tenant-service`
+
+Nouveau microservice Django/DRF autonome, calqué sur le gabarit `Gestion-Infrastructures`, avec sa **propre base PostgreSQL dédiée** (`tenant_registry_db`) — c'est le "control plane" du multitenant. Port 8005, conteneur `fultang-tenant-web`.
+
+```
+tenant-service/
+├── config/            → settings, urls, authentication (Gateway trust)
+└── tenants/
+    ├── models.py       → Tenant
+    ├── repositories.py → TenantRepository (accès ORM pur)
+    ├── services.py     → TenantService (opérations métier)
+    ├── serializers.py  → TenantSerializer, TenantStatusUpdateSerializer,
+    │                     TenantResolutionSerializer
+    ├── permissions.py  → IsPlatformAdmin, IsInternalService
+    ├── views.py        → TenantViewSet
+    └── tests.py        → 21 tests
+```
+
+### 3.2 Modèle `Tenant`
+
+```python
+class Tenant(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)              # nom métier affiché
+    identifier = models.SlugField(max_length=100, unique=True)  # technique, stable
+    status = models.CharField(choices=TenantStatus.choices, default=ACTIVE)
+    created_at = models.DateTimeField(auto_now_add=True)
+```
+
+Conçu pour extension ultérieure **sans refonte** : pas de configuration métier, pas de modules, pas de feature flags (volontairement, réservé à la Phase 9 — voir [§14](#14-configuration-tenant)).
+
+### 3.3 Endpoints (CRUD)
+
+| Méthode | Route | Autorisation | Statut |
+|---|---|---|---|
+| `POST` | `/api/tenants/` | `PLATFORM_ADMIN` | Implémenté et testé |
+| `GET` | `/api/tenants/` | `PLATFORM_ADMIN` | Implémenté et testé |
+| `GET` | `/api/tenants/{id}/` | `PLATFORM_ADMIN` | Implémenté et testé |
+| `PATCH` | `/api/tenants/{id}/status/` | `PLATFORM_ADMIN` | Implémenté et testé (activation/désactivation) |
+| `GET` | `/api/tenants/resolve/?identifier=` | `IsInternalService` (jeton interne) | Implémenté et testé — usage exclusif Gateway |
+
+Exposés à travers la Gateway sous `/tenants/**` (proxy `api-gateway/app/main.py`).
+
+### 3.4 Administration / autorisation
+
+Distinction actée et implémentée (correction Phase 1) :
+
+- **PLATFORM SCOPE** : `PLATFORM_ADMIN` — hors des tenants, seul rôle autorisé à gérer le Tenant Registry.
+- **TENANT SCOPE** : le rôle métier `ADMIN` (administrateur d'établissement) **n'a explicitement aucun accès** au Tenant Registry — vérifié par tests (401 anonyme / 403 `ADMIN` / 200-201 `PLATFORM_ADMIN`).
+
+### 3.5 Ce qui n'est PAS implémenté
+
+- **Suppression/archivage de tenant** : aucun endpoint `DELETE`.
+- **Configuration métier d'un tenant** (modules activés, feature flags, formulaires) — voir [§14](#14-configuration-tenant).
+- **Aucun flux ne permet actuellement d'associer un utilisateur réel à un tenant via l'API** (voir [§10](#10-provisioning)).
+- **Aucun compte `PLATFORM_ADMIN` réel n'existe** dans `service-personnel` — le rôle est vérifié techniquement (tests avec headers simulés) mais aucun utilisateur de ce type ne peut se connecter via le flux de login réel aujourd'hui.
+
+---
+
+## 4. Tenant Identification
+
+**Statut : Implémenté et testé**, dans les limites décrites ci-dessous.
+
+### 4.1 Information utilisée
+
+Le **sous-domaine du hostname de la requête HTTP** :
+
+```
+https://hopital-central.fulltang.com
+                 │
+                 └──► identifier = "hopital-central"
+```
+
+`identifier` (≠ `name`, voir [§3.2](#32-modèle-tenant)) est l'unique information utilisée pour l'identification — stable, ne casse jamais une intégration existante même si le nom affiché change.
+
+### 4.2 Où cela se fait
+
+Uniquement côté **API Gateway** (`api-gateway/app/tenant/resolver.py`, méthode `TenantResolver.extract_identifier()`). Aucun autre service n'identifie un tenant par lui-même.
+
+### 4.3 Validations effectuées
+
+| Cas | Comportement |
+|---|---|
+| `<identifier>.fulltang.com` | Extraction réussie |
+| `localhost`, `localhost:8080` | Hors convention → `None` (pas une erreur, dev local préservé) |
+| `fulltang.com` (domaine racine seul) | Hors convention → `None` |
+| `example.com` (domaine tiers) | Hors convention → `None` |
+| `api.hopital-central.fulltang.com` (sous-domaine imbriqué) | Hors convention → `None` |
+
+Domaine racine **configurable** via `TENANT_ROOT_DOMAIN` (variable d'environnement, défaut `fulltang.com`, `pydantic-settings`) — aucune valeur en dur dans le code.
+
+### 4.4 Fiabilité
+
+- **Fiable** : l'extraction du sous-domaine est déterministe et testée (6 tests unitaires dédiés).
+- **Limite connue** : le hostname prouve uniquement *"quel tenant est visé"*, jamais *"qui a le droit d'y accéder"* — cette distinction est respectée dans tout le code (voir [§15](#15-sécurité)).
+- **À améliorer** : seul le schéma `<identifier>.<root_domain>` est supporté. Domaines personnalisés (`www.hopital-central.com`) et résolution par path/header ne sont **pas implémentés** (exclus explicitement du périmètre).
+
+---
+
+## 5. Tenant Resolution
+
+**Statut : Implémenté et testé** pour le flux hostname → tenant. **Non lié à l'autorisation utilisateur** (volontairement, voir [§15](#15-sécurité)).
+
+### 5.1 Rôle et emplacement
+
+`TenantResolver` (`api-gateway/app/tenant/resolver.py`), instancié une fois au démarrage de la Gateway (`app/main.py`), appelé dans `proxy_catch_all()` **avant** tout routage vers un microservice métier.
+
+### 5.2 Fonctionnement
+
+```
+hostname
+   │
+   ▼
+extract_identifier()  ──► None ──► pas de contexte tenant, requête continue (CAS 4/5)
+   │
+   ▼ identifier
+GET tenant-service/api/tenants/resolve/?identifier=<x>
+   (header X-Internal-Service-Token — voir §12)
+   │
+   ├── 404 ──► TenantNotFoundError  (CAS 2)
+   ├── status != ACTIVE ──► TenantInactiveError  (CAS 3)
+   └── 200 + ACTIVE ──► TenantContext(tenant_id, tenant_identifier, status)  (CAS 1)
+```
+
+`tenant-service` reste la **seule source de vérité** — aucune liste de tenants n'est dupliquée côté Gateway (vérifié par test : `test_resolve_uses_tenant_service_as_source_of_truth`).
+
+### 5.3 `TenantContext`
+
+```python
+@dataclass(frozen=True)
+class TenantContext:
+    tenant_id: str
+    tenant_identifier: str
+    status: str   # toujours "ACTIVE" ici (sinon exception levée avant construction)
+```
+
+### 5.4 Cas d'erreur gérés
+
+| Cas | Comportement HTTP (Gateway) |
+|---|---|
+| Hostname valide, tenant ACTIVE | Résolution réussie, requête continue |
+| Hostname valide, tenant inexistant | `404`, **aucun** appel au service métier |
+| Tenant existant mais INACTIVE | `403`, **aucun** appel au service métier |
+| Hostname hors convention | Pas d'erreur — `tenant_context = None`, comportement pré-Phase-2 préservé |
+| `tenant-service` injoignable | `503` |
+
+### 5.5 Tests
+
+19 tests dans `api-gateway/tests/test_tenant_resolver.py` : extraction, résolution (succès/inconnu/inactif/injoignable), non-hardcoding, jeton interne (voir [§12](#12-service-to-service)).
+
+### 5.6 Décisions prises
+
+- Domaine unique `<identifier>.fulltang.com` (pas de domaines personnalisés pour l'instant).
+- Un hostname hors convention n'est PAS une erreur (compatibilité dev locale).
+- Le endpoint `GET /tenants/resolve/` n'est PAS public — corrigé après une revue de sécurité (voir [§12](#12-service-to-service)).
+
+---
+
+## 6. Authentification Tenant-Aware
+
+**Statut : Implémenté et testé.**
+
+### 6.1 Association utilisateur ↔ tenant
+
+`Personnel.tenant_id` (`service-personnel/api/models.py`) : `UUIDField(null=True, blank=True, editable=False, db_index=True)`, présent sur les 10 modèles concrets via l'héritage abstrait.
+
+- **`editable=False`** : choix délibéré — DRF exclut automatiquement ce champ de l'écriture sur tous les serializers `fields = '__all__'` existants. **Aucun client ne peut jamais définir son propre `tenant_id`** via l'API CRUD (`POST /api/medecins/`, etc.), sans avoir eu à modifier un seul serializer.
+- **`null=True`** : un `tenant_id` absent = compte du "pool non assigné" (comptes créés avant le multitenant, ou dev local) — voir [§11](#11-migration).
+
+### 6.2 Contraintes d'unicité (scopées par tenant)
+
+Avant : `email`/`matricule` étaient `unique=True` **globalement**. Ceci **empêchait physiquement** le principe "même personne dans 2 établissements = 2 comptes" — corrigé :
+
+```python
+class Meta:
+    abstract = True
+    constraints = [
+        UniqueConstraint(fields=['tenant_id', 'email'], name='%(app_label)s_%(class)s_unique_email_per_tenant'),
+        UniqueConstraint(fields=['tenant_id', 'matricule'], name='%(app_label)s_%(class)s_unique_matricule_per_tenant'),
+    ]
+```
+
+Migration `service-personnel/api/migrations/0006_admin_tenant_id_comptablefinancier_tenant_id_and_more.py` : 10× `AddField(tenant_id)`, 20× `AlterField` (email/matricule), 20× `AddConstraint` — un jeu par modèle concret.
+
+> **Limite connue** : Postgres ne considère pas deux `NULL` comme égaux — l'unicité `(tenant_id, email)` ne s'applique donc pas entre plusieurs comptes du pool non assigné. Comportement transitoire, sans impact tant que la Migration ([§11](#11-migration)) n'a pas eu lieu.
+
+### 6.3 Recherche utilisateur par email + tenant
+
+`AuthVerifyView.post()` (`service-personnel/api/views.py`) — `tenant_id` fourni **par la Gateway**, jamais par le client :
+
+```python
+user = model.objects.get(email=email, tenant_id=tenant_id)  # tenant_id peut être None
+```
+
+`tenant_id=None` recherche explicitement parmi le pool non assigné — comportement délibéré pour ne pas casser le login en environnement de développement local.
+
+### 6.4 `tenant_id` dans le JWT
+
+`api-gateway/app/main.py::login()` :
+
+```
+Host (hostname requête)
+  → tenant_resolver.resolve()   [réutilisé, non modifié]
+  → tenant_id (ou None si hors convention)
+  → POST verify/ {email, password, tenant_id}
+  → JWT { sub, tenant_id, roles, email, nom, prenom, exp, type }
+```
+
+`tenant_id` vient **exclusivement** de la résolution serveur (jamais de la réponse `verify/`, jamais du client).
+
+### 6.5 Login — cas gérés
+
+| Cas | Comportement |
+|---|---|
+| Hostname valide, tenant ACTIVE, identifiants valides pour ce tenant | `200`, JWT avec `tenant_id` correct |
+| Hostname valide, tenant inexistant | `404`, **aucun** appel à `service-personnel` |
+| Tenant existant mais INACTIVE | `403`, **aucun** appel à `service-personnel` |
+| Utilisateur inexistant dans le tenant demandé | `401` (même si le même email existe dans un autre tenant) |
+| Hostname hors convention (dev local) | `tenant_id=None`, login inchangé vs avant cette phase |
+
+### 6.6 Refresh token
+
+`refresh_token()` propage `tenant_id` du refresh token vers le nouvel access token — **sans re-résolution ni re-vérification du statut du tenant** (comportement identique aux autres claims comme `roles`/`email`, qui ne sont pas non plus re-vérifiés au refresh — cohérent avec l'existant, pas une régression).
+
+### 6.7 Contrôle tenant demandé vs tenant du token
+
+`proxy_catch_all()` (`api-gateway/app/main.py`) :
+
+```python
+user_payload = _decode_bearer_token(request)   # décodé UNE FOIS
+if tenant_context is not None and user_payload is not None:
+    if user_payload.get("tenant_id") != tenant_context.tenant_id:
+        raise HTTPException(403, "Ce token n'est pas valide pour l'établissement demandé.")
+```
+
+| Situation | Résultat |
+|---|---|
+| Token Tenant A → requête sur Tenant A | Autorisée |
+| Token Tenant A → requête sur Tenant B | `403` |
+| Token invalide/expiré | Comportement 401 existant inchangé (pas de 403 tenant) |
+| Requête anonyme | Comportement existant inchangé |
+| Hostname hors convention (pas de tenant demandé) | Pas de comparaison possible, requête continue |
+
+### 6.8 Tests réalisés
+
+- `service-personnel/api/tests.py` : 11 tests — `AuthVerifyTenantScopingTests` (5), `PersonnelTenantUniquenessTests` (2), `GatewayHeaderAuthenticationTenantTests` (3, voir [§8](#8-propagation-du-contexte)), exécutés **dans le conteneur Docker réel, contre PostgreSQL réel**.
+- `api-gateway/tests/test_login_tenant_context.py` : 10 tests (login, refresh, mismatch, tenant inconnu/inactif, utilisateur inconnu).
+- **Vérification end-to-end réelle** (stack Docker complète, comptes réels créés) : login, JWT décodé et inspecté, requêtes autorisées/refusées, refresh, tous les cas confirmés en conditions réelles (pas seulement mockées).
+
+### 6.9 Fichiers modifiés
+
+`service-personnel/api/models.py`, `api/views.py`, `api/migrations/0006_...py`, `api/tests.py` ; `api-gateway/app/main.py`.
+
+---
+
+## 7. Gestion des utilisateurs
+
+Décision : **Tenant → Users**, pas de pool global. Conséquences concrètes déjà en place :
+
+- Les données utilisateur **ne sont pas mélangées entre tenants** au niveau de l'unicité (`UniqueConstraint(tenant_id, email)`) et de la recherche d'authentification (`get(email=, tenant_id=)`).
+- **Important — nuance à ne pas ignorer** : cette séparation concerne l'**authentification**. Les endpoints CRUD métier existants (`GET /api/medecins/`, `GET /api/admins/`, ...) **ne filtrent PAS encore par tenant** — ils retournent aujourd'hui tout le contenu de leur table, tous tenants confondus. Ce n'est **pas un oubri de cette phase** : l'isolation des données métier est explicitement hors périmètre (voir [§9](#9-bases-de-données) et [§19](#19-ce-qui-reste-à-faire)).
+
+---
+
+## 8. Propagation du contexte
+
+**Statut : Implémenté et testé** (cette tâche), avec un **fix de sécurité corollaire** découvert et corrigé pendant l'audit demandé.
+
+> **Décision architecturale** — Le contexte tenant est propagé aux services métier classiques utilisant le contexte utilisateur, mais tous les services ne sont pas rendus tenant-aware de manière uniforme. Les services ayant des flux métier spécifiques, notamment Medical Monitoring et Clinical Agent, feront l'objet d'une conception tenant dédiée.
+
+### 8.1 Flux cible
+
+```
+Client
+  │  Authorization: Bearer <JWT>
+  ▼
+API Gateway
+  │  1. decode_token(JWT) → payload { sub, tenant_id, roles, ... }   [UNE SEULE FOIS]
+  │  2. tenant_resolver.resolve(hostname) → tenant_context
+  │  3. si tenant_context et payload : tenant_context.tenant_id == payload.tenant_id ? sinon 403
+  │  4. _strip_client_identity_headers()  → supprime tout X-User-*/X-Tenant-ID
+  │     envoyé directement par le client, AVANT réinjection
+  │  5. _build_user_headers() → réinjecte depuis le payload validé UNIQUEMENT
+  ▼
+X-User-ID: <payload.sub>
+X-User-Roles: <payload.roles>
+X-Tenant-ID: <payload.tenant_id>          (absent si tenant_id est None)
+  ▼
+Service métier (ex: service-personnel)
+  │  GatewayHeaderAuthentication.authenticate()
+  ▼
+request.user = GatewayUser(id, roles, tenant_id)
+```
+
+### 8.2 Rôle de `GatewayUser` / `GatewayHeaderAuthentication`
+
+`GatewayHeaderAuthentication` (classe DRF `BaseAuthentication`) fait confiance aux headers **déjà validés par la Gateway** — elle ne revérifie pas le JWT (inchangé, voir [§18](#18-ce-qui-a-été-conservé)). Elle construit un objet `GatewayUser` léger :
+
+```python
+class GatewayUser:
+    def __init__(self, user_id, roles, tenant_id=None):
+        self.id = user_id
+        self.roles = roles
+        self.tenant_id = tenant_id     # ← nouveau
+        ...
+```
+
+### 8.3 Fix de sécurité corollaire — headers d'identité forgés
+
+**Découverte pendant l'audit explicitement demandé (Partie 2 de la tâche).** Avant cette phase, `_forward()` faisait `headers = dict(request.headers)` (copie **tous** les headers du client, y compris `X-User-ID`/`X-User-Roles` si le client les envoyait lui-même), puis ne les **écrasait** que si un JWT valide était présent — sans jamais les **supprimer** en l'absence de token valide. Un client anonyme (ou avec un token invalide) pouvait donc faire transiter ses propres `X-User-ID: <uuid>` / `X-User-Roles: PLATFORM_ADMIN` / (désormais) `X-Tenant-ID: <tenant>` directement vers un service métier, qui les aurait acceptés aveuglément.
+
+**Corrigé** par `_strip_client_identity_headers()`, appelée systématiquement dans `_forward()` avant toute réinjection — indépendamment de la présence d'un token valide.
+
+**Vérifié en conditions réelles** (pas seulement en test mocké) :
+```
+curl -H "Host: hopital-central.fulltang.com" \
+     -H "X-User-ID: fake-admin-id" -H "X-User-Roles: PLATFORM_ADMIN" \
+     -H "X-Tenant-ID: <tenant>" http://localhost:8080/personnel/medecins/
+→ 401 (headers forgés supprimés avant transmission)
+```
+et, avec un token légitime accompagné d'un `X-Tenant-ID` forgé dans la même requête → seul le tenant du JWT est transmis, jamais la valeur forgée (`test_client_supplied_x_tenant_id_is_overridden_by_validated_token`, confirmé en live).
+
+### 8.4 Services mis à jour vs non mis à jour
+
+Décision fondamentale de cette étape de finalisation : **ne pas rendre tous les services tenant-aware de manière uniforme**. Trois catégories ont été distinguées :
+
+1. **Services métier classiques** utilisant le contexte utilisateur générique — adaptés.
+2. **Medical Monitoring** — rôle métier particulier (source de données médicales, flux spécifique avec Clinical Agent), **volontairement non adapté** ici : voir [§13](#13-medical-monitoring--clinical-agent).
+3. **Clinical Agent** — n'est pas un service utilisateur ; l'autorisation par tenant relève de la future Tenant Configuration, **volontairement non adapté** ici : voir [§13](#13-medical-monitoring--clinical-agent).
+
+| Service | `GatewayUser`/`GatewayHeaderAuthentication` mis à jour (lit `X-Tenant-ID`) | Catégorie |
+|---|---|---|
+| `service-personnel` | **Oui** — testé (Docker + Postgres réels) | Service métier classique |
+| `Gestion-Infrastructures` | **Oui** — testé (sqlite local + Docker réel) | Service métier classique |
+| `ComptaMatiere` | **Oui** — testé (sqlite local) | Service métier classique |
+| `fultang-compta-financiere` | **Oui** — testé (sqlite local, y compris le chemin de fallback JWT) | Service métier classique |
+| `tenant-service` | Non | Cas particulier (voir ci-dessous) |
+| `Medical-Monitoring` | **Non — décision volontaire** | Rôle métier spécifique, voir [§13](#13-medical-monitoring--clinical-agent) |
+| `clinical-agent` | **Non — décision volontaire** | Pas un service utilisateur, voir [§13](#13-medical-monitoring--clinical-agent) |
+
+`tenant-service` n'a pas été mis à jour : ses endpoints CRUD sont protégés par `PLATFORM_ADMIN`, un rôle de portée plateforme, transversal à tous les tenants par nature — `tenant_id` n'a pas de sens pour cette identité. Non traité par choix, pas par oubli.
+
+**Modification par service (Phase 4, cette tâche)** — pour chacun des 4 services métier classiques, la même modification minimale et mécanique :
+
+```python
+class GatewayUser:
+    def __init__(self, user_id, roles, tenant_id=None, ...):
+        self.tenant_id = tenant_id   # ← seul ajout
+
+class GatewayHeaderAuthentication(...):
+    def authenticate(self, request):
+        ...
+        tenant_id = request.META.get("HTTP_X_TENANT_ID") or None   # ← seul ajout
+        return (GatewayUser(user_id=..., roles=..., tenant_id=tenant_id), None)
+```
+
+`fultang-compta-financiere` a un second chemin (fallback JWT décodé localement quand les headers `X-User-*` sont absents) — `tenant_id` y a été ajouté de la même façon, lu depuis `payload.get('tenant_id')`.
+
+**Aucune donnée métier, aucun modèle, aucune migration, aucun queryset touché dans ces 4 services** — uniquement la classe d'authentification.
+
+### 8.5 Anomalie découverte pendant l'audit (Étape 1)
+
+En exécutant les tests existants de `Gestion-Infrastructures` et `fultang-compta-financiere` pour valider la non-régression, une anomalie **préexistante et sans rapport avec cette phase** a été révélée : `InfrastructuresAPITests` (7 tests) et `QuittanceTests`/`CaisseJournaliereTests` (10 tests) échouent avec `401`/`403` — **ces tests n'envoient jamais de headers d'authentification**, alors que `GatewayHeaderAuthentication` + `IsAuthenticated` sont actifs par défaut dans ces deux services. Confirmé pré-existant par `git diff` (aucune ligne de ces tests n'a été modifiée, seuls des imports ont été ajoutés). Même symptôme déjà observé sur `service-personnel` en Phase 1. **Non corrigé** (hors périmètre de cette tâche) — signalé ici pour traçabilité.
+
+### 8.6 Ce qui n'est PAS fait à ce stade
+
+- Aucun service métier **n'utilise** encore `request.user.tenant_id` pour filtrer ses données (voir [§9](#9-bases-de-données)).
+- Pas de vérification d'autorisation "cet utilisateur a-t-il le droit d'accéder à CETTE ressource de CE tenant" au niveau objet — seule la vérification "requête tenant == tenant du token" existe, au niveau de la Gateway.
+- `Medical-Monitoring` et `clinical-agent` restent hors du mécanisme `GatewayUser.tenant_id` — voir [§13](#13-medical-monitoring--clinical-agent) pour l'analyse détaillée de pourquoi et pour la conception future.
+
+---
+
+## 9. Bases de données
+
+Distinction stricte à faire, car ces notions sont **souvent confondues** :
+
+| Notion | Statut |
+|---|---|
+| **Authentification tenant-aware** (login scope par tenant, JWT porte `tenant_id`) | **Implémenté et testé** |
+| **Contexte tenant propagé** (`X-Tenant-ID` jusqu'au service, `GatewayUser.tenant_id`) | **Implémenté et testé** pour les 4 services métier classiques (voir [§8.4](#84-services-mis-à-jour-vs-non-mis-à-jour)) |
+| **Registre logique Tenant + Service → Database** (`TenantDatabase`, Phase 5) | **Implémenté et testé** — voir §9.1 ci-dessous |
+| **Isolation réelle des données métier** (un `Medecin` du Tenant A invisible au Tenant B dans les réponses API) | **Non implémenté** — `PersonnelViewSet`, `MedecinViewSet`, etc. ne filtrent pas par `tenant_id` |
+| **Routage dynamique des bases de données** (une requête HTTP effectivement dirigée vers la bonne base selon le tenant) | **Non implémenté** (Phase 6) |
+| **Création physique des bases PostgreSQL par tenant** | **Non implémenté** (Phase 7 : Tenant Provisioning) |
+
+**Le database routing n'est toujours PAS terminé.** Toutes les données de tous les tenants vivent aujourd'hui dans les mêmes tables PostgreSQL de chaque service métier. La Phase 5 ajoute le **registre** de l'association tenant+service→base (déclaratif), mais aucune requête n'est encore routée en fonction de lui, et aucune base physique n'a été créée.
+
+### 9.1 Phase 5 — Tenant Database Management (registre logique)
+
+**Statut : Implémenté et testé.** Modèle retenu : **Database per Tenant per Service** — chaque microservice garde sa propre base pour chaque tenant (décision actée, non remise en question).
+
+```
+Tenant Registry (tenant-service)
+        │
+        ├── Tenant ──┬── TenantDatabase (tenant=A, service=PERSONNEL)      → db_A_personnel
+        │            ├── TenantDatabase (tenant=A, service=INFRASTRUCTURE) → db_A_infrastructure
+        │            └── TenantDatabase (tenant=A, service=COMPTA)        → db_A_compta
+        │
+        └── PlatformService (catalogue) : PERSONNEL, INFRASTRUCTURE, COMPTA, COMPTA_MATIERE, MEDICAL, ...
+```
+
+**`PlatformService`** — catalogue contrôlé des microservices de la plateforme (`tenant-service/tenants/models.py`) :
+```python
+class PlatformService(models.Model):
+    code = models.CharField(max_length=50, primary_key=True, validators=[...])  # ex: PERSONNEL
+    name = models.CharField(max_length=100)
+    status = models.CharField(choices=PlatformServiceStatus.choices, default=ACTIVE)
+    created_at = models.DateTimeField(auto_now_add=True)
+```
+`code` est la clé primaire (stable par construction, format `MAJUSCULES_SNAKE_CASE` validé par regex). Nommé `PlatformService` (pas `Service`) pour éviter toute confusion avec les classes métier `TenantService`/`TenantDatabaseService` déjà présentes dans `services.py`. Seedé via une migration de données (`0003_seed_platform_services.py`) avec les 5 services déjà existants dans FullTang : `PERSONNEL`, `INFRASTRUCTURE`, `COMPTA`, `COMPTA_MATIERE`, `MEDICAL`. Étendre le catalogue (Pharmacie, Laboratoire, Imagerie...) se fait en ajoutant une ligne, jamais en modifiant `Tenant` ou `TenantDatabase`.
+
+**`TenantDatabase`** — association logique Tenant + Service → Base :
+```python
+class TenantDatabase(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name='databases')
+    service = models.ForeignKey(PlatformService, on_delete=models.PROTECT, related_name='tenant_databases')
+    database_name = models.CharField(max_length=100)
+    host = models.CharField(max_length=255)
+    port = models.PositiveIntegerField(default=5432)
+    status = models.CharField(choices=TenantDatabaseStatus.choices, default=PENDING)  # PENDING/ACTIVE/INACTIVE
+    secret_reference = models.CharField(max_length=255)  # référence opaque, jamais un mot de passe
+    created_at / updated_at
+
+    class Meta:
+        constraints = [UniqueConstraint(fields=['tenant', 'service'], name='tenant_database_unique_tenant_service')]
+```
+- **Pas de champs `personnel_db`/`infrastructure_db`/... sur `Tenant`** — une relation dédiée, extensible sans jamais modifier `Tenant`.
+- **`service` est une vraie ForeignKey** (pas une chaîne libre) : référencer un code absent du catalogue est automatiquement rejeté (400, `PrimaryKeyRelatedField`) — impossible de créer une association vers un service inexistant.
+- **`status` par défaut `PENDING`, pas `ACTIVE`** — décision délibérée : aucune base physique n'est créée à l'enregistrement, donc une entrée fraîche décrit une *intention*, pas une base confirmée utilisable. `ACTIVE`/`INACTIVE` restent des changements purement déclaratifs à ce stade (aucune action physique déclenchée).
+- **`UniqueConstraint(tenant, service)`** : impossible d'avoir deux configurations concurrentes pour le même couple.
+- **Sécurité credentials** : `secret_reference` est une chaîne opaque (ex: un futur chemin Vault) — **aucun champ de mot de passe n'existe sur ce modèle**. FullTang n'a pas de Secret Manager ; ce champ réserve uniquement la structure pour le brancher plus tard (non construit ici, décision explicite de la tâche).
+
+**API** (`tenant-service`, PLATFORM_ADMIN uniquement — permission `IsPlatformAdmin` réutilisée telle quelle, aucun nouveau système RBAC) :
+```
+GET/POST   /api/platform-services/            → catalogue des services
+GET        /api/platform-services/{code}/
+GET/POST   /api/tenant-databases/             → configurations (filtrable ?tenant=&service=&status=)
+GET        /api/tenant-databases/{id}/
+PATCH      /api/tenant-databases/{id}/        → database_name/host/port/secret_reference UNIQUEMENT
+PATCH      /api/tenant-databases/{id}/status/ → changement de statut logique
+```
+`tenant`/`service`/`status` sont exclus du serializer de mise à jour générale (`TenantDatabaseUpdateSerializer` dédié) : réassigner un tenant vers la configuration d'un autre, ou changer host/port/secret_reference depuis un rôle non-PLATFORM_ADMIN, est structurellement impossible — vérifié par test et en conditions réelles (voir [§16](#16-tests-et-validation)).
+
+**Ce que la Phase 5 ne fait explicitement PAS** : routage dynamique des requêtes (Phase 6), création/suppression physique de base PostgreSQL, Docker Compose pour de nouvelles bases, provisioning automatique (Phase 7), migration de données existantes (Phase 8), activation/désactivation fonctionnelle d'un service pour un tenant (Phase 9), modification de Medical Monitoring/Clinical Agent/JWT/Tenant Resolution/`tenant_id` sur les modèles métier.
+
+---
+
+## 10. Provisioning
+
+**Statut : Non implémenté.**
+
+Aucun endpoint ne permet aujourd'hui :
+- de créer un utilisateur **déjà rattaché** à un tenant via l'API (le champ `tenant_id` est `editable=False`, donc jamais accepté en écriture par les serializers existants — décision de sécurité délibérée, voir [§6.1](#61-association-utilisateur--tenant)) ;
+- de provisionner automatiquement les ressources d'un nouveau tenant (base de données, configuration par défaut, compte Hospital Admin initial).
+
+**À faire** : un flux dédié (probablement réservé à `PLATFORM_ADMIN`) pour assigner un `tenant_id` à un compte, et/ou créer un compte directement dans le contexte d'un tenant. Actuellement, la seule façon d'assigner un `tenant_id` est un accès direct à l'ORM (shell Django, script de seed) — utilisé uniquement pour les tests de vérification de cette documentation.
+
+**Provisioning des bases (Phase 7, distinct)** : la Phase 5 permet de **déclarer** qu'un tenant utilise telle base pour tel service (`TenantDatabase`, statut `PENDING` par défaut), mais ne crée physiquement aucune base PostgreSQL. La Phase 7 devra : créer la base physique, faire passer `TenantDatabase.status` à `ACTIVE` une fois confirmée, et générer/enregistrer le vrai secret référencé par `secret_reference`.
+
+---
+
+## 11. Migration
+
+**Statut : Non implémenté** (au-delà du strict nécessaire pour ne pas casser l'existant).
+
+Tous les comptes `Personnel` créés avant l'introduction de `tenant_id` (Phase 3) — y compris les comptes seedés par `seed_data.py`/`seed_admin_only.py` (`admin@fultang.local`, `jean.dupont@fultang.local`, etc.) — ont **`tenant_id = NULL`**.
+
+Ce N'est **pas un état corrompu** : il correspond au "pool non assigné", explicitement supporté (`tenant_id=None` reste une valeur de recherche valide dans `AuthVerifyView`, associée aux hostnames hors convention type `localhost`). Mais **ce n'est pas un état final** — ces comptes ne peuvent pas se connecter dans le contexte d'un vrai tenant tant qu'ils n'y sont pas explicitement rattachés.
+
+**À faire, distinctement du provisioning** : une étape de migration de données qui décide, pour chaque compte `tenant_id IS NULL` existant, à quel tenant réel il doit être rattaché (ou s'il doit rester dans un pool "legacy/dev" permanent).
+
+---
+
+## 12. Service-to-Service
+
+**Décision actuelle, explicitement conservée dans cette phase** :
+
+> Les communications service-to-service restent **directes**, elles ne passent PAS par la Gateway.
+
+Exemples déjà en place :
+
+```
+Medical Monitoring ──(HTTP direct)──► Clinical Agent
+fultang-compta-financiere ──(HTTP direct, apps/integration/medical_client.py)──► Medical Monitoring
+API Gateway ──(HTTP direct, jeton interne)──► tenant-service (résolution)
+API Gateway ──(HTTP direct)──► service-personnel (login/verify)
+```
+
+**Seule exception sécurisée à ce jour** : `api-gateway → tenant-service` pour `GET /tenants/resolve/`, protégée par un jeton partagé (`X-Internal-Service-Token`, comparaison en temps constant `hmac.compare_digest`, vérifié côté `tenant-service` par `IsInternalService`). C'est une **mesure ponctuelle**, pas une politique généralisée de sécurisation service-to-service.
+
+**Toutes les autres communications directes inter-services restent non authentifiées au-delà de la confiance réseau Docker** (`fultang_shared_network`). Cette architecture sera **réévaluée ultérieurement**, après étude approfondie de la sécurité et des performances des communications inter-services — **explicitement hors périmètre de cette phase**, conformément à la consigne reçue.
+
+---
+
+## 13. Medical Monitoring / Clinical Agent
+
+**Statut : Non modifiés dans cette phase.** Aucune dépendance directe avec le mécanisme de propagation de contexte n'a été identifiée qui aurait rendu une modification nécessaire — code inspecté, aucun changement apporté, conformément à la consigne.
+
+### 13.1 Medical Monitoring — comment il fonctionne aujourd'hui
+
+- **Réception des requêtes** : exactement le même mécanisme que les autres services (`GatewayHeaderAuthentication`/`GatewayUser`, non modifié, fichier `Medical-Monitoring/backend/core/authentication.py`), routé par la Gateway sous `/medical/**` → `/api/medical-monitoring/**`. Possède *en plus* un point d'entrée JWT direct (`rest_framework_simplejwt`, `/api/medical-monitoring/token/`) — un second mécanisme d'authentification préexistant, indépendant du flux Gateway étudié dans cette phase, non touché.
+- **Accès aux données** : ORM Django classique sur sa propre base PostgreSQL (`fultang_medical_monitoring`), via les modèles `patient`, `patient_informations`, `medical_workflow` (dont `Visite`).
+- **Déclenchement de la synchronisation** : un **signal Django `post_save`** sur le modèle `Visite` (`medical_workflow/signals.py`). Quand une visite passe au statut `TERMINE`, un thread séparé envoie une requête `POST http://fultang-clinical-agent:9000/sync/visite/{visite_id}` — **fire-and-forget**, en HTTP direct, **sans passer par la Gateway** (cohérent avec la décision [§12](#12-service-to-service)). Si l'appel échoue, un rattrapage périodique (toutes les 15 min, côté Clinical Agent) reprend les visites `TERMINE` non synchronisées.
+- **Comment il connaît une visite** : c'est lui la source — `Visite` est un modèle métier de Medical Monitoring lui-même ; il n'y a pas de notion de tenant sur ce modèle aujourd'hui (comme tous les modèles métier, hors périmètre de cette phase).
+
+### 13.2 Pourquoi `GatewayUser.tenant_id` n'est pas directement applicable à Medical Monitoring
+
+Le mécanisme ajouté dans cette phase répond à *"quel tenant est associé à l'utilisateur qui fait cette requête HTTP entrante"*. Or le point sensible de Medical Monitoring n'est pas entrant mais **sortant** : c'est lui qui décide, via un signal interne asynchrone, d'envoyer des données patient vers un tiers (Clinical Agent). Cette décision ne dépend d'aucun `request.user` au moment où le signal se déclenche (le `post_save` peut être émis en dehors de tout contexte de requête HTTP — ex: script, migration de données, tâche planifiée). Appliquer `GatewayUser.tenant_id` tel quel n'aurait donc aucun effet sur la question réellement posée : *"les données de CE tenant ont-elles le droit de partir vers Clinical Agent ?"* — une question de **configuration par tenant** (Phase 9), pas d'authentification de requête entrante. D'où la décision de concevoir une logique tenant dédiée pour ce service plutôt que de lui appliquer mécaniquement le même patron que les services CRUD classiques.
+
+### 13.3 Clinical Agent — comment il fonctionne aujourd'hui
+
+- **Réception des données** : deux points d'entrée FastAPI, `POST /sync/visite/{visite_id}` (déclenché par le signal ci-dessus) et `POST /sync/all` (rattrapage périodique + démarrage). **Aucune authentification sur ces deux endpoints** — n'importe qui pouvant atteindre le port 9000 sur le réseau Docker peut déclencher une synchronisation. Protection actuelle : isolation réseau uniquement (`fultang_shared_network`), pas de vérification applicative.
+- **Accès à la base principale** : **connexion SQL directe** à la base PostgreSQL de Medical Monitoring via SQLAlchemy (`clinical-agent/database.py`, `MAIN_DB_URL` → `fultang-medical-db-server:5432/fultang_medical_monitoring`) — **hors de toute API, hors de tout ORM Django, hors de `GatewayHeaderAuthentication`**. C'est la raison structurelle pour laquelle `GatewayUser.tenant_id` ne peut de toute façon pas s'appliquer ici : Clinical Agent ne passe jamais par une requête HTTP authentifiée pour lire les données médicales, il lit directement les tables.
+- **Utilisation de la base tampon** : une base PostgreSQL séparée (`tampon_clinical_cases`), lecture/écriture, où `sync_visite()`/`sync_all_completed_visits()` (`sync.py`) écrivent les cas cliniques **anonymisés** extraits de la base principale.
+- **Autorisation actuelle** : seul l'endpoint `GET /export` (celui consommé par les systèmes externes type MedTutor) est protégé — par une **clé API unique partagée** (`X-API-Key`, comparée en `hmac.compare_digest` à `MEDTUTOR_API_KEY_HASH`), plus un rate-limiting par client. Cette clé est **globale à tout FullTang** : elle ne distingue aucun tenant, elle n'autorise ou ne refuse rien par établissement.
+- **Où interviendra la Tenant Configuration** : à deux endroits distincts identifiés —
+  1. **En amont**, dans `sync_visite()`/`sync_all_completed_visits()` : avant de copier une visite vers la base tampon, vérifier que le tenant propriétaire de cette visite autorise la synchronisation vers Clinical Agent (nécessite d'abord que `Visite` porte un `tenant_id` — non fait, hors périmètre).
+  2. **En aval**, dans `GET /export` : filtrer les cas cliniques exposés selon les tenants que le client `X-API-Key` est autorisé à consulter (nécessite d'étendre le modèle d'autorisation au-delà d'une clé unique globale).
+- **Comment déterminer les tenants autorisés (future Tenant Configuration)** : logiquement, une propriété booléenne ou une liste de scopes portée par `Tenant` (ex: `allow_clinical_agent_export: bool`), consultée par Medical Monitoring avant d'émettre le signal, et/ou par Clinical Agent avant d'accepter une synchronisation — décision de conception à prendre en Phase 9, **non tranchée ici**.
+
+---
+
+## 14. Configuration Tenant
+
+| Déjà configurable | Pas encore configurable |
+|---|---|
+| `identifier`, `name`, `status` (ACTIVE/INACTIVE) du tenant | Modules/fonctionnalités activés par tenant |
+| Domaine racine de résolution (`TENANT_ROOT_DOMAIN`, env var) | Formulaires/workflows personnalisés |
+| Jeton interne Gateway↔tenant-service (`TENANT_SERVICE_INTERNAL_TOKEN`, env var) | Feature flags |
+| — | Autorisation de transmission de données vers Clinical Agent (voir [§13](#13-medical-monitoring--clinical-agent)) |
+| — | Paramètres métier par établissement (facturation, langue, etc.) |
+
+Toute configuration au-delà de `name`/`identifier`/`status` appartient à la **Phase 9 (Tenant Configuration)**, non commencée — le modèle `Tenant` a été conçu pour l'accueillir sans refonte (voir [§3.2](#32-modèle-tenant)).
+
+---
+
+## 15. Sécurité
+
+Décisions prises et vérifiées :
+
+| Décision | Où | Vérifié |
+|---|---|---|
+| `tenant_id` toujours déterminé **côté serveur** (résolution hostname), jamais par le client | `login()`, `proxy_catch_all()` | Tests + Docker réel |
+| `tenant_id` porté par le **JWT signé** (HS256), jamais par un champ modifiable après coup | `jwt_handler.py` (inchangé), `login()`/`refresh_token()` | Tests |
+| Comparaison **tenant demandé (hostname) vs tenant du token (JWT)** avant tout routage métier | `proxy_catch_all()` | Tests + Docker réel (403 confirmé) |
+| Client **incapable de choisir librement son tenant** — ni en paramètre de login, ni en header `X-Tenant-ID` | `AuthVerifyView` (paramètre serveur), `_strip_client_identity_headers()` (header) | Tests + spoof réel testé (401) |
+| `Personnel.tenant_id` **`editable=False`** — jamais accepté en écriture par l'API CRUD existante | `models.py` | Conséquence structurelle DRF, pas de test dédié nécessaire |
+| Confiance Gateway → services **basée sur des headers non signés** (`X-User-ID`, `X-User-Roles`, `X-Tenant-ID`) | `GatewayHeaderAuthentication` (7 services au total ; 4 exploitent `tenant_id`, voir [§8.4](#84-services-mis-à-jour-vs-non-mis-à-jour)) | — |
+| Anti-spoofing `X-Tenant-ID` vérifié pour les nouveaux services adaptés (Gestion-Infrastructures, ComptaMatiere, fultang-compta-financiere) | `GatewayHeaderAuthentication` de chaque service | Tests unitaires (`RequestFactory`) — le mécanisme de suppression est générique côté Gateway (`_strip_client_identity_headers`), donc valable pour toute route proxyfiée sans re-test par route |
+| **Limite actuelle de cette confiance** : un accès réseau direct à un service métier (contournant la Gateway) permettrait d'injecter ces headers librement — la Gateway n'ajoute pas de signature, seulement une garantie qu'**elle-même** ne les laisse pas passer telles quelles depuis un client externe | Toute la chaîne | Non testé — dépend de l'isolation réseau Docker |
+| Communications service-to-service **encore directes**, non authentifiées (sauf `tenant-service.resolve`) | [§12](#12-service-to-service) | — |
+| Endpoint `GET /tenants/resolve/` protégé par jeton interne (`hmac.compare_digest`), pas public | `tenant-service/permissions.py` | Tests + Docker réel |
+
+### Améliorations de sécurité futures identifiées (non implémentées)
+
+- Signature/authentification des communications service-to-service (mTLS, jetons par paire de services, ou passage systématique par la Gateway).
+- Isolation réseau empêchant un accès direct aux services métier en contournant la Gateway.
+- `tenant-service` (identité PLATFORM_ADMIN, transversale par nature), `Medical-Monitoring` et `clinical-agent` (conception tenant dédiée requise, voir [§13](#13-medical-monitoring--clinical-agent)) restent hors de `GatewayUser.tenant_id` — décision délibérée, pas un oubli.
+- Autorisation au niveau objet (un `Medecin` du Tenant A ne doit pas être lisible/modifiable via l'API par un utilisateur du Tenant B) — actuellement absente de tous les `ModelViewSet` métier.
+
+---
+
+## 16. Tests et validation
+
+| Fonctionnalité | Tests | Résultat | Statut |
+|---|---|---|---|
+| Tenant Registry CRUD | `tenant-service/tenants/tests.py` (21 tests) | 21/21 ✅ | Implémenté et testé |
+| Autorisation PLATFORM_ADMIN vs ADMIN | inclus ci-dessus | ✅ | Implémenté et testé |
+| Résolution `GET /tenants/resolve/` + jeton interne | inclus ci-dessus | ✅ | Implémenté et testé |
+| Extraction hostname → identifier | `api-gateway/tests/test_tenant_resolver.py` | ✅ | Implémenté et testé |
+| Résolution hostname → TenantContext (succès/404/403/503) | idem (19 tests) | ✅ | Implémenté et testé |
+| Auth tenant-aware — login/verify scopé par tenant | `service-personnel/api/tests.py` (11 tests) | ✅ (Docker + Postgres réels) | Implémenté et testé |
+| Unicité email/matricule scopée par tenant | inclus ci-dessus | ✅ | Implémenté et testé |
+| Login → JWT avec `tenant_id` | `api-gateway/tests/test_login_tenant_context.py` (10 tests) | ✅ | Implémenté et testé |
+| Refresh token conserve `tenant_id` | inclus ci-dessus | ✅ (+ vérifié live) | Implémenté et testé |
+| Comparaison tenant demandé / tenant du token (403) | inclus ci-dessus | ✅ (+ vérifié live) | Implémenté et testé |
+| Propagation `X-Tenant-ID` vers le service (service-personnel) | `api-gateway/tests/test_tenant_header_propagation.py` (4 tests) + `GatewayHeaderAuthenticationTenantTests` (3 tests, Docker réel) | ✅ | Implémenté et testé |
+| Anti-spoofing `X-User-ID`/`X-User-Roles`/`X-Tenant-ID` | inclus ci-dessus + **curl live contre la Gateway réelle** | ✅ (401 confirmé) | Implémenté et testé |
+| `GatewayUser.tenant_id` — Gestion-Infrastructures | `infrastructures/tests.py::GatewayHeaderAuthenticationTenantTests` (3 tests) | ✅ (sqlite local + Docker/Postgres réel) | Implémenté et testé |
+| `GatewayUser.tenant_id` — ComptaMatiere | `apps/comptabilite_matiere/tests/test_gateway_authentication.py` (3 tests) | ✅ (sqlite local, exécution réelle) | Implémenté et testé |
+| `GatewayUser.tenant_id` — fultang-compta-financiere (headers + fallback JWT) | `apps/caisse/tests.py::GatewayHeaderAuthenticationTenantTests` (4 tests) | ✅ (sqlite local, exécution réelle) | Implémenté et testé |
+| PlatformService — catalogue plateforme (CRUD, format de code, permissions) | `tenant-service/tenants/tests.py::PlatformService{Model,API}Tests` (6 tests) | ✅ (sqlite + Docker/Postgres réel) | Implémenté et testé |
+| TenantDatabase — multi-services par tenant, multi-tenants par service, unicité, service invalide, statuts, permissions, secrets | `tenant-service/tenants/tests.py::TenantDatabase{Model,API}Tests` (20 tests) | ✅ (sqlite + Docker/Postgres réel + curl live) | Implémenté et testé |
+| Isolation des données métier (cross-tenant) | — | — | **Non implémenté, non testé** |
+| Database routing par tenant | — | — | **Non implémenté, non testé** (Phase 6) |
+| Création physique des bases par tenant | — | — | **Non implémenté, non testé** (Phase 7) |
+| Medical Monitoring / Clinical Agent — logique tenant dédiée | — | — | **Non implémenté** (audit documenté, [§13](#13-medical-monitoring--clinical-agent)) |
+
+**Total tests automatisés multitenant actuels** : 47 (tenant-service, dont 26 Phase 5) + 33 (api-gateway) + 11 (service-personnel) + 3 (Gestion-Infrastructures) + 3 (ComptaMatiere) + 4 (fultang-compta-financiere) = **101 tests**, tous verts, exécutés à la fois en isolation (mocks httpx pour la Gateway, sqlite pour les tests Django hors service-personnel) et **en conditions réelles** (Docker + PostgreSQL pour tenant-service, service-personnel et Gestion-Infrastructures, requêtes curl live à travers la stack complète pour les flux critiques, y compris tentative de duplication, service inconnu, et blocage d'un rôle tenant-scope sur `/tenant-databases/`).
+
+> **Anomalie non liée à cette phase** : les tests métier préexistants de `Gestion-Infrastructures` (7) et `fultang-compta-financiere` (10) échouent (401/403) car ils n'envoient aucun header d'authentification — confirmé pré-existant (`git diff` ne montre aucune ligne modifiée sur ces tests), même symptôme que `service-personnel` en Phase 1. Non corrigé, hors périmètre.
+
+---
+
+## 17. Historique des modifications
+
+### Phase 1 — Tenant Management (commit `ef47eb0`)
+
+| Fichier | Modification | Raison | Impact |
+|---|---|---|---|
+| `tenant-service/**` (nouveau service, ~15 fichiers) | Création complète | Nouveau microservice Tenant Registry | Aucun sur l'existant (additif) |
+| `api-gateway/app/config.py` | + `SERVICE_TENANT_URL` | Router vers le nouveau service | Additif |
+| `api-gateway/app/main.py` | + routage `/tenants/**` | Exposer le Tenant Registry via la Gateway | Additif |
+| `start_all.sh` | + démarrage `tenant-service` | Orchestration locale | Additif |
+
+**Correction Phase 1** (rôles PLATFORM_ADMIN) : `tenant-service/tenants/permissions.py` (+`IsPlatformAdmin`), `views.py` (permission sur `TenantViewSet`), `tests.py`.
+
+### Phase 2.1 / 2.1-correction / 2.2 — Tenant Resolution (commit `ff14848`)
+
+| Fichier | Modification | Raison | Impact |
+|---|---|---|---|
+| `api-gateway/app/tenant/resolver.py` | Création (`TenantResolver`, `TenantContext`, exceptions) | Résolution hostname → tenant | Additif |
+| `api-gateway/app/main.py` | + résolution dans `proxy_catch_all`, + jeton interne | Intégrer la résolution au routage | Additif, non-régressif (hostname hors convention préservé) |
+| `api-gateway/app/config.py` | + `TENANT_ROOT_DOMAIN`, `TENANT_SERVICE_INTERNAL_TOKEN` | Domaine configurable + auth interne | Additif |
+| `tenant-service/tenants/{serializers,views,permissions}.py` | + endpoint `resolve/`, + `IsInternalService` | Lookup public puis sécurisé par jeton interne | `resolve/` initialement `AllowAny`, corrigé en jeton interne suite à revue |
+| `api-gateway/conftest.py`, `pytest.ini`, `requirements-dev.txt` | Création | Introduire pytest (absent avant) | Additif |
+| `api-gateway/tests/test_tenant_resolver.py` | Création (19 tests) | Couverture du resolver | Additif |
+| `docker-compose.yml` (racine + `tenant-service`) | + `TENANT_SERVICE_INTERNAL_TOKEN` | Jeton partagé dev | Additif |
+
+### Phase 3 — Authentification Tenant-Aware (non commité au moment de la rédaction)
+
+| Fichier | Modification | Raison | Impact |
+|---|---|---|---|
+| `service-personnel/api/models.py` | + `Personnel.tenant_id` (`editable=False`), `email`/`matricule` : `unique=True` → `UniqueConstraint(tenant_id, champ)` | Rattacher un compte à un tenant ; permettre le même email dans 2 tenants | **Modification de modèle métier** — migration nécessaire ; aucune donnée existante perdue (tenant_id nullable) |
+| `service-personnel/api/migrations/0006_...py` | Migration générée (`makemigrations`), vérifiée `--check` | Appliquer le changement de modèle | Appliquée avec succès sur la base réelle, seed existant intact |
+| `service-personnel/api/views.py` | `AuthVerifyView` filtre par `(email, tenant_id)` | Recherche utilisateur scopée par tenant | Non-régressif : `tenant_id=None` couvre l'ancien comportement |
+| `api-gateway/app/main.py` | `login()` résout le tenant + transmet `tenant_id` + l'inclut dans le JWT ; `refresh_token()` le propage ; `proxy_catch_all()` compare tenant demandé/token ; refactor `_forward`/décode JWT une fois | Authentification et autorisation tenant-aware | Additif ; comportement JWT/refresh existant conservé (mêmes claims + `tenant_id`) |
+| `service-personnel/api/tests.py` | + 8 tests | Couvrir le scoping tenant | Additif |
+| `api-gateway/tests/test_login_tenant_context.py` | Création (10 tests) | Couvrir login/refresh/mismatch | Additif |
+
+### Phase 4 — Propagation du contexte (cette tâche, non commitée)
+
+| Fichier | Modification | Raison | Impact |
+|---|---|---|---|
+| `api-gateway/app/main.py` | + `X-Tenant-ID` dans `_build_user_headers` ; + `_strip_client_identity_headers()` appelée dans `_forward()` | Objectif de la tâche + fix sécurité découvert pendant l'audit demandé | **Fix de sécurité** : empêche désormais la falsification de `X-User-ID`/`X-User-Roles`/`X-Tenant-ID` par le client, y compris sans token — comportement antérieur (headers client non filtrés en l'absence de JWT valide) corrigé |
+| `service-personnel/api/authentication.py` | `GatewayUser` + `GatewayHeaderAuthentication` lisent `X-Tenant-ID` | Représentation interne `GatewayUser(id, roles, tenant_id)` demandée | Additif, rétrocompatible (paramètre optionnel, défaut `None`) |
+| `service-personnel/api/tests.py` | + 3 tests (`GatewayHeaderAuthenticationTenantTests`) | Couvrir l'extraction `X-Tenant-ID` | Additif |
+| `api-gateway/tests/test_tenant_header_propagation.py` | Création (4 tests) | Couvrir propagation + anti-spoofing | Additif |
+| `MULTITENANT_ARCHITECTURE.md` | Création (ce document) | Documentation de référence demandée | Aucun impact code |
+
+### Phase 4 (finalisation) — Extension aux services métier classiques (cette tâche, non commitée)
+
+| Fichier | Modification | Raison | Impact |
+|---|---|---|---|
+| `Gestion-Infrastructures/config/authentication.py` | `GatewayUser` + `GatewayHeaderAuthentication` lisent `X-Tenant-ID` | Même contexte `GatewayUser(id, roles, tenant_id)` que service-personnel | Additif, rétrocompatible (paramètre optionnel, défaut `None`) |
+| `Gestion-Infrastructures/infrastructures/tests.py` | + 3 tests (`GatewayHeaderAuthenticationTenantTests`) | Couvrir l'extraction `X-Tenant-ID` | Additif |
+| `ComptaMatiere/core/authentication.py` | Idem | Idem | Idem |
+| `ComptaMatiere/apps/comptabilite_matiere/tests/test_gateway_authentication.py` | Création (3 tests) | Couvrir l'extraction `X-Tenant-ID` | Additif — **placé dans le package `tests/`**, pas dans `tests.py` (voir anomalie ci-dessous) |
+| `fultang-compta-financiere/config/authentication.py` | Idem, **sur les deux chemins** (headers Gateway + fallback JWT décodé localement) | Idem | Idem |
+| `fultang-compta-financiere/apps/caisse/tests.py` | + 4 tests (`GatewayHeaderAuthenticationTenantTests`) | Couvrir les deux chemins d'authentification | Additif |
+| `MULTITENANT_ARCHITECTURE.md` | Sections 8, 13, 15, 16, 17, 19 mises à jour | Documenter la finalisation de la Phase 4 | Aucun impact code |
+
+**Anomalie de tooling découverte et corrigée pendant cette étape** : `ComptaMatiere/apps/comptabilite_matiere/` contient à la fois un fichier `tests.py` **et** un package `tests/` (avec `__init__.py`) au même niveau. Le package masque le fichier plat pour la découverte de tests Django (`import apps.comptabilite_matiere.tests` résout vers le package). Un premier ajout dans `tests.py` était donc du code mort, jamais exécuté — détecté en vérifiant le compte de tests exécutés, corrigé en déplaçant les tests dans le package (`tests/test_gateway_authentication.py`), `tests.py` restauré à son état d'origine (stub vide).
+
+**Fichiers volontairement NON modifiés** :
+
+- `api-gateway/app/auth/jwt_handler.py` — mécanisme JWT générique, aucune modification nécessaire (accepte n'importe quel `dict` de claims).
+- `tenant-service/config/authentication.py` — identité `PLATFORM_ADMIN`, transversale aux tenants par nature (voir [§8.4](#84-services-mis-à-jour-vs-non-mis-à-jour)).
+- `Medical-Monitoring/backend/core/authentication.py`, tout `clinical-agent/` — décision architecturale explicite : rôle métier spécifique nécessitant une conception tenant dédiée, pas la même mécanique que les services CRUD classiques (analyse complète en [§13](#13-medical-monitoring--clinical-agent)).
+- Tous les `ModelViewSet` métier (`MedecinViewSet`, `PersonnelViewSet`, `SalleViewSet`, etc., dans les 4 services adaptés) — aucun filtrage par tenant ajouté (isolation des données hors périmètre, voir [§3 de la tâche/Étape 3](#9-bases-de-données)).
+- Aucun modèle métier, aucune migration métier, aucun queryset, aucune relation entre entités — dans les 4 services adaptés.
+- Architecture des bases de données, routage dynamique — non touchés.
+
+### Phase 5 — Tenant Database Management (cette tâche, non commitée)
+
+| Fichier | Modification | Raison | Impact |
+|---|---|---|---|
+| `tenant-service/tenants/models.py` | + `PlatformService`, `PlatformServiceStatus`, `TenantDatabase`, `TenantDatabaseStatus` | Registre logique Tenant + Service → Database | Additif — `Tenant` non modifié |
+| `tenant-service/tenants/migrations/0002_platformservice_tenantdatabase.py` | Migration schéma (générée, vérifiée `--check`) | Créer les tables | Additif |
+| `tenant-service/tenants/migrations/0003_seed_platform_services.py` | Migration de données (`RunPython`) | Peupler le catalogue avec les 5 services déjà existants | Additif, réversible |
+| `tenant-service/tenants/repositories.py` | + `PlatformServiceRepository`, `TenantDatabaseRepository` | Accès ORM, même pattern que `TenantRepository` | Additif |
+| `tenant-service/tenants/services.py` | + `PlatformServiceCatalog`, `TenantDatabaseService` | Couche métier, même pattern que `TenantService` | Additif |
+| `tenant-service/tenants/serializers.py` | + `PlatformServiceSerializer`, `TenantDatabaseSerializer`, `TenantDatabaseUpdateSerializer` (dédié, sans tenant/service/status), `TenantDatabaseStatusUpdateSerializer` | Exposer les modèles ; empêcher la réassignation tenant/service via l'update général | Additif |
+| `tenant-service/tenants/views.py` | + `PlatformServiceViewSet`, `TenantDatabaseViewSet` | Endpoints CRUD (PLATFORM_ADMIN) | Additif — `permissions.py` réutilisé sans modification |
+| `tenant-service/tenants/urls.py` | + routes `platform-services`, `tenant-databases` | Exposer les nouveaux ViewSets | Additif |
+| `tenant-service/tenants/admin.py` | + `PlatformServiceAdmin`, `TenantDatabaseAdmin` | Cohérence avec `TenantAdmin` existant | Additif |
+| `tenant-service/tenants/tests.py` | + 26 tests (`PlatformService*`, `TenantDatabase*`) | Couvrir tous les cas demandés (multi-service, multi-tenant, unicité, service invalide, statuts, permissions, secrets) | Additif |
+| `MULTITENANT_ARCHITECTURE.md` | §2, §9, §10, §16, §17, §19 mis à jour | Documenter la Phase 5 | Aucun impact code |
+
+**Décision de conception notable** : `status` de `TenantDatabase` vaut `PENDING` par défaut (pas `ACTIVE`) — assumé explicitement car aucune création physique de base n'a lieu dans cette phase ; marquer `ACTIVE` à la création aurait été trompeur.
+
+**Fichiers volontairement NON modifiés (Phase 5)** :
+- `Tenant` (modèle) — aucun champ `personnel_db`/`infrastructure_db`/... ajouté, exactement comme demandé.
+- `permissions.py` — `IsPlatformAdmin` réutilisée telle quelle, aucun nouveau système RBAC.
+- `api-gateway/app/config.py` (routing HTTP réel des services) — reste la source pour le routing Phase 6 ; `PlatformService` est un catalogue déclaratif, pas encore branché dessus.
+- Aucune base PostgreSQL physique créée, aucun Docker Compose modifié pour de nouvelles bases, aucun mécanisme de Secret Manager construit.
+- Tenant Resolution, JWT, Medical Monitoring, Clinical Agent — non touchés, hors périmètre explicite.
+
+---
+
+## 18. Ce qui a été conservé
+
+Explicitement, sans modification de mécanisme :
+
+- **Gestion des JWT** : HS256, `python-jose`, `jwt_handler.py` inchangé — seul le contenu des claims (`tenant_id`) a été enrichi, jamais le mécanisme de signature/validation.
+- **Refresh token** : durée de vie, structure, logique de renouvellement — inchangés, uniquement enrichis du claim `tenant_id`.
+- **`TenantResolver`** existant (Phase 2) — réutilisé tel quel dans `login()`, aucune logique de résolution dupliquée ou réécrite.
+- **`GatewayHeaderAuthentication`** — le principe (headers non signés, confiance en la Gateway) est conservé ; seule son extension à `tenant_id` a été ajoutée, service par service.
+- **Architecture des services** — aucun microservice fusionné, séparé ou renommé.
+- **Communication service-to-service directe** — décision explicitement maintenue (voir [§12](#12-service-to-service)).
+- **Routage actuel des bases de données** — une base PostgreSQL par service, non touché.
+- **`Medical-Monitoring` et `clinical-agent`** — code, flux de synchronisation (signal Django → HTTP direct → base tampon → export), et mécanisme d'autorisation (`X-API-Key` unique) laissés tels quels ; seule une analyse a été produite ([§13](#13-medical-monitoring--clinical-agent)), aucune ligne de code modifiée.
+- **Modèles métier, migrations métier, querysets, ViewSets** des 4 services adaptés — aucun filtrage ni champ ajouté au-delà de la classe d'authentification.
+
+---
+
+## 19. Ce qui reste à faire
+
+```
+FAIT
+├── Tenant Management ................................ partiellement implémenté (CRUD + auth, pas de config/suppression)
+├── Tenant Identification ............................. implémenté et testé
+├── Tenant Resolution ................................. implémenté et testé
+├── Authentification tenant-aware ..................... implémenté et testé
+├── tenant_id dans le JWT .............................. implémenté et testé
+├── Contrôle tenant demandé / tenant du token ......... implémenté et testé
+├── Propagation du contexte (X-Tenant-ID) ............. Phase 4 CLÔTURÉE pour les services métier
+│                                                         classiques (service-personnel, Gestion-
+│                                                         Infrastructures, ComptaMatiere, fultang-
+│                                                         compta-financiere) — 4/4 implémentés et testés.
+│                                                         Medical Monitoring / Clinical Agent
+│                                                         délibérément exclus (conception dédiée requise,
+│                                                         voir §13) — pas un manque, une décision.
+└── Tenant Database Management (registre logique) ..... Phase 5 CLÔTURÉE : catalogue PlatformService +
+                                                          association TenantDatabase (Tenant + Service →
+                                                          Database), contraintes d'unicité, permissions
+                                                          PLATFORM_ADMIN, 26 tests. Purement déclaratif —
+                                                          aucune base physique créée, aucun routage.
+
+À FAIRE
+├── Dynamic Database Routing (Phase 6) ................. non implémenté — router une requête réelle vers
+│                                                          la bonne base selon TenantDatabase
+├── Tenant Provisioning (Phase 7) ...................... non implémenté — créer physiquement les bases,
+│                                                          faire passer TenantDatabase.status à ACTIVE,
+│                                                          brancher un vrai Secret Manager sur secret_reference
+├── Provisioning des comptes utilisateurs .............. non implémenté
+├── Migration des comptes existants (tenant_id NULL) .. non implémenté
+├── Conception tenant dédiée pour Medical Monitoring / Clinical Agent (Phase 9 notamment)
+├── Isolation des données métier (filtrage par tenant dans les ViewSets)
+├── Configuration complète des tenants (Phase 9 : modules, feature flags, activation/
+│                                        désactivation fonctionnelle d'un service par tenant)
+├── Sécurisation approfondie service-to-service ....... non implémenté
+├── Tests d'isolation (cross-tenant data leakage) ..... non implémenté
+└── Opérations multitenant (backup/restore par tenant, etc.)
+```
+
+---
+
+*Document maintenu à jour à chaque phase du projet multitenant. Dernière mise à jour : Phase 5 — Tenant Database Management.*

@@ -504,36 +504,60 @@ async def root_hub():
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _inject_user_headers(headers: dict, token: str) -> dict:
-    """Décode le JWT et injecte X-User-* dans les headers."""
-    try:
-        payload = decode_token(token)
-        if payload:
-            headers["X-User-ID"] = str(payload.get("sub", ""))
-            headers["X-User-Roles"] = ",".join(payload.get("roles", []) or [])
-            if payload.get("email"):
-                headers["X-User-Email"] = str(payload["email"])
-            if payload.get("nom"):
-                headers["X-User-Nom"] = str(payload["nom"])
-            if payload.get("prenom"):
-                headers["X-User-Prenom"] = str(payload["prenom"])
-    except Exception:
-        pass
+def _decode_bearer_token(request: Request) -> Optional[dict]:
+    """Décode le JWT porté par le header Authorization, s'il y en a un de valide."""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+    return decode_token(auth_header.split(" ")[1])
+
+
+# Headers d'identité injectés exclusivement par la Gateway à partir du JWT
+# validé. Un client ne doit JAMAIS pouvoir les fixer lui-même : on les
+# retire systématiquement des headers entrants avant de les reconstruire
+# depuis le payload décodé (jamais depuis ce que le client a envoyé).
+_GATEWAY_INJECTED_HEADERS = {
+    "x-user-id", "x-user-roles", "x-user-email", "x-user-nom", "x-user-prenom", "x-tenant-id",
+}
+
+
+def _strip_client_identity_headers(headers: dict) -> dict:
+    """Supprime toute valeur que le client aurait tenté d'injecter pour usurper une identité/un tenant."""
+    return {k: v for k, v in headers.items() if k.lower() not in _GATEWAY_INJECTED_HEADERS}
+
+
+def _build_user_headers(headers: dict, payload: Optional[dict]) -> dict:
+    """Injecte X-User-*/X-Tenant-ID à partir d'un JWT déjà décodé et validé par la Gateway.
+
+    `tenant_id` vient exclusivement du JWT signé (voir login()) — jamais
+    d'un header ou d'un paramètre fourni par le client.
+    """
+    if payload:
+        headers["X-User-ID"] = str(payload.get("sub", ""))
+        headers["X-User-Roles"] = ",".join(payload.get("roles", []) or [])
+        if payload.get("tenant_id"):
+            headers["X-Tenant-ID"] = str(payload["tenant_id"])
+        if payload.get("email"):
+            headers["X-User-Email"] = str(payload["email"])
+        if payload.get("nom"):
+            headers["X-User-Nom"] = str(payload["nom"])
+        if payload.get("prenom"):
+            headers["X-User-Prenom"] = str(payload["prenom"])
     return headers
 
 
-async def _forward(request: Request, target_url: str) -> Response:
+async def _forward(request: Request, target_url: str, user_payload: Optional[dict] = None) -> Response:
     """Relaie la requête vers target_url et retourne la réponse brute."""
     method = request.method
     content = await request.body()
     headers = dict(request.headers)
     headers.pop("host", None)
+    headers = _strip_client_identity_headers(headers)
 
-    # Injection des données utilisateur si un Bearer token est présent
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        token = auth_header.split(" ")[1]
-        headers = _inject_user_headers(headers, token)
+    # Injection des données utilisateur — le JWT est décodé une seule fois
+    # par l'appelant (proxy_catch_all), pour pouvoir aussi vérifier le
+    # contexte tenant avant l'appel au microservice.
+    headers = _build_user_headers(headers, user_payload)
 
     try:
         response = await client.request(
@@ -561,36 +585,51 @@ async def _forward(request: Request, target_url: str) -> Response:
 @limiter.limit("5/minute")
 async def login(credentials: LoginCredentials, request: Request):
     """
-    Authentifie un utilisateur via le Service Personnel et génère des tokens JWT.
+    Authentifie un utilisateur dans le contexte du tenant résolu depuis le
+    hostname de la requête, et génère des tokens JWT tenant-aware.
 
     - **email**: Email de l'utilisateur (Médecin, Admin, etc.)
     - **password**: Mot de passe associé
+
+    Le tenant vient exclusivement de la Tenant Resolution (hostname), jamais
+    d'un champ du corps de la requête — un hostname hors convention (ex:
+    `localhost`, développement local) résout vers `tenant_id = None`, qui
+    correspond au pool de comptes non encore rattachés à un tenant.
     """
+    hostname = request.headers.get("host", "")
+    try:
+        tenant_context = await tenant_resolver.resolve(hostname)
+    except TenantNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except TenantInactiveError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except TenantResolutionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    tenant_id = tenant_context.tenant_id if tenant_context else None
+
     try:
         response = await client.post(
             f"{settings.SERVICE_PERSONNEL_URL}/api/auth/verify/",
-            json=credentials.dict()
+            json={**credentials.dict(), "tenant_id": tenant_id}
         )
         if response.status_code != 200:
             raise HTTPException(status_code=401, detail="Identifiants invalides")
 
         user_data = response.json()
 
+        # tenant_id vient du contexte serveur (Tenant Resolution), jamais de
+        # la réponse du Service Personnel ni d'une entrée client.
         token_claims = {
             "sub": str(user_data["id"]),
+            "tenant_id": tenant_id,
             "roles": user_data.get("roles") or [],
             "email": user_data.get("email") or "",
             "nom": user_data.get("nom") or "",
             "prenom": user_data.get("prenom") or "",
         }
         access_token = create_access_token(data=token_claims)
-        refresh_token = create_refresh_token(data={
-            "sub": str(user_data["id"]),
-            "roles": user_data.get("roles") or [],
-            "email": user_data.get("email") or "",
-            "nom": user_data.get("nom") or "",
-            "prenom": user_data.get("prenom") or "",
-        })
+        refresh_token = create_refresh_token(data=token_claims)
 
         return {
             "access_token": access_token,
@@ -604,7 +643,7 @@ async def login(credentials: LoginCredentials, request: Request):
 
 @app.post("/auth/refresh", response_model=TokenRefreshResponse, tags=["Authentification"], summary="Rafraîchir l'access token")
 async def refresh_token(body: RefreshRequest):
-    """Renouvelle l'access token à partir d'un refresh token valide."""
+    """Renouvelle l'access token à partir d'un refresh token valide, en conservant son contexte tenant."""
     refresh_token = body.refresh_token
     payload = decode_token(refresh_token)
 
@@ -614,6 +653,7 @@ async def refresh_token(body: RefreshRequest):
     user_id = payload.get("sub")
     new_access_token = create_access_token(data={
         "sub": user_id,
+        "tenant_id": payload.get("tenant_id"),
         "roles": payload.get("roles", []),
         "email": payload.get("email") or "",
         "nom": payload.get("nom") or "",
@@ -699,9 +739,10 @@ async def proxy_catch_all(path: str, request: Request):
     - `GET /medical/patients/` → `GET http://fultang_medical_backend:8000/api/medical-monitoring/patients/`
     - `GET /infrastructure/batiments/` → `GET http://fultang_infrastructure_web:8000/api/batiments/`
 
-    ### Headers injectés par la Gateway :
+    ### Headers injectés par la Gateway (jamais acceptés depuis le client) :
     - `X-User-ID`: ID de l'utilisateur (si authentifié)
     - `X-User-Roles`: Rôles de l'utilisateur (si authentifié)
+    - `X-Tenant-ID`: Tenant associé à l'utilisateur, extrait du JWT signé (si présent)
 
     ### Tenant Resolution (Phase 2.1) :
     Le hostname de la requête (`<tenant_identifier>.fulltang.com`) est
@@ -709,20 +750,40 @@ async def proxy_catch_all(path: str, request: Request):
     convention (ex: `localhost`, utilisé en développement) n'est PAS une
     erreur : la requête continue simplement sans contexte tenant, comme
     avant cette phase.
+
+    ### Tenant-Aware Authentication :
+    Si la requête est authentifiée (Bearer JWT) ET porte sur un tenant
+    résolu, le tenant du token doit correspondre au tenant demandé — sinon
+    403. Le tenant demandé vient uniquement de la Tenant Resolution
+    (hostname) ; le tenant de l'utilisateur vient uniquement du JWT signé
+    à la connexion. Un token invalide/expiré ou une requête anonyme ne
+    déclenchent PAS cette vérification : le comportement d'authentification
+    existant (401 en aval) reste inchangé dans ces cas.
     """
     # --- Tenant Resolution : hostname → TenantContext -------------------
-    # Résultat disponible pour la suite du traitement de la requête
-    # (request.state) — pas encore propagé aux microservices ni utilisé
-    # pour une vérification d'autorisation utilisateur (Phase 2.2).
     hostname = request.headers.get("host", "")
     try:
-        request.state.tenant_context = await tenant_resolver.resolve(hostname)
+        tenant_context = await tenant_resolver.resolve(hostname)
     except TenantNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except TenantInactiveError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except TenantResolutionError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+    request.state.tenant_context = tenant_context
+
+    # --- Tenant-Aware Authentication : tenant demandé vs tenant du token --
+    # Décodé une seule fois ici, réutilisé par _forward() pour les headers
+    # X-User-*. Un payload absent (pas de token, ou invalide/expiré) ne
+    # bloque rien ici — c'est le rôle de l'authentification en aval.
+    user_payload = _decode_bearer_token(request)
+    if tenant_context is not None and user_payload is not None:
+        if user_payload.get("tenant_id") != tenant_context.tenant_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Ce token n'est pas valide pour l'établissement demandé.",
+            )
 
     target_url = None
 
@@ -775,7 +836,7 @@ async def proxy_catch_all(path: str, request: Request):
             detail=f"Route '/{path}' introuvable. Préfixes valides : /personnel/, /medical/, /infrastructure/, /compta-financiere/, /compta-matiere/, /tenants/"
         )
 
-    return await _forward(request, target_url)
+    return await _forward(request, target_url, user_payload)
 
 
 # ---------------------------------------------------------------------------

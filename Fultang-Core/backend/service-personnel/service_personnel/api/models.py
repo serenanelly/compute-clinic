@@ -47,22 +47,40 @@ class Service(models.Model):
 
 class Personnel(models.Model):
     id_personnel = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # Tenant (établissement) auquel appartient ce compte — Tenant Registry
+    # (tenant-service), pas de ForeignKey : bases de données distinctes.
+    # editable=False : DRF exclut automatiquement ce champ de l'écriture sur
+    # tous les serializers `fields = '__all__'` existants, donc aucun client
+    # ne peut jamais définir son propre tenant_id via l'API CRUD. NULL =
+    # compte non encore rattaché à un tenant (pool historique/dev — voir
+    # AuthVerifyView) ; ce n'est pas un état définitif, seulement transitoire
+    # tant que la phase de provisioning/migration de données n'existe pas.
+    tenant_id = models.UUIDField(null=True, blank=True, editable=False, db_index=True)
+
     nom = models.CharField(max_length=100)
     prenom = models.CharField(max_length=100)
     date_naissance = models.DateField()
     adresse = models.TextField()
-    email = models.EmailField(unique=True)
+    email = models.EmailField()
     contact = models.CharField(max_length=50)
-    matricule = models.CharField(max_length=50, unique=True)
+    matricule = models.CharField(max_length=50)
     date_embauche = models.DateField()
     statut = models.CharField(max_length=20, choices=Statut.choices, default=Statut.ACTIF)
     mot_de_passe = models.CharField(max_length=255)
-    
+
     # Le personnel n'est plus obligé d'appartenir à un service
     service = models.ForeignKey(Service, on_delete=models.SET_NULL, null=True, blank=True, related_name='%(class)s_personnels')
 
     class Meta:
         abstract = True
+        # email/matricule ne sont plus uniques globalement mais par tenant :
+        # une même personne dans deux établissements = deux comptes distincts
+        # (pas de pool d'utilisateurs partagé entre tenants).
+        constraints = [
+            models.UniqueConstraint(fields=['tenant_id', 'email'], name='%(app_label)s_%(class)s_unique_email_per_tenant'),
+            models.UniqueConstraint(fields=['tenant_id', 'matricule'], name='%(app_label)s_%(class)s_unique_matricule_per_tenant'),
+        ]
 
     def modifierProfil(self):
         pass

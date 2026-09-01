@@ -1,8 +1,9 @@
 from rest_framework import status
 from rest_framework.test import APITestCase
-from django.test import override_settings
+from django.db import IntegrityError, transaction
+from django.test import TestCase, override_settings
 
-from .models import Tenant, TenantStatus
+from .models import PlatformService, Tenant, TenantDatabase, TenantDatabaseStatus, TenantStatus
 from .services import TenantService
 
 # Headers simulant l'injection X-User-ID / X-User-Roles par l'API Gateway.
@@ -234,3 +235,305 @@ class TenantResolveWithoutConfiguredTokenTests(APITestCase):
         self.client.credentials(HTTP_X_INTERNAL_SERVICE_TOKEN='anything')
         response = self.client.get('/api/tenants/resolve/', {'identifier': 'fultang'})
         self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+
+# =============================================================================
+# Phase 5 — Tenant Database Management
+# =============================================================================
+
+def _make_tenant(identifier='hopital-central', name='Hôpital Central'):
+    return Tenant.objects.create(name=name, identifier=identifier)
+
+
+def _make_service(code='PERSONNEL', name='Service Personnel'):
+    """Les codes PERSONNEL/INFRASTRUCTURE/COMPTA/... sont déjà peuplés par la
+    migration de seed (0003) — on les réutilise plutôt que d'entrer en
+    conflit avec le catalogue réel de la plateforme."""
+    service, _ = PlatformService.objects.get_or_create(code=code, defaults={'name': name})
+    return service
+
+
+class PlatformServiceModelTests(TestCase):
+    """Le catalogue PlatformService est la référence contrôlée pour TenantDatabase.service."""
+
+    def test_create_service(self):
+        service = _make_service()
+        self.assertEqual(service.status, 'ACTIVE')
+
+    def test_code_must_be_unique(self):
+        PlatformService.objects.get_or_create(code='UNIQUE_TEST_CODE', defaults={'name': 'X'})
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                PlatformService.objects.create(code='UNIQUE_TEST_CODE', name='Doublon')
+
+
+class PlatformServiceAPITests(APITestCase):
+    """CRUD du catalogue plateforme — réservé PLATFORM_ADMIN, comme le Tenant Registry."""
+
+    def test_platform_admin_can_register_service(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        response = self.client.post('/api/platform-services/', {'code': 'PHARMACIE', 'name': 'Pharmacie'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], 'ACTIVE')
+
+    def test_anonymous_cannot_list_services(self):
+        self.client.credentials(**ANONYMOUS_HEADERS)
+        response = self.client.get('/api/platform-services/')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_business_admin_cannot_register_service(self):
+        self.client.credentials(**ADMIN_HEADERS)
+        response = self.client.post('/api/platform-services/', {'code': 'PHARMACIE', 'name': 'Pharmacie'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_invalid_code_format_is_rejected(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        response = self.client.post('/api/platform-services/', {'code': 'lower-case', 'name': 'X'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class TenantDatabaseModelTests(TestCase):
+    """
+    Contraintes d'intégrité du modèle TenantDatabase :
+      - Un tenant peut avoir plusieurs services (multi-lignes) ;
+      - Plusieurs tenants peuvent utiliser le même service (des lignes distinctes) ;
+      - (tenant, service) est unique ;
+      - `service` doit référencer une entrée existante du catalogue (FK).
+    """
+
+    def setUp(self):
+        self.tenant_a = _make_tenant('hopital-central', 'Hôpital Central')
+        self.tenant_b = _make_tenant('clinique-paix', 'Clinique de la Paix')
+        self.personnel = _make_service('PERSONNEL', 'Service Personnel')
+        self.infrastructure = _make_service('INFRASTRUCTURE', 'Infrastructure')
+        self.compta = _make_service('COMPTA', 'Comptabilité')
+
+    def test_tenant_with_multiple_services_is_valid(self):
+        """Tenant A : Personnel + Infrastructure + Comptabilité → valide."""
+        TenantDatabase.objects.create(
+            tenant=self.tenant_a, service=self.personnel,
+            database_name='db_hc_personnel', host='db-personnel', secret_reference='ref-1',
+        )
+        TenantDatabase.objects.create(
+            tenant=self.tenant_a, service=self.infrastructure,
+            database_name='db_hc_infra', host='db-infra', secret_reference='ref-2',
+        )
+        TenantDatabase.objects.create(
+            tenant=self.tenant_a, service=self.compta,
+            database_name='db_hc_compta', host='db-compta', secret_reference='ref-3',
+        )
+        self.assertEqual(TenantDatabase.objects.filter(tenant=self.tenant_a).count(), 3)
+
+    def test_multiple_tenants_can_use_the_same_service(self):
+        """Tenant A + Personnel et Tenant B + Personnel → deux configurations distinctes valides."""
+        TenantDatabase.objects.create(
+            tenant=self.tenant_a, service=self.personnel,
+            database_name='db_a_personnel', host='db-a', secret_reference='ref-a',
+        )
+        TenantDatabase.objects.create(
+            tenant=self.tenant_b, service=self.personnel,
+            database_name='db_b_personnel', host='db-b', secret_reference='ref-b',
+        )
+        self.assertEqual(TenantDatabase.objects.filter(service=self.personnel).count(), 2)
+
+    def test_duplicate_tenant_service_pair_is_rejected(self):
+        """Tenant A + Personnel → DB_1 puis Tenant A + Personnel → DB_2 : refusé (contrainte d'unicité)."""
+        TenantDatabase.objects.create(
+            tenant=self.tenant_a, service=self.personnel,
+            database_name='db_1', host='db-a', secret_reference='ref-1',
+        )
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                TenantDatabase.objects.create(
+                    tenant=self.tenant_a, service=self.personnel,
+                    database_name='db_2', host='db-a', secret_reference='ref-2',
+                )
+
+    def test_default_status_is_pending(self):
+        """Aucune création physique n'a lieu ici : le statut par défaut n'est pas ACTIVE."""
+        tdb = TenantDatabase.objects.create(
+            tenant=self.tenant_a, service=self.personnel,
+            database_name='db_1', host='db-a', secret_reference='ref-1',
+        )
+        self.assertEqual(tdb.status, TenantDatabaseStatus.PENDING)
+
+
+class TenantDatabaseAPITests(APITestCase):
+    """
+    Endpoints CRUD de TenantDatabase — réservés PLATFORM_ADMIN, informations
+    d'infrastructure sensibles (host, port, secret_reference).
+    """
+
+    def setUp(self):
+        self.tenant_a = _make_tenant('hopital-central', 'Hôpital Central')
+        self.tenant_b = _make_tenant('clinique-paix', 'Clinique de la Paix')
+        self.personnel = _make_service('PERSONNEL', 'Service Personnel')
+        self.infrastructure = _make_service('INFRASTRUCTURE', 'Infrastructure')
+
+    def _create_payload(self, tenant, service, **overrides):
+        payload = {
+            'tenant': str(tenant.id),
+            'service': service.code,
+            'database_name': f'db_{tenant.identifier}_{service.code.lower()}',
+            'host': 'fultang-tenant-db',
+            'port': 5432,
+            'secret_reference': f'vault://tenant-db/{tenant.identifier}/{service.code.lower()}',
+        }
+        payload.update(overrides)
+        return payload
+
+    # --- Cas fonctionnels ---------------------------------------------------
+
+    def test_platform_admin_can_create_tenant_database(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        response = self.client.post(
+            '/api/tenant-databases/',
+            self._create_payload(self.tenant_a, self.personnel),
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], TenantDatabaseStatus.PENDING)
+
+    def test_tenant_with_multiple_services_via_api(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        r1 = self.client.post('/api/tenant-databases/', self._create_payload(self.tenant_a, self.personnel), format='json')
+        r2 = self.client.post('/api/tenant-databases/', self._create_payload(self.tenant_a, self.infrastructure), format='json')
+        self.assertEqual(r1.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(r2.status_code, status.HTTP_201_CREATED)
+
+    def test_multiple_tenants_same_service_via_api(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        r1 = self.client.post('/api/tenant-databases/', self._create_payload(self.tenant_a, self.personnel), format='json')
+        r2 = self.client.post('/api/tenant-databases/', self._create_payload(self.tenant_b, self.personnel), format='json')
+        self.assertEqual(r1.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(r2.status_code, status.HTTP_201_CREATED)
+
+    def test_duplicate_tenant_service_via_api_returns_400(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        self.client.post('/api/tenant-databases/', self._create_payload(self.tenant_a, self.personnel), format='json')
+        response = self.client.post('/api/tenant-databases/', self._create_payload(self.tenant_a, self.personnel), format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_unknown_service_code_is_rejected(self):
+        """Un TenantDatabase ne peut pas référencer un service absent du catalogue."""
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        payload = self._create_payload(self.tenant_a, self.personnel)
+        payload['service'] = 'DOES_NOT_EXIST'
+        response = self.client.post('/api/tenant-databases/', payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('service', response.data)
+
+    def test_status_transitions(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        create_resp = self.client.post('/api/tenant-databases/', self._create_payload(self.tenant_a, self.personnel), format='json')
+        tdb_id = create_resp.data['id']
+        self.assertEqual(create_resp.data['status'], TenantDatabaseStatus.PENDING)
+
+        active_resp = self.client.patch(f'/api/tenant-databases/{tdb_id}/status/', {'status': 'ACTIVE'}, format='json')
+        self.assertEqual(active_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(active_resp.data['status'], TenantDatabaseStatus.ACTIVE)
+
+        inactive_resp = self.client.patch(f'/api/tenant-databases/{tdb_id}/status/', {'status': 'INACTIVE'}, format='json')
+        self.assertEqual(inactive_resp.data['status'], TenantDatabaseStatus.INACTIVE)
+
+        pending_resp = self.client.patch(f'/api/tenant-databases/{tdb_id}/status/', {'status': 'PENDING'}, format='json')
+        self.assertEqual(pending_resp.data['status'], TenantDatabaseStatus.PENDING)
+
+    def test_list_filterable_by_tenant_and_service(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        self.client.post('/api/tenant-databases/', self._create_payload(self.tenant_a, self.personnel), format='json')
+        self.client.post('/api/tenant-databases/', self._create_payload(self.tenant_b, self.personnel), format='json')
+
+        response = self.client.get('/api/tenant-databases/', {'tenant': str(self.tenant_a.id)})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['tenant'], self.tenant_a.id)
+
+    # --- Modification des champs d'infrastructure ---------------------------
+
+    def test_platform_admin_can_update_infrastructure_fields(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        create_resp = self.client.post('/api/tenant-databases/', self._create_payload(self.tenant_a, self.personnel), format='json')
+        tdb_id = create_resp.data['id']
+
+        response = self.client.patch(f'/api/tenant-databases/{tdb_id}/', {'host': 'new-db-host'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(TenantDatabase.objects.get(id=tdb_id).host, 'new-db-host')
+
+    def test_reassigning_tenant_via_update_has_no_effect(self):
+        """
+        Rôle 7 : réassigner un tenant vers la config d'un autre tenant doit
+        être impossible — le serializer de mise à jour n'expose pas `tenant`.
+        """
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        create_resp = self.client.post('/api/tenant-databases/', self._create_payload(self.tenant_a, self.personnel), format='json')
+        tdb_id = create_resp.data['id']
+
+        response = self.client.patch(
+            f'/api/tenant-databases/{tdb_id}/',
+            {'tenant': str(self.tenant_b.id), 'host': 'still-updatable'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        refreshed = TenantDatabase.objects.get(id=tdb_id)
+        self.assertEqual(refreshed.tenant_id, self.tenant_a.id)  # inchangé
+        self.assertEqual(refreshed.host, 'still-updatable')  # le reste s'applique bien
+
+    def test_status_is_not_editable_via_general_update(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        create_resp = self.client.post('/api/tenant-databases/', self._create_payload(self.tenant_a, self.personnel), format='json')
+        tdb_id = create_resp.data['id']
+
+        self.client.patch(f'/api/tenant-databases/{tdb_id}/', {'status': 'ACTIVE'}, format='json')
+        self.assertEqual(TenantDatabase.objects.get(id=tdb_id).status, TenantDatabaseStatus.PENDING)
+
+    # --- Permissions ----------------------------------------------------------
+
+    def test_anonymous_cannot_access_tenant_databases(self):
+        self.client.credentials(**ANONYMOUS_HEADERS)
+        response = self.client.get('/api/tenant-databases/')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_business_admin_cannot_create_tenant_database(self):
+        """Un utilisateur du tenant (rôle ADMIN local) ne peut pas déclarer d'infrastructure."""
+        self.client.credentials(**ADMIN_HEADERS)
+        response = self.client.post('/api/tenant-databases/', self._create_payload(self.tenant_a, self.personnel), format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_business_admin_cannot_update_infrastructure_fields(self):
+        tdb = TenantDatabase.objects.create(
+            tenant=self.tenant_a, service=self.personnel,
+            database_name='db_1', host='db-a', secret_reference='ref-1',
+        )
+        self.client.credentials(**ADMIN_HEADERS)
+        response = self.client.patch(f'/api/tenant-databases/{tdb.id}/', {'host': 'hacked-host'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(TenantDatabase.objects.get(id=tdb.id).host, 'db-a')
+
+    def test_business_admin_cannot_read_tenant_databases(self):
+        TenantDatabase.objects.create(
+            tenant=self.tenant_a, service=self.personnel,
+            database_name='db_1', host='db-a', secret_reference='ref-1',
+        )
+        self.client.credentials(**ADMIN_HEADERS)
+        response = self.client.get('/api/tenant-databases/')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    # --- Secrets ----------------------------------------------------------
+
+    def test_secret_reference_is_an_opaque_string_not_a_credential(self):
+        """
+        secret_reference est une référence (ex: chemin vault), jamais un mot
+        de passe — aucun champ credential/password n'existe sur ce modèle.
+        """
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        response = self.client.post('/api/tenant-databases/', self._create_payload(self.tenant_a, self.personnel), format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        field_names = set(response.data.keys())
+        self.assertIn('secret_reference', field_names)
+        self.assertFalse({'password', 'credential', 'credentials', 'db_password'} & field_names)
+
+    def test_model_has_no_password_field(self):
+        model_field_names = {f.name for f in TenantDatabase._meta.get_fields()}
+        self.assertFalse({'password', 'credential', 'credentials', 'db_password'} & model_field_names)

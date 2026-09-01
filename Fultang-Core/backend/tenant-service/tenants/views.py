@@ -38,10 +38,18 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .models import Tenant, TenantStatus
+from .models import PlatformService, Tenant, TenantDatabase, TenantDatabaseStatus, TenantStatus
 from .permissions import IsInternalService, IsPlatformAdmin
-from .serializers import TenantResolutionSerializer, TenantSerializer, TenantStatusUpdateSerializer
-from .services import TenantService
+from .serializers import (
+    PlatformServiceSerializer,
+    TenantDatabaseSerializer,
+    TenantDatabaseStatusUpdateSerializer,
+    TenantDatabaseUpdateSerializer,
+    TenantResolutionSerializer,
+    TenantSerializer,
+    TenantStatusUpdateSerializer,
+)
+from .services import PlatformServiceCatalog, TenantDatabaseService, TenantService
 
 
 class TenantViewSet(mixins.CreateModelMixin,
@@ -105,3 +113,126 @@ class TenantViewSet(mixins.CreateModelMixin,
             return Response(status=status.HTTP_404_NOT_FOUND)
 
         return Response(TenantResolutionSerializer(tenant).data)
+
+
+class PlatformServiceViewSet(mixins.CreateModelMixin,
+                              mixins.ListModelMixin,
+                              mixins.RetrieveModelMixin,
+                              viewsets.GenericViewSet):
+    """
+    Catalogue des services de la plateforme (Phase 5).
+
+    Endpoints exposés :
+        POST   /api/platform-services/       → enregistrer un nouveau service
+        GET    /api/platform-services/       → lister les services
+        GET    /api/platform-services/{code}/ → consulter un service
+
+    Réservé au PLATFORM_ADMIN : ajouter un service au catalogue est une
+    opération de plateforme, jamais une action tenant-scope. Aucune
+    suppression ni mise à jour exposées à ce stade — un service, une
+    fois créé, n'a pas vocation à être renommé (son `code` doit rester
+    stable, voir PlatformService).
+    """
+
+    queryset = PlatformService.objects.all()
+    serializer_class = PlatformServiceSerializer
+    lookup_field = 'code'
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+
+    @property
+    def catalog(self) -> PlatformServiceCatalog:
+        return PlatformServiceCatalog()
+
+    def get_queryset(self):
+        status_filter = self.request.query_params.get('status')
+        return self.catalog.list_services(status=status_filter)
+
+    def perform_create(self, serializer):
+        service = self.catalog.register_service(
+            code=serializer.validated_data['code'],
+            name=serializer.validated_data['name'],
+        )
+        serializer.instance = service
+
+
+class TenantDatabaseViewSet(mixins.CreateModelMixin,
+                             mixins.ListModelMixin,
+                             mixins.RetrieveModelMixin,
+                             mixins.UpdateModelMixin,
+                             viewsets.GenericViewSet):
+    """
+    Association Tenant + Service → Database (Phase 5 — Tenant Database
+    Management, modèle "Database per Tenant per Service").
+
+    Endpoints exposés :
+        POST   /api/tenant-databases/               → déclarer une configuration
+        GET    /api/tenant-databases/                → lister (filtrable par
+                                                         ?tenant=, ?service=, ?status=)
+        GET    /api/tenant-databases/{id}/            → consulter une configuration
+        PATCH  /api/tenant-databases/{id}/            → modifier database_name/
+                                                         host/port/secret_reference
+        PATCH  /api/tenant-databases/{id}/status/     → changer le statut logique
+
+    Réservé au PLATFORM_ADMIN : ce sont des informations d'infrastructure
+    sensibles (host, port, secret_reference). Un administrateur
+    d'établissement (rôle ADMIN, tenant-scope) n'a accès à aucune
+    opération de ce ViewSet — voir permissions.py (IsPlatformAdmin,
+    réutilisée telle quelle, aucun nouveau système RBAC introduit).
+
+    Ce que ce ViewSet ne fait PAS : créer/modifier/supprimer une base
+    PostgreSQL physique, ni router une requête vers elle. Il ne fait que
+    gérer l'enregistrement déclaratif.
+    """
+
+    queryset = TenantDatabase.objects.select_related('tenant', 'service').all()
+    serializer_class = TenantDatabaseSerializer
+    lookup_field = 'id'
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+
+    @property
+    def service(self) -> TenantDatabaseService:
+        return TenantDatabaseService()
+
+    def get_serializer_class(self):
+        # tenant/service ne sont modifiables qu'à la création — voir
+        # TenantDatabaseUpdateSerializer.
+        if self.action in ('update', 'partial_update'):
+            return TenantDatabaseUpdateSerializer
+        return TenantDatabaseSerializer
+
+    def get_queryset(self):
+        params = self.request.query_params
+        return self.service.list_tenant_databases(
+            tenant_id=params.get('tenant'),
+            service_code=params.get('service'),
+            status=params.get('status'),
+        )
+
+    def perform_create(self, serializer):
+        data = serializer.validated_data
+        instance = self.service.create_tenant_database(
+            tenant_id=data['tenant'].id,
+            service_code=data['service'].code,
+            database_name=data['database_name'],
+            host=data['host'],
+            port=data.get('port', 5432),
+            secret_reference=data['secret_reference'],
+        )
+        serializer.instance = instance
+
+    def perform_update(self, serializer):
+        instance = self.service.update_tenant_database(serializer.instance.id, **serializer.validated_data)
+        serializer.instance = instance
+
+    @action(detail=True, methods=['patch'], url_path='status')
+    def update_status(self, request, id=None):
+        """PATCH /tenant-databases/{id}/status/ — change le statut logique (aucune action physique)."""
+        instance = self.get_object()
+
+        serializer = TenantDatabaseStatusUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        new_status = serializer.validated_data['status']
+
+        updated = self.service.set_status(instance.id, new_status)
+
+        return Response(TenantDatabaseSerializer(updated).data, status=status.HTTP_200_OK)

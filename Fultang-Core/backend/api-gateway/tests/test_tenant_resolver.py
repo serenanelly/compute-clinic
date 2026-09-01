@@ -77,7 +77,10 @@ async def test_resolve_returns_none_for_non_tenant_hostname():
 
 
 async def test_resolve_active_tenant():
-    """CAS 1 : hostname valide, tenant ACTIVE → résolution réussie."""
+    """
+    CAS A (spec Phase 2.2) : hopital-central.fulltang.com, tenant existant,
+    ACTIVE → résolution réussie et TenantContext complet (id, identifier, status).
+    """
     resolver = make_resolver()
     mock_response = httpx.Response(
         200,
@@ -89,9 +92,18 @@ async def test_resolve_active_tenant():
     assert context == TenantContext(
         tenant_id="57d9d34f-0000-0000-0000-000000000001",
         tenant_identifier="hopital-central",
+        status="ACTIVE",
     )
     mocked_get.assert_awaited_once()
     assert mocked_get.call_args.kwargs["params"] == {"identifier": "hopital-central"}
+
+
+def test_tenant_context_exposes_id_identifier_and_status():
+    """Le TenantContext doit représenter clairement id / identifier / status (Phase 2.2)."""
+    context = TenantContext(tenant_id="uuid-1", tenant_identifier="hopital-central", status="ACTIVE")
+    assert context.tenant_id == "uuid-1"
+    assert context.tenant_identifier == "hopital-central"
+    assert context.status == "ACTIVE"
 
 
 # --- Authentification interne Gateway → Tenant Service -----------------------
@@ -149,8 +161,19 @@ async def test_resolve_unknown_tenant_raises_not_found():
             await resolver.resolve("clinique-inconnue.fulltang.com")
 
 
+async def test_resolve_unknown_subdomain_raises_not_found():
+    """CAS B (spec Phase 2.2) : unknown.fulltang.com → tenant inexistant, sans appel métier."""
+    resolver = make_resolver()
+    mock_response = httpx.Response(404)
+    with patch.object(resolver._client, "get", new=AsyncMock(return_value=mock_response)):
+        with pytest.raises(TenantNotFoundError) as exc_info:
+            await resolver.resolve("unknown.fulltang.com")
+
+    assert exc_info.value.tenant_identifier == "unknown"
+
+
 async def test_resolve_inactive_tenant_raises_inactive_error():
-    """CAS 3 : tenant existant mais status = INACTIVE."""
+    """CAS 3 / CAS C (spec Phase 2.2) : tenant existant mais status = INACTIVE → accès refusé."""
     resolver = make_resolver()
     mock_response = httpx.Response(
         200,
@@ -159,6 +182,16 @@ async def test_resolve_inactive_tenant_raises_inactive_error():
     with patch.object(resolver._client, "get", new=AsyncMock(return_value=mock_response)):
         with pytest.raises(TenantInactiveError):
             await resolver.resolve("clinique-fermee.fulltang.com")
+
+
+async def test_resolve_invalid_host_is_refused_without_calling_tenant_service():
+    """CAS D (spec Phase 2.2) : hostname ne correspondant pas au domaine configuré → refusé, aucun appel réseau."""
+    resolver = make_resolver()
+    with patch.object(resolver._client, "get", new=AsyncMock()) as mocked_get:
+        context = await resolver.resolve("not-a-fulltang-domain.example.org")
+
+    assert context is None
+    mocked_get.assert_not_awaited()
 
 
 async def test_resolve_raises_resolution_error_when_tenant_service_unreachable():

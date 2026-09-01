@@ -218,39 +218,60 @@ class AdminViewSet(viewsets.ModelViewSet):
     serializer_class = AdminSerializer
 
 class AuthVerifyView(APIView):
+    """
+    Vérifie des identifiants dans le contexte d'un tenant (Phase Tenant-Aware
+    Authentication).
+
+    `tenant_id` est fourni par la Gateway, qui l'a elle-même obtenu via la
+    Tenant Resolution (hostname → Tenant Registry) — jamais du client
+    directement. `tenant_id` absent/null = pool non assigné (comptes créés
+    avant l'introduction du multitenant, ou environnement de développement
+    local sans sous-domaine de tenant) : ce service ne fait ici que
+    respecter le tenant_id qu'on lui donne, il ne le devine jamais.
+
+    Le même email peut désormais exister dans deux tenants différents : ce
+    sont deux comptes distincts, la recherche est donc systématiquement
+    scopée par (email, tenant_id).
+    """
     permission_classes = []
     authentication_classes = []
 
     def post(self, request):
         email = request.data.get('email')
         password = request.data.get('password')
-        
+        tenant_id = request.data.get('tenant_id')  # None = pool non assigné
+
         if not email or not password:
             return Response({"detail": "Email et mot de passe requis"}, status=status.HTTP_400_BAD_REQUEST)
-        
+
         # DEBUG LOGS
-        print(f"Tentative de connexion pour: {email}")
+        print(f"Tentative de connexion pour: {email} (tenant_id={tenant_id})")
         from .models import Admin, Directeur
         print(f"Nombre d'Admins en base: {Admin.objects.count()}")
         print(f"Nombre de Directeurs en base: {Directeur.objects.count()}")
-        
+
         # Liste des modèles de personnel à vérifier
         personnel_models = [
-            Medecin, MedecinGeneraliste, Infirmiere, Receptionniste, ComptableFinancier, 
+            Medecin, MedecinGeneraliste, Infirmiere, Receptionniste, ComptableFinancier,
             ComptableMatiere, Laborantin, Pharmacien, Directeur, Admin
         ]
-        
+
         user = None
         user_role = None
-        
+
         for model in personnel_models:
             try:
-                user = model.objects.get(email=email)
+                user = model.objects.get(email=email, tenant_id=tenant_id)
                 user_role = model.__name__
                 break
             except model.DoesNotExist:
                 continue
-        
+            except model.MultipleObjectsReturned:
+                # Ne devrait pas arriver grâce à UniqueConstraint(tenant_id, email) —
+                # sauf pour tenant_id=NULL, où Postgres n'impose pas l'unicité entre
+                # plusieurs NULL. On refuse plutôt que de choisir arbitrairement.
+                continue
+
         if user is not None and check_password(password, user.mot_de_passe):
             # Rôles canoniques pour les comptes de démo (évite les doublons multi-tables)
             CANONICAL_ROLES = {

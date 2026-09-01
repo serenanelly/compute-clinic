@@ -3,10 +3,12 @@ authentication.py — Authentification par confiance envers l'API Gateway.
 
 Les microservices situés derrière la Gateway n'ont pas besoin de vérifier
 le JWT eux-mêmes. La Gateway a déjà validé le token et injecte l'identité
-de l'utilisateur dans les headers HTTP (X-User-ID, X-User-Roles, …).
+de l'utilisateur dans les headers HTTP (X-User-ID, X-User-Roles, X-Tenant-ID, …).
+X-Tenant-ID est absent si le compte n'est rattaché à aucun tenant.
 
 Fallback : si le client appelle le service avec un Bearer JWT Gateway
-(sans headers X-User-*), on décode le token localement (même secret que la Gateway).
+(sans headers X-User-*), on décode le token localement (même secret que la
+Gateway) — le JWT porte lui aussi `tenant_id` (voir api-gateway/app/main.py::login()).
 """
 
 import logging
@@ -22,16 +24,17 @@ class GatewayUser:
     Objet utilisateur abstrait représentant l'identité transmise par la Gateway.
     Permet à request.user.is_authenticated de valoir True.
     """
-    def __init__(self, user_id, roles, email='', nom='', prenom=''):
+    def __init__(self, user_id, roles, tenant_id=None, email='', nom='', prenom=''):
         self.id = user_id
         self.roles = roles if isinstance(roles, list) else []
+        self.tenant_id = tenant_id
         self.email = email or ''
         self.nom = nom or ''
         self.prenom = prenom or ''
         self.is_authenticated = True
 
     def __str__(self):
-        return f"GatewayUser(id={self.id}, roles={self.roles}, email={self.email})"
+        return f"GatewayUser(id={self.id}, roles={self.roles}, tenant_id={self.tenant_id}, email={self.email})"
 
 
 class GatewayHeaderAuthentication(authentication.BaseAuthentication):
@@ -49,6 +52,7 @@ class GatewayHeaderAuthentication(authentication.BaseAuthentication):
             return (GatewayUser(
                 user_id=user_id,
                 roles=roles,
+                tenant_id=request.META.get('HTTP_X_TENANT_ID') or None,
                 email=request.META.get('HTTP_X_USER_EMAIL', ''),
                 nom=request.META.get('HTTP_X_USER_NOM', ''),
                 prenom=request.META.get('HTTP_X_USER_PRENOM', ''),
@@ -66,6 +70,7 @@ class GatewayHeaderAuthentication(authentication.BaseAuthentication):
                     return (GatewayUser(
                         user_id=str(payload['sub']),
                         roles=roles,
+                        tenant_id=payload.get('tenant_id'),
                         email=payload.get('email') or '',
                         nom=payload.get('nom') or '',
                         prenom=payload.get('prenom') or '',

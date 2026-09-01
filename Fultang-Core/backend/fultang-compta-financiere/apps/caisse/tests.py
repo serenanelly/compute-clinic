@@ -2,12 +2,13 @@
 Tests unitaires — App Caisse.
 """
 from datetime import date
-from django.test import TestCase
+from django.test import RequestFactory, TestCase
 from rest_framework.test import APIClient
 from rest_framework import status
 
 from apps.comptabilite.models import CompteComptable, Journal, ExerciceComptable
 from apps.caisse.models import Quittance, CaisseJournaliere
+from config.authentication import GatewayHeaderAuthentication
 
 
 def setup_base():
@@ -98,3 +99,68 @@ class CaisseJournaliereTests(TestCase):
         r2 = self.client.patch(f'/api/caisse-journaliere/{cid}/fermer/', {'solde_physique': '98000'}, format='json')
         self.assertEqual(r2.status_code, status.HTTP_200_OK)
         self.assertEqual(r2.data['statut'], 'fermee')
+
+
+class GatewayHeaderAuthenticationTenantTests(TestCase):
+    """
+    Phase 4 — Tenant Context Propagation.
+
+    Le service reçoit, valide et expose le tenant_id transmis par la
+    Gateway, via X-Tenant-ID (headers injectés) OU via le JWT décodé
+    localement (fallback sans headers) — les deux chemins de
+    GatewayHeaderAuthentication doivent porter tenant_id. Aucun filtrage
+    métier par tenant n'est ajouté à ce stade (hors périmètre).
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.auth = GatewayHeaderAuthentication()
+
+    def test_authenticate_exposes_tenant_id_from_header(self):
+        request = self.factory.get(
+            "/api/quittances/",
+            HTTP_X_USER_ID="9b914558-975f-4b3a-bdaa-d67e95740837",
+            HTTP_X_USER_ROLES="ComptableFinancier",
+            HTTP_X_TENANT_ID="11111111-1111-1111-1111-111111111111",
+        )
+
+        user, auth = self.auth.authenticate(request)
+
+        self.assertEqual(user.tenant_id, "11111111-1111-1111-1111-111111111111")
+        self.assertIsNone(auth)
+
+    def test_authenticate_without_tenant_header_leaves_tenant_id_none(self):
+        request = self.factory.get(
+            "/api/quittances/",
+            HTTP_X_USER_ID="9b914558-975f-4b3a-bdaa-d67e95740837",
+            HTTP_X_USER_ROLES="ComptableFinancier",
+        )
+
+        user, _ = self.auth.authenticate(request)
+
+        self.assertIsNone(user.tenant_id)
+
+    def test_authenticate_without_user_id_returns_none(self):
+        request = self.factory.get("/api/quittances/")
+        self.assertIsNone(self.auth.authenticate(request))
+
+    def test_jwt_fallback_path_also_exposes_tenant_id(self):
+        """Sans headers X-User-*, un Bearer JWT Gateway est décodé localement — doit aussi porter tenant_id."""
+        import jwt
+        from django.conf import settings
+
+        token = jwt.encode(
+            {
+                "sub": "9b914558-975f-4b3a-bdaa-d67e95740837",
+                "roles": ["ComptableFinancier"],
+                "tenant_id": "11111111-1111-1111-1111-111111111111",
+            },
+            settings.GATEWAY_JWT_SECRET,
+            algorithm="HS256",
+        )
+        request = self.factory.get("/api/quittances/", HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        user, _ = self.auth.authenticate(request)
+
+        self.assertIsNotNone(user)
+        self.assertEqual(user.tenant_id, "11111111-1111-1111-1111-111111111111")

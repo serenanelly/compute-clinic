@@ -35,9 +35,20 @@ INTERNAL_SERVICE_TOKEN_HEADER = "X-Internal-Service-Token"
 
 @dataclass(frozen=True)
 class TenantContext:
-    """Résultat d'une résolution hostname → tenant réussie."""
+    """
+    Résultat d'une résolution hostname → tenant réussie.
+
+    Ne représente que l'identification du tenant demandé (id, identifier,
+    status) — jamais une preuve d'autorisation utilisateur. `status` est
+    toujours "ACTIVE" ici (un tenant INACTIVE lève TenantInactiveError
+    avant la construction du contexte) ; il est inclus explicitement pour
+    que ce contexte reste une représentation complète et autoportante du
+    tenant résolu, exploitable par les phases suivantes sans qu'elles
+    aient à relire cette hypothèse dans le code du resolver.
+    """
     tenant_id: str
     tenant_identifier: str
+    status: str
 
 
 class TenantResolutionError(Exception):
@@ -134,4 +145,4 @@ class TenantResolver:
         if data.get("status") != "ACTIVE":
             raise TenantInactiveError(identifier)
 
-        return TenantContext(tenant_id=data["id"], tenant_identifier=data["identifier"])
+        return TenantContext(tenant_id=data["id"], tenant_identifier=data["identifier"], status=data["status"])
