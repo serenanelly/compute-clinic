@@ -9,11 +9,14 @@
  */
 import axios from "axios";
 import { getToken, getRefreshToken } from './authToken';
+import { getGatewayBaseUrl } from './gatewayUrls';
 
-const GATEWAY_URL = import.meta.env.VITE_API_GATEWAY_URL || 'http://localhost:8080';
+// getGatewayBaseUrl() cible le hostname courant (résolution de tenant par
+// sous-domaine) — voir axiosInstance.js / Utils/gatewayUrls.js pour le détail.
+const GATEWAY_URL = getGatewayBaseUrl();
 
 const axiosInstanceCompta = axios.create({
-    baseURL: import.meta.env.VITE_BACKEND_FULTANG_API_BASE_ACCOUNTANT_URL || "http://localhost:8080/compta-financiere",
+    baseURL: `${GATEWAY_URL}/compta-financiere`,
     headers: {
         'Content-Type': 'application/json'
     }

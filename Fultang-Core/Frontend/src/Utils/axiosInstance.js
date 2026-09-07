@@ -1,7 +1,13 @@
 import axios from "axios";
+import { getGatewayBaseUrl } from "./gatewayUrls";
 
+// getGatewayBaseUrl() cible le hostname courant (résolution de tenant par
+// sous-domaine) — sans cela, tous les appels médicaux (Doctor/Nurse/
+// Patient/Pharmacist/Laboratory...) partiraient vers un hostname fixe
+// (VITE_BACKEND_FULTANG_API_BASE_MEDICALSTAFF_URL) au lieu du tenant
+// réellement ouvert dans le navigateur. Voir Utils/gatewayUrls.js.
 const axiosInstance = axios.create({
-    baseURL: import.meta.env.VITE_BACKEND_FULTANG_API_BASE_MEDICALSTAFF_URL,
+    baseURL: `${getGatewayBaseUrl()}/medical`,
     headers: {
         'Content-Type': 'application/json'
     }

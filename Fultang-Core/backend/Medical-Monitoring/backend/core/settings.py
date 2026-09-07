@@ -77,6 +77,10 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # Doit rester DERNIER : englobe tout le cycle de requête, y compris
+    # l'authentification DRF qui établit le Tenant Context pendant
+    # get_response (voir core/tenant_routing/middleware.py).
+    'core.tenant_routing.middleware.TenantContextCleanupMiddleware',
 ]
 
 ROOT_URLCONF = 'core.urls'
@@ -106,6 +110,35 @@ WSGI_APPLICATION = 'core.wsgi.application'
 DATABASES = {
     'default': env.db('DATABASE_URL')
 }
+
+# ============================================================
+# TENANT ROUTING (Database per Tenant per Service)
+# ============================================================
+# Même patron que service-personnel (voir core/tenant_routing/) : le
+# Router n'active le routage par tenant QUE pour les apps métier
+# (patient, medical_workflow, patient_informations) — 'default' (ci-
+# dessus) continue de servir les apps système (auth, admin, sessions).
+DATABASE_ROUTERS = ['core.tenant_routing.router.TenantDatabaseRouter']
+
+# URL/jeton du Tenant Registry — mêmes noms de variables que
+# service-personnel et tenant-service, même jeton partagé.
+TENANT_SERVICE_URL = env('TENANT_SERVICE_URL', default='http://fultang-tenant-web:8000')
+TENANT_SERVICE_INTERNAL_TOKEN = env('TENANT_SERVICE_INTERNAL_TOKEN', default='')
+TENANT_SERVICE_TIMEOUT_SECONDS = env.int('TENANT_SERVICE_TIMEOUT_SECONDS', default=5)
+
+# Cache TTL du mapping tenant → base (voir tenant_routing/cache.py).
+TENANT_DB_CACHE_TTL_SECONDS = env.int('TENANT_DB_CACHE_TTL_SECONDS', default=300)
+
+# "Pool" de connexion (CONN_MAX_AGE — voir tenant_routing/pool_registry.py
+# pour l'explication honnête de ce que Django appelle réellement un pool).
+TENANT_DB_CONN_MAX_AGE = env.int('TENANT_DB_CONN_MAX_AGE', default=60)
+
+# Credentials PostgreSQL pour TOUTES les bases tenant de ce service dans
+# cette phase (compte partagé, pas de Secret Manager — même limite déjà
+# documentée pour service-personnel). Défaut : mêmes valeurs que le
+# compte applicatif de la base 'default' de ce service.
+TENANT_DB_USER = env('TENANT_DB_USER', default=env('FULTANG_DB_USER', default='fultang_user'))
+TENANT_DB_PASSWORD = env('TENANT_DB_PASSWORD', default=env('FULTANG_DB_PASSWORD', default=''))
 
 
 

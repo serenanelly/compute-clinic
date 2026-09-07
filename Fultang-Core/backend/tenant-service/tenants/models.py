@@ -65,6 +65,20 @@ class Tenant(models.Model):
         default=TenantStatus.ACTIVE,
         help_text="Statut du tenant dans le registre (actif / inactif).",
     )
+    allow_clinical_agent_export = models.BooleanField(
+        default=True,
+        help_text=(
+            "Autorise ou non l'envoi des données médicales anonymisées de "
+            "ce tenant vers clinical-agent / MedTutor. Par défaut True : "
+            "un tenant existant avant l'introduction de ce champ conserve "
+            "le comportement actuel après migration (aucune régression "
+            "silencieuse de fonctionnalité). Source de vérité unique — "
+            "clinical-agent interroge ce champ (via le Tenant Registry) "
+            "avant toute lecture de données destinées à l'export, jamais "
+            "après ; la logique de décision reste dans clinical-agent, ce "
+            "champ n'est qu'une configuration."
+        ),
+    )
     created_at = models.DateTimeField(
         auto_now_add=True,
         help_text="Date de création de l'enregistrement du tenant.",

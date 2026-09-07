@@ -251,28 +251,35 @@ def _fetch_visite_complete(main_db: Session, visite_id: str) -> Optional[dict]:
 # Fonction principale de synchronisation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def sync_visite(visite_id: str, main_db: Session, tampon_db: Session) -> dict:
+def sync_visite(tenant_id: str, visite_id: str, main_db: Session, tampon_db: Session) -> dict:
     """
-    Synchronise une visite terminée dans la BD tampon.
-    Crée ou met à jour le cas clinique anonymisé du patient.
-    Enregistre la visite dans le registre VisiteSynced pour éviter les doublons.
+    Synchronise une visite terminée dans la BD tampon, POUR le tenant
+    `tenant_id`. Crée ou met à jour le cas clinique anonymisé du patient.
+    Enregistre la visite dans le registre VisiteSynced pour éviter les
+    doublons — le tout scopé par tenant (voir models.py::CasClinique).
+
+    N'APPLIQUE PAS `allow_clinical_agent_export` ici : cette fonction
+    suppose que l'appelant (main.py) a déjà vérifié l'autorisation AVANT
+    d'appeler cette fonction (le refus doit intervenir avant toute
+    lecture, voir main.py::sync_visite_endpoint) — cette fonction ne
+    fait QUE la synchronisation elle-même, jamais la décision d'autorisation.
     """
-    # 1. Vérifier si déjà synchronisée
-    already = tampon_db.query(VisiteSynced).filter_by(visite_id_source=visite_id).first()
+    # 1. Vérifier si déjà synchronisée (scopé par tenant)
+    already = tampon_db.query(VisiteSynced).filter_by(visite_id_source=visite_id, tenant_id=tenant_id).first()
     if already:
-        logger.info(f"Visite {visite_id} déjà synchronisée — ignorée.")
+        logger.info(f"Visite {visite_id} (tenant={tenant_id}) déjà synchronisée — ignorée.")
         return {"status": "already_synced", "visite_id": visite_id}
 
-    # 2. Récupérer la visite complète depuis la BD principale
+    # 2. Récupérer la visite complète depuis la BASE DU TENANT
     result = _fetch_visite_complete(main_db, visite_id)
     if not result:
-        logger.warning(f"Visite {visite_id} introuvable dans la BD principale.")
+        logger.warning(f"Visite {visite_id} introuvable dans la base du tenant {tenant_id}.")
         return {"status": "not_found", "visite_id": visite_id}
 
     visite_data, patient_id = result
 
-    # 3. Récupérer ou créer le cas clinique du patient dans la tampon
-    cas = tampon_db.query(CasClinique).filter_by(patient_id_source=patient_id).first()
+    # 3. Récupérer ou créer le cas clinique du patient dans la tampon (scopé par tenant)
+    cas = tampon_db.query(CasClinique).filter_by(patient_id_source=patient_id, tenant_id=tenant_id).first()
 
     if not cas:
         # Première visite de ce patient → créer le cas clinique
@@ -285,6 +292,7 @@ def sync_visite(visite_id: str, main_db: Session, tampon_db: Session) -> dict:
         antecedents = _fetch_antecedents_medicaux(main_db, patient_id)
 
         cas = CasClinique(
+            tenant_id=tenant_id,
             **patient_info,
             **donnees_cliniques,
             **antecedents,
@@ -306,8 +314,9 @@ def sync_visite(visite_id: str, main_db: Session, tampon_db: Session) -> dict:
             if v is not None:
                 setattr(cas, k, v)
 
-    # 4. Enregistrer la visite dans le registre
+    # 4. Enregistrer la visite dans le registre (scopé par tenant)
     synced = VisiteSynced(
+        tenant_id=tenant_id,
         visite_id_source=visite_id,
         patient_id_source=patient_id,
         statut_visite=visite_data.get("statut"),
@@ -315,7 +324,7 @@ def sync_visite(visite_id: str, main_db: Session, tampon_db: Session) -> dict:
     tampon_db.add(synced)
     tampon_db.commit()
 
-    logger.info(f"Visite {visite_id} synchronisée avec succès pour patient {patient_id}.")
+    logger.info(f"Visite {visite_id} (tenant={tenant_id}) synchronisée avec succès pour patient {patient_id}.")
     return {
         "status": "synced",
         "visite_id": visite_id,
@@ -324,28 +333,39 @@ def sync_visite(visite_id: str, main_db: Session, tampon_db: Session) -> dict:
     }
 
 
-def sync_all_completed_visits(main_db: Session, tampon_db: Session) -> dict:
+def sync_all_completed_visits(tenant_id: str, main_db: Session, tampon_db: Session) -> dict:
     """
-    Synchronise toutes les visites TERMINE de la BD principale
-    qui n'ont pas encore été traitées dans la BD tampon.
-    Utilisé au démarrage et par le planificateur périodique.
-    """
-    # Récupérer les IDs de visites déjà synchronisées
-    synced_ids = {r.visite_id_source for r in tampon_db.query(VisiteSynced).all()}
+    Synchronise toutes les visites TERMINE de la base du tenant
+    `tenant_id` qui n'ont pas encore été traitées dans la BD tampon.
+    Utilisé pour le rattrapage d'UN tenant donné (endpoint public
+    `/sync/all`, avec X-Tenant-ID) ET par la boucle interne
+    `sync_all_known_tenants` (main.py) qui l'appelle une fois par tenant
+    énuméré explicitement — jamais un parcours implicite "tous les
+    tenants" à l'intérieur de cette fonction.
 
-    # Toutes les visites TERMINE dans la BD principale
+    N'applique pas `allow_clinical_agent_export` ici — même principe que
+    `sync_visite` : la vérification a lieu chez l'appelant, avant tout
+    appel à cette fonction.
+    """
+    # Récupérer les IDs de visites déjà synchronisées POUR CE TENANT
+    synced_ids = {
+        r.visite_id_source
+        for r in tampon_db.query(VisiteSynced).filter_by(tenant_id=tenant_id).all()
+    }
+
+    # Toutes les visites TERMINE dans la base DE CE TENANT
     rows = main_db.execute(text("""
         SELECT id FROM medical_workflow_visite
         WHERE statut = 'TERMINE'
     """)).fetchall()
 
     pending = [str(r.id) for r in rows if str(r.id) not in synced_ids]
-    logger.info(f"Rattrapage : {len(pending)} visite(s) TERMINE à synchroniser.")
+    logger.info(f"Rattrapage tenant={tenant_id} : {len(pending)} visite(s) TERMINE à synchroniser.")
 
     results = []
     for visite_id in pending:
         try:
-            result = sync_visite(visite_id, main_db, tampon_db)
+            result = sync_visite(tenant_id, visite_id, main_db, tampon_db)
             results.append(result)
         except Exception as e:
             logger.error(f"Erreur sync visite {visite_id}: {e}")

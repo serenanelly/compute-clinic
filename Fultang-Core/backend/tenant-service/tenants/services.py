@@ -35,13 +35,22 @@ class TenantService:
     def __init__(self, repository: Optional[TenantRepository] = None):
         self._repository = repository or TenantRepository()
 
-    def create_tenant(self, *, name: str, identifier: str) -> Tenant:
+    def create_tenant(
+        self, *, name: str, identifier: str, allow_clinical_agent_export: Optional[bool] = None,
+    ) -> Tenant:
         """Enregistre un nouvel établissement dans le Tenant Registry."""
-        return self._repository.create(name=name, identifier=identifier)
+        return self._repository.create(
+            name=name, identifier=identifier,
+            allow_clinical_agent_export=allow_clinical_agent_export,
+        )
 
     def get_tenant(self, tenant_id: UUID) -> Tenant:
         """Retourne un tenant par son identifiant technique (UUID)."""
         return self._repository.get_by_id(tenant_id)
+
+    def set_clinical_agent_export_authorization(self, tenant_id: UUID, value: bool) -> Tenant:
+        """Active/désactive l'autorisation d'export clinical-agent pour ce tenant."""
+        return self._repository.update_allow_clinical_agent_export(tenant_id, value)
 
     def get_tenant_by_identifier(self, identifier: str) -> Optional[Tenant]:
         """Retourne un tenant par son identifiant métier stable, ou None."""

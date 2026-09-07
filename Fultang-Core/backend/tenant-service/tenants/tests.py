@@ -98,6 +98,48 @@ class TenantAPITests(APITestCase):
         tenant.refresh_from_db()
         self.assertEqual(tenant.status, TenantStatus.INACTIVE)
 
+    def test_new_tenant_defaults_to_export_allowed(self):
+        """§6 de la tâche : la valeur par défaut doit être True, y compris via l'API de création."""
+        response = self.client.post(
+            '/api/tenants/', {'name': 'Clinique Fultang', 'identifier': 'fultang'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data['allow_clinical_agent_export'])
+
+    def test_create_tenant_can_explicitly_disable_export(self):
+        response = self.client.post(
+            '/api/tenants/',
+            {'name': 'Clinique Fultang', 'identifier': 'fultang', 'allow_clinical_agent_export': False},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(response.data['allow_clinical_agent_export'])
+
+    def test_update_export_authorization(self):
+        tenant = Tenant.objects.create(name='Clinique Fultang', identifier='fultang')
+        self.assertTrue(tenant.allow_clinical_agent_export)
+
+        response = self.client.patch(
+            f'/api/tenants/{tenant.id}/', {'allow_clinical_agent_export': False}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tenant.refresh_from_db()
+        self.assertFalse(tenant.allow_clinical_agent_export)
+
+    def test_update_export_authorization_does_not_touch_status_or_identifier(self):
+        """TenantUpdateSerializer n'expose que allow_clinical_agent_export — le reste est ignoré, pas une erreur 400."""
+        tenant = Tenant.objects.create(name='Clinique Fultang', identifier='fultang')
+        response = self.client.patch(
+            f'/api/tenants/{tenant.id}/',
+            {'allow_clinical_agent_export': False, 'status': TenantStatus.INACTIVE, 'identifier': 'hacked'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tenant.refresh_from_db()
+        self.assertFalse(tenant.allow_clinical_agent_export)
+        self.assertEqual(tenant.status, TenantStatus.ACTIVE)
+        self.assertEqual(tenant.identifier, 'fultang')
+
 
 class TenantManagementAuthorizationTests(APITestCase):
     """
@@ -202,8 +244,34 @@ class TenantResolveEndpointTests(APITestCase):
     def test_resolve_returns_minimal_fields_only(self):
         response = self._resolve('fultang', token=TEST_INTERNAL_TOKEN)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(set(response.data.keys()), {'id', 'identifier', 'status'})
+        # allow_clinical_agent_export : champ de PLATEFORME (comme status),
+        # ajouté pour les appelants internes qui doivent appliquer cette
+        # règle (clinical-agent) — voir TenantResolutionSerializer.
+        self.assertEqual(set(response.data.keys()), {'id', 'identifier', 'status', 'allow_clinical_agent_export'})
         self.assertNotIn('name', response.data)
+
+    def test_resolve_by_id_returns_same_fields(self):
+        """?id=<uuid> — utilisé par un appelant qui ne connaît pas l'identifier (ex: clinical-agent)."""
+        response = self.client.get(
+            '/api/tenants/resolve/', {'id': str(self.tenant.id)},
+            HTTP_X_INTERNAL_SERVICE_TOKEN=TEST_INTERNAL_TOKEN,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], str(self.tenant.id))
+
+    def test_resolve_unknown_id_returns_404(self):
+        response = self.client.get(
+            '/api/tenants/resolve/', {'id': str(uuid.uuid4())},
+            HTTP_X_INTERNAL_SERVICE_TOKEN=TEST_INTERNAL_TOKEN,
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_resolve_malformed_id_returns_404_not_500(self):
+        response = self.client.get(
+            '/api/tenants/resolve/', {'id': 'not-a-uuid'},
+            HTTP_X_INTERNAL_SERVICE_TOKEN=TEST_INTERNAL_TOKEN,
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_resolve_unknown_identifier_returns_404(self):
         response = self._resolve('does-not-exist', token=TEST_INTERNAL_TOKEN)
@@ -605,6 +673,73 @@ class TenantDatabaseResolveEndpointTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 
+@override_settings(TENANT_SERVICE_INTERNAL_TOKEN=TEST_INTERNAL_TOKEN)
+class TenantDatabaseResolveActiveEndpointTests(APITestCase):
+    """
+    GET /api/tenant-databases/resolve-active/?service=<code> — énumération
+    explicite des tenants ACTIVE pour un service (Medical-Monitoring
+    tenant-aware, §10 : rattrapage périodique clinical-agent).
+    """
+
+    def setUp(self):
+        self.tenant_a = _make_tenant('hopital-central', 'Hôpital Central')
+        self.tenant_b = _make_tenant('clinique-paix', 'Clinique de la Paix')
+        self.medical = _make_service('MEDICAL', 'Medical Monitoring')
+        self.personnel = _make_service('PERSONNEL', 'Service Personnel')
+
+        self.tdb_a = TenantDatabase.objects.create(
+            tenant=self.tenant_a, service=self.medical,
+            database_name='db_a_medical', host='fultang-medical-backend', secret_reference='ref-a',
+        )
+        self.tdb_a.status = TenantDatabaseStatus.ACTIVE
+        self.tdb_a.save(update_fields=['status'])
+
+        # PENDING : ne doit jamais apparaître dans l'énumération ACTIVE.
+        TenantDatabase.objects.create(
+            tenant=self.tenant_b, service=self.medical,
+            database_name='db_b_medical', host='fultang-medical-backend', secret_reference='ref-b',
+        )
+
+        # Autre service : ne doit jamais apparaître dans un filtre ?service=MEDICAL.
+        tdb_personnel = TenantDatabase.objects.create(
+            tenant=self.tenant_a, service=self.personnel,
+            database_name='db_a_personnel', host='fultang-postgres', secret_reference='ref-c',
+        )
+        tdb_personnel.status = TenantDatabaseStatus.ACTIVE
+        tdb_personnel.save(update_fields=['status'])
+
+    def _resolve_active(self, service_code, token=None):
+        credentials = {}
+        if token is not None:
+            credentials['HTTP_X_INTERNAL_SERVICE_TOKEN'] = token
+        self.client.credentials(**credentials)
+        return self.client.get('/api/tenant-databases/resolve-active/', {'service': service_code})
+
+    def test_returns_only_active_databases_for_the_requested_service(self):
+        response = self._resolve_active('MEDICAL', token=TEST_INTERNAL_TOKEN)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tenant_ids = {row['tenant_id'] for row in response.data}
+        self.assertEqual(tenant_ids, {str(self.tenant_a.id)})  # tenant_b est PENDING, exclu
+
+    def test_response_never_includes_secret_reference(self):
+        response = self._resolve_active('MEDICAL', token=TEST_INTERNAL_TOKEN)
+        for row in response.data:
+            self.assertNotIn('secret_reference', row)
+
+    def test_missing_service_param_returns_400(self):
+        response = self._resolve_active('', token=TEST_INTERNAL_TOKEN)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_missing_token_is_rejected(self):
+        response = self._resolve_active('MEDICAL', token=None)
+        self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_unknown_service_returns_empty_list_not_error(self):
+        response = self._resolve_active('DOES_NOT_EXIST', token=TEST_INTERNAL_TOKEN)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+
 # =============================================================================
 # Phase 7 — Tenant Provisioning
 # =============================================================================
@@ -612,6 +747,7 @@ class TenantDatabaseResolveEndpointTests(APITestCase):
 from unittest.mock import patch
 
 from .provisioning import (
+    PROVISIONING_CAPABLE_SERVICES,
     PhysicalProvisioningError,
     ProvisioningOrchestrator,
     ServiceNotActiveError,
@@ -707,6 +843,37 @@ class ProvisioningOrchestratorTests(TestCase):
         self.assertEqual(results[0].status, TenantDatabaseStatus.ACTIVE)
         tenant_database = TenantDatabase.objects.get(tenant=self.tenant, service_id='PERSONNEL')
         self.assertEqual(tenant_database.status, TenantDatabaseStatus.ACTIVE)
+
+    def test_each_capable_service_has_its_own_url_prefix(self):
+        """
+        Régression : chaque service expose ses endpoints internes sous son
+        PROPRE préfixe d'URL (service-personnel: /api, Medical-Monitoring:
+        /api/medical-monitoring — même préfixe que son routage Gateway).
+        Un préfixe supposé uniforme entre services a déjà causé un 404 réel
+        lors de la validation pilote Medical-Monitoring.
+        """
+        self.assertTrue(PROVISIONING_CAPABLE_SERVICES['PERSONNEL'].endswith('/api'))
+        self.assertTrue(PROVISIONING_CAPABLE_SERVICES['MEDICAL'].endswith('/api/medical-monitoring'))
+
+    def test_physical_provisioning_call_targets_the_correct_url(self):
+        """Vérifie l'URL RÉELLEMENT appelée, pas seulement le résultat mocké — aurait détecté le bug de préfixe."""
+        captured = {}
+
+        def fake_urlopen(request, timeout=None):
+            captured['url'] = request.full_url
+            import io
+            import json as _json
+            return io.BytesIO(_json.dumps({'database_name': 'x', 'host': 'h', 'port': 5432}).encode())
+
+        _make_service('MEDICAL', 'Medical Monitoring')
+        with patch('tenants.provisioning.urllib.request.urlopen', side_effect=fake_urlopen):
+            self.orchestrator.provision(self.tenant.id, ['MEDICAL'])
+
+        self.assertEqual(
+            captured['url'],
+            f"{PROVISIONING_CAPABLE_SERVICES['MEDICAL']}/internal/provision-database/",
+        )
+        self.assertIn('/api/medical-monitoring/internal/provision-database/', captured['url'])
 
     def test_non_capable_service_is_skipped_and_creates_no_row(self):
         """§4 de la tâche : ne pas fabriquer une TenantDatabase PENDING qui ne progressera jamais."""

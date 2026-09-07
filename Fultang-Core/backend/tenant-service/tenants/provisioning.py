@@ -15,23 +15,23 @@ Ce module NE remplace RIEN de l'existant :
     — ce module ne route rien, il ne fait que PRODUIRE une configuration
     que le Router de la Phase 6 sait déjà consommer sans modification.
 
-Constat d'inspection (avant d'écrire ce module) : seul `service-personnel`
-dispose aujourd'hui d'une infrastructure PostgreSQL "Database per Tenant"
-opérationnelle (Phase 6 — `api/tenant_routing/`). Les 3 autres services
-adaptés en Phase 4 (Gestion-Infrastructures, ComptaMatiere,
-fultang-compta-financiere) possèdent chacun UN SEUL serveur PostgreSQL
-dédié à eux-mêmes (voir leurs docker-compose.yml respectifs :
-`infrastructure-db`, etc.) — aucun mécanisme de routage dynamique, aucune
-capacité à héberger plusieurs bases par tenant. Créer physiquement une
-base "par tenant" pour ces services nécessiterait d'abord de leur
-donner l'équivalent de la Phase 6, ce qui est explicitement hors
-périmètre de cette phase (règle §22 de la tâche : ne pas élargir le
-périmètre).
+Constat d'inspection : `service-personnel` (Phase 6) puis `Medical-Monitoring`
+(chantier tenant-aware Medical-Monitoring) disposent d'une infrastructure
+PostgreSQL "Database per Tenant" opérationnelle (`api/tenant_routing/` /
+`core/tenant_routing/`). Les 3 autres services adaptés en Phase 4
+(Gestion-Infrastructures, ComptaMatiere, fultang-compta-financiere)
+possèdent chacun UN SEUL serveur PostgreSQL dédié à eux-mêmes (voir leurs
+docker-compose.yml respectifs : `infrastructure-db`, etc.) — aucun
+mécanisme de routage dynamique, aucune capacité à héberger plusieurs
+bases par tenant. Créer physiquement une base "par tenant" pour ces
+services nécessiterait d'abord de leur donner l'équivalent de la Phase 6,
+ce qui reste hors périmètre du chantier en cours (pas de refonte non
+nécessaire).
 
-Décision (documentée aussi dans MULTITENANT_ARCHITECTURE.md §Phase 7) :
+Décision (documentée aussi dans MULTITENANT_ARCHITECTURE.md) :
   - le provisioning AUTOMATISÉ (création physique de base + migration)
-    n'est câblé, dans cette phase, que pour les services listés dans
-    `PROVISIONING_CAPABLE_SERVICES` (actuellement : PERSONNEL uniquement) ;
+    n'est câblé, à ce stade, que pour les services listés dans
+    `PROVISIONING_CAPABLE_SERVICES` (PERSONNEL, MEDICAL) ;
   - pour tout autre service demandé, ce module NE CRÉE PAS de ligne
     `TenantDatabase` (il serait malhonnête d'enregistrer une
     configuration PENDING qui ne progressera jamais automatiquement) —
@@ -61,8 +61,16 @@ logger = logging.getLogger("tenants.provisioning")
 # service-personnel/api/tenant_routing (Phase 6) ET d'un endpoint
 # interne de provisioning symétrique à
 # POST /api/internal/provision-database/ (voir service-personnel/api/views.py).
+# Valeur = URL de base de l'API INTERNE de ce service (pas seulement son
+# host racine) : chaque service expose ses endpoints internes sous son
+# propre préfixe d'URL — service-personnel sous `/api/`, Medical-Monitoring
+# sous `/api/medical-monitoring/` (même préfixe que son routage Gateway,
+# voir api-gateway/app/main.py::proxy_catch_all). `_call_physical_provisioning`
+# ajoute uniquement `internal/provision-database/` à cette base — aucune
+# convention d'URL n'est supposée uniforme entre services.
 PROVISIONING_CAPABLE_SERVICES = {
-    "PERSONNEL": settings.PROVISIONING_SERVICE_PERSONNEL_URL,
+    "PERSONNEL": f"{settings.PROVISIONING_SERVICE_PERSONNEL_URL.rstrip('/')}/api",
+    "MEDICAL": f"{settings.PROVISIONING_SERVICE_MEDICAL_URL.rstrip('/')}/api/medical-monitoring",
 }
 
 
@@ -150,7 +158,7 @@ def _call_physical_provisioning(service_code: str, callback_url: str, tenant_id:
     connaît jamais, cohérent avec `secret_reference` étant une
     référence opaque (Phase 5).
     """
-    url = f"{callback_url.rstrip('/')}/api/internal/provision-database/"
+    url = f"{callback_url.rstrip('/')}/internal/provision-database/"
     payload = json.dumps({"tenant_id": str(tenant_id)}).encode("utf-8")
     request = urllib.request.Request(
         url,

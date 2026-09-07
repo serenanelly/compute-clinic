@@ -109,8 +109,8 @@ Roadmap complète (12 phases) :
 | 3 | Tenant-Aware Authentication | Implémenté et testé |
 | 4 | Tenant Context Propagation | Implémenté et testé pour les services métier classiques (4/4) ; Medical Monitoring / Clinical Agent exclus par décision architecturale, voir [§13](#13-medical-monitoring--clinical-agent) |
 | 5 | Tenant Database Management | Implémenté et testé (registre logique `TenantDatabase`/`PlatformService`) — voir [§9.1](#91-phase-5--tenant-database-management-registre-logique) |
-| 6 | Dynamic Database Routing | Implémenté et testé pour `service-personnel` — voir [§9.2](#92-phase-6--dynamic-database-routing) |
-| 7 | Tenant Provisioning | Implémenté et testé pour `service-personnel` (création physique de base + migration) ; déclaratif seul (`SKIPPED`) pour les autres services — voir [§10.2](#102-phase-7--tenant-provisioning) |
+| 6 | Dynamic Database Routing | Implémenté et testé pour `service-personnel` **et Medical-Monitoring** — voir [§9.2](#92-phase-6--dynamic-database-routing), [§13.1](#131-medical-monitoring--mécanisme-tenant-aware) |
+| 7 | Tenant Provisioning | Implémenté et testé pour `service-personnel` **et Medical-Monitoring** (création physique de base + migration) ; déclaratif seul (`SKIPPED`) pour les autres services — voir [§10.2](#102-phase-7--tenant-provisioning) |
 | 8 | Data Migration | Non implémenté |
 | 9 | Tenant Configuration | Non implémenté |
 | 10 | Tenant Isolation & Security Testing | Non implémenté |
@@ -712,6 +712,18 @@ Vérifié en conditions réelles : `clinique-paix` passé à `INACTIVE` dans `te
 
 **Décision** : documentée ici comme limite assumée de cette phase, non corrigée dans le code — la tâche demande explicitement de ne pas anticiper de mécanisme non requis (§8/§16 de la tâche) et aucune exigence de révocation "live" n'a été formulée. Candidate naturelle pour la Phase 7 (voir §19) : soit revérifier le statut à chaque résolution (coût : un aller-retour cache/Registry par requête, annule l'intérêt du chemin rapide), soit exposer une action explicite « invalider l'alias d'un tenant » côté administration, déclenchée au moment de la désactivation.
 
+### 9.3 `allow_clinical_agent_export` — autorisation d'export vers Clinical Agent
+
+**Statut : implémenté et testé.** Champ booléen sur `Tenant` (tenant-service), défaut `True`.
+
+- **Modèle** : `Tenant.allow_clinical_agent_export = models.BooleanField(default=True)`. Nom conservé tel que proposé par la tâche — cohérent avec la convention déjà en place dans `tenant-service` (identifiants anglais : `status`, `database_name`, `secret_reference`... contrairement aux apps métier françaises comme `fultang-compta-financiere`, qui utilisent `est_*`/`actif`). C'est un champ de PLATEFORME (même statut que `status`), pas une configuration métier (Phase 9) — d'où son exposition dans `TenantResolutionSerializer`, déjà réservé aux appelants internes de confiance.
+- **Migration** : `0007_tenant_allow_clinical_agent_export.py` — `AddField` pur, `default=True` appliqué à tous les tenants existants (vérifié : `hopital-central`/`clinique-paix`/tous les tenants pilotes des phases précédentes conservent `True` après migration, aucune régression de comportement).
+- **API** :
+  - `POST /api/tenants/` accepte le champ à la création (optionnel, défaut du modèle si omis) ;
+  - `PATCH /api/tenants/{id}/` (nouveau — `TenantViewSet` gagne `UpdateModelMixin`) modifie CE SEUL champ via `TenantUpdateSerializer` (même principe que `TenantDatabaseUpdateSerializer`, Phase 5 : `name`/`identifier` restent immuables, `status` reste réservé à son action dédiée) ;
+  - `GET /api/tenants/resolve/?id=<uuid>` (nouveau paramètre — `?identifier=` reste supporté pour la Gateway) l'expose aux appelants internes qui ne connaissent que l'UUID du tenant (Clinical Agent, qui reçoit `tenant_id` via `X-Tenant-ID`, jamais un hostname).
+- **Consommation** : Clinical Agent (`registry_client.get_tenant_config`) le vérifie AVANT toute lecture de donnée médicale destinée à l'export (voir §13.3) — jamais `tenant-service` lui-même qui n'exécute aucune logique d'export (règle explicite de la tâche : "ne déplace pas toute la logique métier dans tenant-service").
+
 ---
 
 ## 10. Provisioning
@@ -928,29 +940,110 @@ API Gateway ──(HTTP direct)──► service-personnel (login/verify)
 
 ## 13. Medical Monitoring / Clinical Agent
 
-**Statut : Non modifiés dans cette phase.** Aucune dépendance directe avec le mécanisme de propagation de contexte n'a été identifiée qui aurait rendu une modification nécessaire — code inspecté, aucun changement apporté, conformément à la consigne.
+**Statut : tenant-aware.** Medical Monitoring adopte le même patron "Database per Tenant" que service-personnel (Phase 6/7) ; Clinical Agent résout désormais une base par tenant au lieu d'une base unique, et applique `allow_clinical_agent_export` (Tenant Registry, §9.3) avant toute synchronisation.
 
-### 13.1 Medical Monitoring — comment il fonctionne aujourd'hui
+### 13.1 Medical Monitoring — mécanisme tenant-aware
 
-- **Réception des requêtes** : exactement le même mécanisme que les autres services (`GatewayHeaderAuthentication`/`GatewayUser`, non modifié, fichier `Medical-Monitoring/backend/core/authentication.py`), routé par la Gateway sous `/medical/**` → `/api/medical-monitoring/**`. Possède *en plus* un point d'entrée JWT direct (`rest_framework_simplejwt`, `/api/medical-monitoring/token/`) — un second mécanisme d'authentification préexistant, indépendant du flux Gateway étudié dans cette phase, non touché.
-- **Accès aux données** : ORM Django classique sur sa propre base PostgreSQL (`fultang_medical_monitoring`), via les modèles `patient`, `patient_informations`, `medical_workflow` (dont `Visite`).
-- **Déclenchement de la synchronisation** : un **signal Django `post_save`** sur le modèle `Visite` (`medical_workflow/signals.py`). Quand une visite passe au statut `TERMINE`, un thread séparé envoie une requête `POST http://fultang-clinical-agent:9000/sync/visite/{visite_id}` — **fire-and-forget**, en HTTP direct, **sans passer par la Gateway** (cohérent avec la décision [§12](#12-service-to-service)). Si l'appel échoue, un rattrapage périodique (toutes les 15 min, côté Clinical Agent) reprend les visites `TERMINE` non synchronisées.
-- **Comment il connaît une visite** : c'est lui la source — `Visite` est un modèle métier de Medical Monitoring lui-même ; il n'y a pas de notion de tenant sur ce modèle aujourd'hui (comme tous les modèles métier, hors périmètre de cette phase).
+Même patron que service-personnel, dupliqué-adapté (aucune bibliothèque partagée entre projets Django de ce monorepo — c'est déjà le choix assumé pour `GatewayHeaderAuthentication`, dupliquée dans 6 services avant cette phase) :
 
-### 13.2 Pourquoi `GatewayUser.tenant_id` n'est pas directement applicable à Medical Monitoring
+```
+API Gateway → X-Tenant-ID → GatewayHeaderAuthentication.authenticate()
+   → set_tenant_context(tenant_id)
+   → TenantDatabaseRouter (core/tenant_routing/router.py)
+   → pool_registry.ensure_connection_alias(tenant_id)
+        → registry_client.py (SERVICE_CODE="MEDICAL") → tenant-service
+        → cache.py (TTL, identique à service-personnel)
+   → django.db.connections[alias] → PostgreSQL du tenant
+```
 
-Le mécanisme ajouté dans cette phase répond à *"quel tenant est associé à l'utilisateur qui fait cette requête HTTP entrante"*. Or le point sensible de Medical Monitoring n'est pas entrant mais **sortant** : c'est lui qui décide, via un signal interne asynchrone, d'envoyer des données patient vers un tiers (Clinical Agent). Cette décision ne dépend d'aucun `request.user` au moment où le signal se déclenche (le `post_save` peut être émis en dehors de tout contexte de requête HTTP — ex: script, migration de données, tâche planifiée). Appliquer `GatewayUser.tenant_id` tel quel n'aurait donc aucun effet sur la question réellement posée : *"les données de CE tenant ont-elles le droit de partir vers Clinical Agent ?"* — une question de **configuration par tenant** (Phase 9), pas d'authentification de requête entrante. D'où la décision de concevoir une logique tenant dédiée pour ce service plutôt que de lui appliquer mécaniquement le même patron que les services CRUD classiques.
+- **`core/tenant_routing/`** (nouveau sous-package) : `context.py`/`middleware.py`/`cache.py` sont des copies STRICTEMENT identiques à service-personnel (aucune logique spécifique au service) ; `registry_client.py` change `SERVICE_CODE` en `"MEDICAL"` ; `pool_registry.py` change le suffixe d'alias (`_medical` au lieu de `_personnel`) et le provisioning migre **sans app_label explicite** (voir §13.1.1) ; `router.py` définit `TENANT_SCOPED_APPS = {"patient", "medical_workflow", "patient_informations"}` (3 apps, contre 1 seule — `api` — pour service-personnel).
+- **`core/authentication.py`** : `GatewayHeaderAuthentication` lit désormais `X-Tenant-ID` en plus de `X-User-ID`/`X-User-Roles`, et établit le Tenant Context au même endroit que service-personnel — modification strictement additive (`GatewayUser.tenant_id`, défaut `None`).
+- **`core/permissions.py`** (nouveau) : `IsInternalService`, symétrique de celle de tenant-service/service-personnel — protège le nouvel endpoint de provisioning.
+- **`core/views.py`** (nouveau) : `ProvisionDatabaseView`, `POST /api/medical-monitoring/internal/provision-database/` — symétrique de celle de service-personnel.
+- **Aucun `tenant_id` ajouté** à `Patient`, `Visite`, `Consultation`, etc. : l'isolation vient entièrement de la base physique du tenant, exactement comme `Medecin`/`Personnel` en Phase 6.
 
-### 13.3 Clinical Agent — comment il fonctionne aujourd'hui
+#### 13.1.1 Provisioning multi-app (différence avec service-personnel)
 
-- **Réception des données** : deux points d'entrée FastAPI, `POST /sync/visite/{visite_id}` (déclenché par le signal ci-dessus) et `POST /sync/all` (rattrapage périodique + démarrage). **Aucune authentification sur ces deux endpoints** — n'importe qui pouvant atteindre le port 9000 sur le réseau Docker peut déclencher une synchronisation. Protection actuelle : isolation réseau uniquement (`fultang_shared_network`), pas de vérification applicative.
-- **Accès à la base principale** : **connexion SQL directe** à la base PostgreSQL de Medical Monitoring via SQLAlchemy (`clinical-agent/database.py`, `MAIN_DB_URL` → `fultang-medical-db-server:5432/fultang_medical_monitoring`) — **hors de toute API, hors de tout ORM Django, hors de `GatewayHeaderAuthentication`**. C'est la raison structurelle pour laquelle `GatewayUser.tenant_id` ne peut de toute façon pas s'appliquer ici : Clinical Agent ne passe jamais par une requête HTTP authentifiée pour lire les données médicales, il lit directement les tables.
-- **Utilisation de la base tampon** : une base PostgreSQL séparée (`tampon_clinical_cases`), lecture/écriture, où `sync_visite()`/`sync_all_completed_visits()` (`sync.py`) écrivent les cas cliniques **anonymisés** extraits de la base principale.
-- **Autorisation actuelle** : seul l'endpoint `GET /export` (celui consommé par les systèmes externes type MedTutor) est protégé — par une **clé API unique partagée** (`X-API-Key`, comparée en `hmac.compare_digest` à `MEDTUTOR_API_KEY_HASH`), plus un rate-limiting par client. Cette clé est **globale à tout FullTang** : elle ne distingue aucun tenant, elle n'autorise ou ne refuse rien par établissement.
-- **Où interviendra la Tenant Configuration** : à deux endroits distincts identifiés —
-  1. **En amont**, dans `sync_visite()`/`sync_all_completed_visits()` : avant de copier une visite vers la base tampon, vérifier que le tenant propriétaire de cette visite autorise la synchronisation vers Clinical Agent (nécessite d'abord que `Visite` porte un `tenant_id` — non fait, hors périmètre).
-  2. **En aval**, dans `GET /export` : filtrer les cas cliniques exposés selon les tenants que le client `X-API-Key` est autorisé à consulter (nécessite d'étendre le modèle d'autorisation au-delà d'une clé unique globale).
-- **Comment déterminer les tenants autorisés (future Tenant Configuration)** : logiquement, une propriété booléenne ou une liste de scopes portée par `Tenant` (ex: `allow_clinical_agent_export: bool`), consultée par Medical Monitoring avant d'émettre le signal, et/ou par Clinical Agent avant d'accepter une synchronisation — décision de conception à prendre en Phase 9, **non tranchée ici**.
+service-personnel n'a qu'une app tenant-scopée (`api`), migrée explicitement (`migrate api --database=<alias>`). Medical-Monitoring en a **trois**. Plutôt que d'enchaîner 3 appels `migrate` explicites (fragile si une 4ᵉ app tenant-scopée est ajoutée plus tard), `pool_registry.provision_database()` appelle `migrate` **sans app_label** : Django parcourt alors toutes les apps installées, mais c'est `TenantDatabaseRouter.allow_migrate` qui décide RÉELLEMENT lesquelles s'appliquent sur cet alias — seules les 3 apps tenant-scopées (+ `migrations`, bookkeeping) y écrivent quoi que ce soit, exactement comme pour `default`. Aucune duplication de la liste des apps tenant-scopées entre le provisioning et le router (source unique : `router.py::TENANT_SCOPED_APPS`).
+
+Vérifié en conditions réelles (Docker + PostgreSQL, 2 tenants pilotes) : `\dt` sur chaque base tenant confirme exactement les 32 tables des 3 apps métier + `django_migrations`, **aucune** table système (`auth_*`, `admin_*`, `django_session`).
+
+### 13.2 Signal `Visite` → Clinical Agent (correction du problème contextvars)
+
+**Problème identifié** (audit) : `contextvars` ne se propage PAS à un `threading.Thread` nouvellement créé (vérifié empiriquement) — le thread de notification (`medical_workflow/signals.py`) ne pouvait donc pas connaître le tenant courant en le relisant lui-même.
+
+**Correction appliquée** : le tenant est capturé **dans le thread de la requête** (`get_current_tenant_context()`, avant `thread.start()`) et transmis **en paramètre explicite** à `_notify_agent(visite_id, tenant_id)`, qui l'envoie à Clinical Agent via le header `X-Tenant-ID` (+ le jeton de service interne partagé, voir §13.3).
+
+**Si aucun tenant réel n'est disponible** (contexte jamais établi, ou `tenant_id=None` — pool non assigné) : la notification n'est **pas envoyée**. Un compte non rattaché à un tenant réel n'a pas de configuration `allow_clinical_agent_export` à vérifier — refuser est le seul choix qui ne devine jamais une autorisation. Seule une information technique (id de visite tronqué) est loguée, jamais de donnée médicale.
+
+**Limite connue** : lorsque `Visite.save()` est appelé par un processus **court** (ex: `manage.py seed_tenant_demo`, voir §22) plutôt que par le serveur `runserver` qui reste actif, le thread de notification `daemon=True` peut ne pas avoir le temps de s'exécuter avant la fin du processus principal — le rattrapage périodique (ou un appel manuel à `/sync/all`) reprend alors la visite normalement. Vérifié en conditions réelles pendant la validation pilote : c'est exactement ce qui s'est produit, et le rattrapage a correctement repris les 2 visites de démonstration.
+
+### 13.3 Clinical Agent — mécanisme tenant-aware
+
+Avant cette phase : un seul moteur SQLAlchemy (`MAIN_DB_URL`) vers "la" base Medical-Monitoring, une BD tampon partagée sans notion de tenant, `/sync/*` sans authentification.
+
+```
+X-Tenant-ID + X-Internal-Service-Token
+   → verify_internal_service_token()   (main.py — même jeton partagé que tout FullTang)
+   → verify_export_authorization()     (registry_client.get_tenant_config → allow_clinical_agent_export)
+        NON → 403, AUCUNE lecture de donnée médicale
+        OUI → engine_registry.get_engine_for_tenant(tenant_id)
+                → registry_client.resolve_tenant_database (SERVICE_CODE="MEDICAL")
+                → SQLAlchemy engine mis en cache par tenant
+   → sync.py::sync_visite/sync_all_completed_visits (scopés par tenant_id)
+   → BD tampon : CasClinique/VisiteSynced avec tenant_id
+```
+
+- **`registry_client.py`** (nouveau) : équivalent Python pur (urllib, aucune nouvelle dépendance — `httpx` était déjà présent en dépendance mais inutilisé, `urllib` reste cohérent avec le reste de FullTang) du client de service-personnel : `resolve_tenant_database` (base MEDICAL d'un tenant), `get_tenant_config` (statut + `allow_clinical_agent_export`), `list_active_tenant_databases` (énumération explicite, réservée à l'usage interne — voir §13.3.2).
+- **`engine_registry.py`** (nouveau) : un moteur SQLAlchemy PAR TENANT, mis en cache (`{tenant_id: Engine}`), verrouillé par tenant (même principe que `pool_registry.py`, structure volontairement plus simple — "un registry simple par tenant", pas de réimplémentation de `django.db.connections`). Ce n'est PAS un vrai pool applicatif au-delà de ce que SQLAlchemy fait déjà nativement par engine (`QueuePool`) — documenté honnêtement.
+- **`database.py`** : `MAIN_DB_URL`/`MainSession` supprimés (il n'existe plus "une" base principale) ; `get_main_session_for_tenant(tenant_id)` les remplace. `TamponSession` (BD tampon, partagée) inchangé.
+- **`/sync/visite/{id}` et `/sync/all`** exigent désormais `X-Tenant-ID` ET le jeton interne partagé — avant cette phase, ces endpoints n'avaient AUCUNE authentification (isolation réseau Docker uniquement). Un appel sans jeton, sans tenant, ou avec un tenant inexistant/inactif est rejeté explicitement (401/400/404/503), jamais un accès à une base par défaut.
+- **`/sync/all` reste scopé à UN SEUL tenant** (`X-Tenant-ID`) — jamais un parcours implicite de tous les tenants (§10 de la tâche). L'énumération multi-tenant est **une fonction interne dédiée**, `sync_all_known_tenants()` (`main.py`), appelée UNIQUEMENT au démarrage et par le planificateur périodique (15 min) — jamais exposée comme endpoint public.
+- **`/export` inchangé dans son mécanisme de sécurité** (`X-API-Key`, sha256 + `hmac.compare_digest`, rate limiting — vérifiés déjà corrects, aucune faille de timing constatée dans le code audité). Reste un flux **agrégé** multi-tenants vers MedTutor : aucun paramètre `tenant_id` n'est exposé au client externe (§11 de la tâche — "ne pas donner au client externe la possibilité de choisir arbitrairement un tenant"). L'isolation de `/export` est garantie EN AMONT, au moment de la synchronisation : un tenant dont `allow_clinical_agent_export=False` n'a jamais ses données écrites dans le buffer, donc jamais exposées par `/export`.
+
+#### 13.3.1 Buffer partagé — `tenant_id` ajouté (raison technique démontrée)
+
+`CasClinique`/`VisiteSynced` reçoivent un champ `tenant_id` (NOT NULL, indexé, contrainte d'unicité `(patient_id_source, tenant_id)` / `(visite_id_source, tenant_id)`). Ceci est l'EXCEPTION explicitement prévue par la tâche à la règle "ne pas ajouter tenant_id partout" : la BD tampon est PARTAGÉE PAR CONSTRUCTION (`/export` produit un flux agrégé multi-établissements, ce n'est pas une isolation Database-per-Tenant comme le reste) — il faut donc savoir explicitement à quel tenant appartient chaque cas pour appliquer `allow_clinical_agent_export`, contrairement à `Patient`/`Visite` où l'isolation vient déjà de la base physique.
+
+**Migration** : les 2 tables existantes (16 cas cliniques / 26 visites, données de démonstration créées AVANT l'introduction du multitenant dans Medical-Monitoring, sans tenant possible) ont été **vidées** après confirmation explicite de l'utilisateur — aucune attribution à un tenant réel n'était possible pour ces données historiques, et la BD tampon est un cache dérivé/reconstructible (jamais la source de vérité). `init_tampon_db()` (SQLAlchemy `create_all`) a recréé les tables avec le nouveau schéma ; le rattrapage périodique a repeuplé le buffer correctement, cette fois scopé par tenant.
+
+#### 13.3.2 `resolve-active` — nouvel endpoint tenant-service
+
+`GET /api/tenant-databases/resolve-active/?service=<code>` (tenant-service, `IsInternalService`) énumère les configurations `ACTIVE` pour un service donné — nécessaire à `sync_all_known_tenants()` (Clinical Agent doit savoir explicitement quels tenants ont une base MEDICAL active, sans deviner ni parcourir un registre auquel il n'a pas un accès direct). Réutilise `TenantDatabaseRepository.list()` (déjà existant, Phase 5) — aucune nouvelle logique de requête.
+
+### 13.4 Bug découvert et corrigé lors de l'inspection — `X-API-Key`
+
+L'audit (tâche §10) demandait de revérifier un problème potentiel identifié précédemment autour de `X-API-Key`. Inspection du code actuel (`clinical-agent/main.py::verify_api_key`) : la vérification utilise déjà `hashlib.sha256(api_key).hexdigest()` comparé via `hmac.compare_digest()` à `MEDTUTOR_API_KEY_HASH` — **mécanisme déjà correct**, aucune vulnérabilité de timing constatée. Aucune modification nécessaire ; conservé tel quel.
+
+### 13.5 Problème d'infrastructure locale découvert et corrigé (sans rapport avec le multitenant)
+
+En rendant Clinical Agent réellement démarrable pour la première fois pendant cette phase (il ne l'était jamais dans cet environnement de développement avant), deux défauts d'infrastructure PRÉEXISTANTS et jusque-là invisibles ont été découverts :
+1. **`certs/` vide** : le `Dockerfile` exige `--ssl-keyfile`/`--ssl-certfile` (TLS), jamais fournis en dev local → le conteneur ne démarrait jamais. Un certificat auto-signé de développement a été généré (`openssl req -x509 ...`) pour débloquer le développement local ; le `Dockerfile` (image de production) n'a pas été modifié.
+2. **Incohérence HTTP/HTTPS** : `medical_workflow/signals.py::CLINICAL_AGENT_URL` appelle en `http://` alors que le conteneur écoutait en HTTPS — invisible tant que le conteneur ne démarrait jamais (l'appel échouait de la même façon, "connexion refusée"). Corrigé en dev : `docker-compose.yml` (racine) surcharge la commande du conteneur pour servir en HTTP simple, cohérent avec le reste de la stack locale (aucun autre appel interne de FullTang ne parle HTTPS en dev).
+3. **`FULTANG_RATE_LIMIT_REQUESTS`/`_WINDOW_SECONDS` vides** : `${VAR}` sans valeur dans `docker-compose.yml` produit une chaîne VIDE (pas une absence) injectée dans le conteneur, faisant échouer `int('')` au démarrage. Corrigé avec `${VAR:-défaut}`.
+
+Ces trois défauts sont documentés ici car ils bloquaient totalement la validation pilote — mais ils sont **indépendants** du travail de tenant-isolation lui-même (vérifié explicitement : mêmes échecs constatés en testant le code non modifié, avant toute intervention de cette phase).
+
+### 13.6 Impact sur `fultang-compta-financiere`, `ComptaMatiere`, `Gestion-Infrastructures`
+
+**`fultang-compta-financiere`** (`apps/integration/medical_client.py`) appelle Medical-Monitoring pour construire les profils de facturation caissier (`_fetch_medical_snapshot`) :
+- **Chemin primaire (Gateway)** : forward du JWT du caissier vers `http://api-gateway:8080/medical/**`. Puisque ce JWT porte déjà `tenant_id` (Phase 3) et que la Gateway injecte `X-Tenant-ID` pour TOUTE route authentifiée (pas seulement `/personnel/**`), Medical-Monitoring devenu tenant-aware route AUTOMATIQUEMENT ce chemin vers la bonne base — **aucune modification de `medical_client.py` n'a été nécessaire**. Vérifié en conditions réelles : `GET /compta-financiere/caissier/patients-en-attente/` avec un JWT valide → `200 OK`, données correctement renvoyées.
+- **Chemin de repli (accès direct, hors Gateway)** : `_base_url()` (`SERVICE_MEDICAL_URL`) sans jamais transmettre `X-User-ID`/`X-Tenant-ID` (ces headers ne sont construits QUE par la Gateway). Ce chemin échouait **déjà** avant cette phase (`GatewayHeaderAuthentication` exige `X-User-ID`, absent ici → 401) — **inchangé par ce chantier**, toujours un échec explicite (401), jamais un accès à une base incorrecte. Conforme à la règle §12.4 de la tâche ("si le fallback ne peut pas être sécurisé, préférer son échec explicite").
+- **Base propre de `fultang-compta-financiere`** : reste **unique, non tenant-isolée** — `Quittance`, `CaisseJournaliere`, `Facture`, etc. ne portent aucun `tenant_id` et vivent dans une seule base partagée. **Ne pas présenter cette partie comme tenant-isolée : elle ne l'est pas.**
+
+**`ComptaMatiere` et `Gestion-Infrastructures`** : **non tenant-aware**, chacun avec sa base PostgreSQL unique (`infrastructure-db`, `compta-matiere-db`), inchangés par cette phase. Ni l'un ni l'autre n'est appelé par le parcours patient/consultation/examen/prescription (le cœur du périmètre demandé) — leur non-isolation n'affecte donc PAS la démonstration d'isolation clinique demandée (§16/§17 de la tâche), mais elle affecte réellement toute démonstration de gestion des stocks/infrastructures par tenant, qui resterait partagée entre A et B.
+
+**Classification explicite demandée par la tâche (§13, §27)** :
+
+| Composant | État |
+|---|---|
+| service-personnel (personnel, comptes) | **ISOLÉ PAR TENANT** |
+| Medical-Monitoring (patients, visites, consultations, examens, prescriptions) | **ISOLÉ PAR TENANT** (cette phase) |
+| Clinical Agent (moteur de lecture par tenant) | **ISOLÉ PAR TENANT** (cette phase) — buffer d'export partagé mais scopé par `tenant_id` + autorisation |
+| fultang-compta-financiere — appel à Medical-Monitoring (Gateway) | **ISOLÉ PAR TENANT** (hérité automatiquement) |
+| fultang-compta-financiere — base propre (caisse, comptabilité, facturation) | **NON ENCORE ISOLÉ** |
+| ComptaMatiere | **HORS PÉRIMÈTRE** de cette phase (non appelé par le parcours clinique) |
+| Gestion-Infrastructures | **HORS PÉRIMÈTRE** de cette phase (non appelé par le parcours clinique) |
 
 ---
 
@@ -1044,11 +1137,15 @@ Décisions prises et vérifiées :
 | **(Phase 7)** Endpoint `POST /api/internal/provision-database/` — permissions, validation, délégation, 502 sur échec | `service-personnel/api/tests.py::ProvisionDatabaseEndpointTests` (5 tests) | ✅ (Docker + Postgres réel) | Implémenté et testé |
 | **(Phase 7)** Création physique idempotente + nettoyage d'alias sur échec de migration | `service-personnel/api/tests.py::DatabaseProvisioningUnitTests` (4 tests) | ✅ (Docker + Postgres réel, psycopg2 mocké) | Implémenté et testé |
 | **(Phase 7)** Provisioning réel de bout en bout — création physique, migration, isolation, collision, concurrence (5 requêtes simultanées), échec réel + retry, processus redémarré | Validation pilote Docker, voir [§10.2.10](#10210-validation-pilote-réelle-docker--postgresql-pas-de-mock) — pas de test automatisé dédié | ✅ (4 tenants pilotes réels, PostgreSQL réel, HTTP live à travers la Gateway) | Implémenté et vérifié |
-| Création physique des bases pour l'ensemble des tenants (hors pilotes, mass provisioning) | — | — | **Non implémenté, non testé** (hors périmètre Phase 7, voir §22 de la tâche) |
-| Provisioning physique pour INFRASTRUCTURE/COMPTA/COMPTA_MATIERE/MEDICAL | — | — | **Non implémenté** (décision de périmètre — ces services n'ont pas l'équivalent Phase 6, voir [§10.2.2](#1022-constat-dinspection--pourquoi-seul-personnel-est-physiquement-automatisé)) |
-| Medical Monitoring / Clinical Agent — logique tenant dédiée | — | — | **Non implémenté** (audit documenté, [§13](#13-medical-monitoring--clinical-agent)) |
+| Création physique des bases pour l'ensemble des tenants (hors pilotes, mass provisioning) | — | — | **Non implémenté, non testé** (hors périmètre, mass provisioning volontairement exclu) |
+| Provisioning physique pour INFRASTRUCTURE/COMPTA/COMPTA_MATIERE | — | — | **Non implémenté** (décision de périmètre — ces services n'ont pas l'équivalent Phase 6) |
+| **(Medical-Monitoring tenant-aware)** Tenant Context, Router, Pool Registry, provisioning multi-app, authentification, endpoint interne | `Medical-Monitoring/backend/core/tests_tenant_routing.py` (42 tests) | ✅ (Docker + Postgres réel) | Implémenté et testé |
+| **(Medical-Monitoring tenant-aware)** `allow_clinical_agent_export` — champ, migration, API création/modification/résolution | `tenant-service/tenants/tests.py` (18 tests supplémentaires : export, `resolve` par id, `resolve-active`) | ✅ | Implémenté et testé |
+| **(Clinical Agent tenant-aware)** `registry_client`/`engine_registry` — résolution, cache d'engine par tenant, erreurs Registry | `clinical-agent/test_tenant_routing.py` (12 tests, `unittest`) | ✅ | Implémenté et testé |
+| **(Clinical Agent tenant-aware)** Isolation bout-en-bout réelle — signal→sync, export autorisé/refusé/inversé, buffer scopé par tenant, `/sync/all` mono-tenant | Validation pilote Docker (voir §13, rapport final) — pas de test automatisé dédié (pas de harnais pytest préexistant dans ce service) | ✅ (2 tenants réels, PostgreSQL réel, inversion testée dans les deux sens) | Implémenté et vérifié |
+| fultang-compta-financiere — base propre (caisse/comptabilité) | — | — | **Non isolé** (voir §13.6, décision documentée) |
 
-**Total tests automatisés multitenant actuels** : 76 (tenant-service, dont 26 Phase 5 + 7 Phase 6 + 22 Phase 7) + 33 (api-gateway) + 50 (service-personnel, dont 26 Phase 6 + 13 Phase 7) + 3 (Gestion-Infrastructures) + 3 (ComptaMatiere) + 4 (fultang-compta-financiere) = **169 tests**, tous verts, exécutés à la fois en isolation (mocks httpx pour la Gateway, sqlite pour les tests Django hors service-personnel, psycopg2/appel physique mockés dans les tests unitaires) et **en conditions réelles** (Docker + PostgreSQL pour tenant-service, service-personnel et Gestion-Infrastructures, requêtes curl/urllib live à travers la stack complète pour les flux critiques — nouveau en Phase 7 : provisioning réel de bout en bout, y compris concurrence à 5 requêtes simultanées et cycle échec réel → retry → succès).
+**Total tests automatisés multitenant actuels** : 96 (tenant-service) + 33 (api-gateway) + 50 (service-personnel) + 125 (Medical-Monitoring, dont 42 tenant-aware + 83 préexistants) + 12 (clinical-agent, nouveau) + 3 (Gestion-Infrastructures) + 3 (ComptaMatiere) + 4 (fultang-compta-financiere) = **326 tests**, tous verts (les 6 échecs préexistants de Medical-Monitoring, non liés au multitenant, sont documentés en §13/rapport final — confirmés inchangés avant/après ce chantier), exécutés en conditions réelles partout où c'est pertinent (Docker + PostgreSQL pour tenant-service/service-personnel/Medical-Monitoring, validation pilote réelle à 2 tenants pour Clinical Agent — création physique, signal temps réel, rattrapage périodique, inversion de l'autorisation d'export dans les deux sens).
 
 > **Anomalie non liée à cette phase** : les tests métier préexistants de `Gestion-Infrastructures` (7) et `fultang-compta-financiere` (10) échouent (401/403) car ils n'envoient aucun header d'authentification — confirmé pré-existant (`git diff` ne montre aucune ligne modifiée sur ces tests), même symptôme que `service-personnel` en Phase 1. Non corrigé, hors périmètre.
 
@@ -1232,6 +1329,58 @@ Aucune migration côté `service-personnel` : `provision_database` réutilise le
 - `docker-compose.yml` (racine) — aucune modification : les nouveaux réglages (`PROVISIONING_SERVICE_PERSONNEL_URL`, `PROVISIONING_TIMEOUT_SECONDS`) utilisent leurs valeurs par défaut (le conteneur `tenant-service` atteint déjà `fultang-personnel` sur le réseau Docker partagé, sans variable d'environnement supplémentaire nécessaire).
 - Aucun modèle métier (`Medecin`, `Personnel`, etc.), aucune donnée métier créée par le provisioning — seule une base VIDE (schéma seul) est produite (§10.1 : pas de "configuration initiale" inventée).
 
+### Phase 8 — Medical Monitoring tenant-aware / Clinical Agent tenant-aware / `allow_clinical_agent_export` (cette tâche, non commitée)
+
+#### Fichiers créés
+
+| Fichier | Rôle |
+|---|---|
+| `Medical-Monitoring/backend/core/tenant_routing/{__init__,context,middleware,registry_client,cache,pool_registry,router}.py` | Équivalent Medical-Monitoring de `api/tenant_routing/` (service-personnel) — voir §13.1 pour les différences (3 apps tenant-scopées, migration sans app_label) |
+| `Medical-Monitoring/backend/core/permissions.py` | `IsInternalService`, symétrique |
+| `Medical-Monitoring/backend/core/views.py` | `ProvisionDatabaseView` (`POST /api/medical-monitoring/internal/provision-database/`) |
+| `Medical-Monitoring/backend/core/tests_tenant_routing.py` | 42 tests (Tenant Context, Cache, Pool Registry, Router, Authentication, Provisioning) |
+| `Medical-Monitoring/backend/medical_workflow/management/commands/seed_tenant_demo.py` | Seed reproductible : patient + visite TERMINE pour un tenant réel |
+| `service-personnel/service_personnel/api/management/commands/seed_tenant_demo.py` | Seed reproductible : médecin/infirmière/réceptionniste pour un tenant réel |
+| `tenant-service/tenants/migrations/0007_tenant_allow_clinical_agent_export.py` | Migration du nouveau champ |
+| `clinical-agent/registry_client.py` | Client Tenant Registry (résolution base MEDICAL, config tenant, énumération active) |
+| `clinical-agent/engine_registry.py` | Moteur SQLAlchemy par tenant, mis en cache, verrouillé |
+| `clinical-agent/test_tenant_routing.py` | 12 tests unitaires (`unittest`, sans nouvelle dépendance) |
+
+#### Fichiers modifiés
+
+| Fichier | Modification | Raison | Impact |
+|---|---|---|---|
+| `tenant-service/tenants/models.py` | `Tenant.allow_clinical_agent_export` (BooleanField, défaut `True`) | §6 de la tâche | Additif, migration non destructive |
+| `tenant-service/tenants/{serializers,services,repositories,views}.py` | Exposition du champ (création/`PATCH`/`resolve`), `TenantViewSet` gagne `UpdateModelMixin`, `resolve` accepte `?id=`, nouvelle action `resolve-active` sur `TenantDatabaseViewSet` | Rendre le champ réellement utilisable par l'API (§6 : "ne te contente pas d'ajouter le champ au modèle") + résolution/énumération nécessaires à Clinical Agent | Additif — CRUD existant inchangé |
+| `tenant-service/tenants/provisioning.py` | `PROVISIONING_CAPABLE_SERVICES["MEDICAL"]` ajouté ; **correction d'un bug réel** : l'URL de callback supposait à tort un préfixe `/api/` uniforme entre services — Medical-Monitoring expose ses endpoints sous `/api/medical-monitoring/`, pas `/api/` (découvert par un vrai `404` pendant la validation pilote, jamais par relecture) | Extension du mécanisme Phase 7 existant à Medical-Monitoring, réutilisé sans réécriture | Le dict stocke désormais l'URL de base COMPLÈTE de l'API interne de chaque service, pas seulement son host racine — `PERSONNEL` continue de fonctionner (son préfixe `/api` est resté correct) |
+| `tenant-service/config/settings.py` | `PROVISIONING_SERVICE_MEDICAL_URL` | Symétrique de `PROVISIONING_SERVICE_PERSONNEL_URL` | Additif |
+| `Medical-Monitoring/backend/core/settings.py` | `DATABASE_ROUTERS`, middleware, variables `TENANT_SERVICE_*`/`TENANT_DB_*` | Activer le routage tenant-aware | Additif — `DATABASES['default']` inchangé |
+| `Medical-Monitoring/backend/core/authentication.py` | `GatewayHeaderAuthentication` lit `X-Tenant-ID`, établit le Tenant Context | Même patron que service-personnel | Additif — comportement d'authentification existant inchangé |
+| `Medical-Monitoring/backend/core/urls.py` | + route interne de provisioning | Exposer `ProvisionDatabaseView` | Additif |
+| `Medical-Monitoring/backend/medical_workflow/signals.py` | Capture explicite du tenant AVANT `thread.start()`, transmission via `X-Tenant-ID` + jeton interne, refus d'envoi si aucun tenant réel | Corriger le problème contextvars/thread identifié à l'audit (§5 de la tâche) | **Comportement changé** : une visite TERMINE sans tenant réel (contexte absent ou pool non assigné) n'est plus jamais envoyée à Clinical Agent — avant cette phase, l'envoi partait sans savoir à qui appartenait la donnée |
+| `Medical-Monitoring/docker-compose.yml` | `.env` créé depuis `.env.example` (`DB_HOST` corrigé : `db`→`medical-db`, désynchronisé du compose actuel) | Débloquer le démarrage du service en dev (jamais démarré dans cet environnement avant) | Correction d'un défaut de configuration préexistant, sans rapport avec le multitenant |
+| `clinical-agent/models.py` | `CasClinique`/`VisiteSynced` : + `tenant_id` (NOT NULL, indexé), contraintes d'unicité recomposées `(id_source, tenant_id)` | Raison technique démontrée : buffer partagé, autorisation d'export par tenant (§9 de la tâche) | Tables `cas_cliniques`/`visites_synced` **vidées** (16+26 lignes, données pré-multitenant sans tenant possible — décision validée explicitement, voir §13.3.1) |
+| `clinical-agent/database.py` | `MAIN_DB_URL`/`MainSession` supprimés, `get_main_session_for_tenant(tenant_id)` | Il n'existe plus "une" base principale | `TamponSession` (buffer partagé) inchangé |
+| `clinical-agent/sync.py` | `sync_visite`/`sync_all_completed_visits` prennent `tenant_id`, toutes les requêtes buffer scopées | Isolation du buffer par tenant | Signature de fonction changée (appelants mis à jour dans le même chantier) |
+| `clinical-agent/main.py` | `/sync/visite/{id}`/`/sync/all` exigent `X-Tenant-ID` + jeton interne, vérifient `allow_clinical_agent_export` AVANT lecture ; `sync_all_known_tenants()` (énumération explicite, usage interne) remplace le rattrapage global implicite ; `/health` vérifie le Tenant Registry au lieu d'"une" base principale | §7/§8/§10 de la tâche | **Comportement changé** : ces endpoints, auparavant ouverts sans authentification, refusent désormais tout appel non authentifié/sans tenant/tenant sans autorisation d'export |
+| `docker-compose.yml` (racine) | `clinical-agent` : `TENANT_SERVICE_URL`/`TENANT_SERVICE_INTERNAL_TOKEN`/`TENANT_DB_USER`/`TENANT_DB_PASSWORD` ajoutés, `MAIN_DB_URL` retiré (obsolète), commande surchargée en HTTP simple (voir §13.5), `FULTANG_RATE_LIMIT_*` avec défaut `:-` | Nécessaire au fonctionnement + correction de défauts préexistants qui empêchaient totalement le démarrage | `MAIN_DB_URL` n'est plus lu par aucun code — suppression sûre |
+| Frontend : `axiosInstance.js`, `axiosInstanceAccountant.js`, `axiosInstanceCompta.js` | `baseURL` résolu dynamiquement via `getGatewayBaseUrl()` au lieu d'une variable d'environnement figée | §14 de la tâche — sans cela, tous les appels Doctor/Nurse/Patient/Pharmacist/Laboratory/Cashier/Accountant partaient vers un hostname fixe quel que soit le tenant ouvert dans le navigateur | Correction directe d'un bug déjà présent avant cette phase (jamais remarqué faute de test multi-tenant réel) |
+
+#### Migrations
+
+| Migration | Contenu |
+|---|---|
+| `tenant-service/tenants/migrations/0007_tenant_allow_clinical_agent_export.py` | `AddField(allow_clinical_agent_export, default=True)` — appliquée sans perte de données, tous les tenants existants conservent le comportement d'export actuel |
+
+Côté Medical-Monitoring : aucune migration de schéma Django nécessaire (le routage réutilise les migrations existantes de `patient`/`medical_workflow`/`patient_informations`, appliquées telles quelles sur chaque nouvelle base tenant). Côté Clinical Agent (SQLAlchemy, pas de framework de migration) : les tables `cas_cliniques`/`visites_synced` ont été recréées avec le nouveau schéma (voir §13.3.1 pour la justification et la décision validée par l'utilisateur).
+
+**Fichiers volontairement NON modifiés (Phase 8)** :
+- `Patient`, `Visite`, `Consultation`, `Examen`, `MedicamentPrescrit`, etc. (modèles métier Medical-Monitoring) — aucun `tenant_id` ajouté, l'isolation vient de la base physique.
+- `clinical-agent/main.py::verify_api_key` / le mécanisme `X-API-Key` de `/export` — revérifié, déjà correct (sha256 + `hmac.compare_digest`), conservé sans modification.
+- `ComptaMatiere`, `Gestion-Infrastructures` — non tenant-aware, décision de périmètre explicite (voir §13.6).
+- `fultang-compta-financiere/apps/integration/medical_client.py` — aucune modification nécessaire : le chemin Gateway hérite automatiquement du tenant-awareness de Medical-Monitoring, le chemin de repli direct échouait déjà avant cette phase et continue d'échouer explicitement (voir §13.6).
+- La base propre de `fultang-compta-financiere` (caisse, comptabilité) — **non isolée**, décision de ne pas élargir le périmètre à une refonte complète de ce service (voir §13.6, §19).
+
 ---
 
 ## 18. Ce qui a été conservé
@@ -1283,43 +1432,64 @@ FAIT
 │                                                         2 vraies bases PostgreSQL séparées. Les 3 autres
 │                                                         services adaptés en Phase 4 n'ont pas de router
 │                                                         (décision de périmètre, pas un manque).
-└── Tenant Provisioning (Phase 7) ...................... CLÔTURÉE pour service-personnel : création physique
-                                                          réelle de base (psycopg2, idempotente) + migration
-                                                          automatisées via POST /tenants/{id}/provision/,
-                                                          concurrence par CAS PostgreSQL (pas de verrou
-                                                          applicatif), échec → FAILED + retry (pas de rollback
-                                                          destructif). Déclaratif seul (SKIPPED) pour les 3
-                                                          autres services adaptés en Phase 4 (pas de router
-                                                          Phase 6 pour eux — décision de périmètre, pas un
-                                                          manque). Provisioning de comptes utilisateurs
-                                                          toujours hors périmètre (§10.1).
+├── Tenant Provisioning (Phase 7) ...................... CLÔTURÉE pour service-personnel ET Medical-Monitoring :
+│                                                          création physique réelle de base (psycopg2,
+│                                                          idempotente) + migration automatisées via
+│                                                          POST /tenants/{id}/provision/, concurrence par CAS
+│                                                          PostgreSQL (pas de verrou applicatif), échec →
+│                                                          FAILED + retry (pas de rollback destructif).
+│                                                          Déclaratif seul (SKIPPED) pour INFRASTRUCTURE/
+│                                                          COMPTA/COMPTA_MATIERE (pas de router équivalent
+│                                                          Phase 6 pour eux — décision de périmètre, pas un
+│                                                          manque). Provisioning de comptes utilisateurs
+│                                                          toujours hors périmètre (§10.1).
+└── Medical Monitoring / Clinical Agent tenant-aware ... CLÔTURÉE : Medical-Monitoring adopte le patron
+                                                          Database-per-Tenant (3 apps métier, migration
+                                                          multi-app sans app_label en dur) ; signal Visite
+                                                          corrigé (capture tenant AVANT thread, transmission
+                                                          explicite) ; Clinical Agent résout un moteur
+                                                          SQLAlchemy par tenant, exige authentification interne
+                                                          + tenant sur /sync/*, applique
+                                                          allow_clinical_agent_export AVANT toute lecture ;
+                                                          buffer d'export scopé par tenant_id (raison technique
+                                                          démontrée, seule exception à "pas de tenant_id
+                                                          partout"). Isolation vérifiée en conditions réelles :
+                                                          2 tenants, patients/visites distincts, export
+                                                          autorisé/refusé/inversé dans les deux sens, buffer
+                                                          jamais mélangé.
 
 À FAIRE
-├── Extension du Dynamic Database Router (Phase 6) + du provisioning physique (Phase 7) aux 3 autres
-│    services adaptés en Phase 4 (Gestion-Infrastructures, ComptaMatiere, fultang-compta-financiere)
+├── Extension du Dynamic Database Router + du provisioning physique à INFRASTRUCTURE/COMPTA/COMPTA_MATIERE
+├── Isolation de la base propre de fultang-compta-financiere (caisse, comptabilité, facturation) — le
+│    chemin Gateway vers Medical-Monitoring hérite déjà du tenant-awareness, mais Quittance/CaisseJournaliere/
+│    Facture/etc. restent dans une base unique partagée (voir §13.6) — nécessiterait de répéter le patron
+│    Phase 6/7 pour ce service, non fait ici (pas de refonte non nécessaire)
 ├── Verrou de création de pool distribué (si passage à plusieurs instances par service)
 ├── Reprise automatique d'un provisioning bloqué en PROVISIONING (processus crashé après création physique
-│    réussie mais avant confirmation) — voir §10.2.7, non résolu dans cette phase
+│    réussie mais avant confirmation) — voir §10.2.7, non résolu
 ├── Provisioning des comptes utilisateurs .............. non implémenté (§10.1)
 ├── Migration des comptes existants (tenant_id NULL) .. non implémenté
-├── Conception tenant dédiée pour Medical Monitoring / Clinical Agent (Phase 9 notamment)
-├── Isolation des données métier (filtrage par tenant dans les ViewSets)
 ├── Configuration complète des tenants (Phase 9 : modules, feature flags, activation/
 │                                        désactivation fonctionnelle d'un service par tenant)
-├── Sécurisation approfondie service-to-service ....... non implémenté
-├── Tests d'isolation (cross-tenant data leakage) ..... vérifié pour service-personnel (Phase 6, 2 bases
-│                                                          pilotes réelles) ; non fait pour les 3 autres
-│                                                          services adaptés en Phase 4 (pas de router)
+├── Sécurisation approfondie service-to-service ....... non implémenté (accès direct à un service en
+│                                                          contournant la Gateway = confiance aveugle aux
+│                                                          headers, y compris X-Tenant-ID — vérifié explicitement
+│                                                          identique pour Medical-Monitoring et les 4 autres
+│                                                          services déjà tenant-aware, pas une régression)
 ├── Révocation en temps réel d'un alias déjà résolu — désactiver un TenantDatabase ne prend effet, pour
-│    un processus qui a déjà résolu ce tenant, qu'à son redémarrage (voir §9.2.10, découvert et vérifié
-│    pendant la validation pilote de la Phase 6, toujours non résolu après la Phase 7)
+│    un processus qui a déjà résolu ce tenant, qu'à son redémarrage (voir §9.2.10, même limite pour
+│    Medical-Monitoring)
 ├── Secret Manager réel (Vault, AWS Secrets Manager, etc.) — secret_reference reste une référence non
-│    branchée, credentials PostgreSQL partagés pour toute création physique (Phase 6 et 7)
+│    branchée, credentials PostgreSQL partagés pour toute création physique
 ├── Provisioning à très grande échelle (création en masse de tenants, files d'attente, retries automatiques
-│    planifiés) — cette phase ne couvre qu'un provisioning à la demande, un tenant à la fois
+│    planifiés) — ne couvre qu'un provisioning à la demande, un tenant à la fois
+├── Signal Visite → Clinical Agent : le thread de notification `daemon=True` peut ne pas survivre à un
+│    processus court (`manage.py <commande>`) — le rattrapage périodique/`sync/all` manuel reprend
+│    correctement, mais la notification temps réel n'est garantie que dans un processus long (runserver/
+│    gunicorn) — voir §13.2
 └── Opérations multitenant (backup/restore par tenant, etc.)
 ```
 
 ---
 
-*Document maintenu à jour à chaque phase du projet multitenant. Dernière mise à jour : Phase 7 — Tenant Provisioning.*
+*Document maintenu à jour à chaque phase du projet multitenant. Dernière mise à jour : Phase 8 — Medical Monitoring tenant-aware, Clinical Agent tenant-aware, autorisation d'export.*

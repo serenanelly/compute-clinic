@@ -75,6 +75,12 @@ services:
     environment:
       - CLINICAL_AGENT_URL=http://fultang-clinical-agent:9000
       - ALLOWED_HOSTS=localhost,127.0.0.1,backend,fultang-medical-backend
+      # Tenant routing (Database per Tenant per Service) : mêmes noms de
+      # variables et même jeton partagé que service-personnel/tenant-service.
+      - TENANT_SERVICE_URL=http://fultang-tenant-web:8000
+      - TENANT_SERVICE_INTERNAL_TOKEN=${TENANT_SERVICE_INTERNAL_TOKEN:-dev-local-only-shared-secret-change-me}
+      - TENANT_DB_USER=fultang_user
+      - TENANT_DB_PASSWORD=fultang_password_here
 
     # Les volumes et ports sont définis dans docker-compose.override.yml
     # pour le développement local afin de respecter les bonnes pratiques.

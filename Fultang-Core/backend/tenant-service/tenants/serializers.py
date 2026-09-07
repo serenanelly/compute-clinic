@@ -8,13 +8,34 @@ class TenantSerializer(serializers.ModelSerializer):
 
     `id`, `status` et `created_at` sont en lecture seule à la création :
     le statut initial d'un tenant est toujours ACTIVE et son id est généré
-    par le registre.
+    par le registre. `allow_clinical_agent_export` est acceptée en
+    écriture à la création (optionnelle, défaut `True` porté par le
+    modèle) mais sa modification ultérieure passe par
+    `TenantUpdateSerializer` (PATCH /tenants/{id}/), pas par ce
+    serializer — cohérent avec `status`, qui a lui aussi son action
+    dédiée plutôt qu'une mise à jour générale libre.
     """
 
     class Meta:
         model = Tenant
-        fields = ['id', 'name', 'identifier', 'status', 'created_at']
+        fields = ['id', 'name', 'identifier', 'status', 'allow_clinical_agent_export', 'created_at']
         read_only_fields = ['id', 'status', 'created_at']
+
+
+class TenantUpdateSerializer(serializers.ModelSerializer):
+    """
+    Payload attendu par PATCH/PUT /tenants/{id}/.
+
+    N'expose QUE `allow_clinical_agent_export` — même principe que
+    `TenantDatabaseUpdateSerializer` (Phase 5) : `name`/`identifier`
+    restent volontairement absents (un identifier ne doit pas changer une
+    fois attribué, voir docstring du modèle) et `status` reste réservé à
+    l'action dédiée `PATCH /tenants/{id}/status/`.
+    """
+
+    class Meta:
+        model = Tenant
+        fields = ['allow_clinical_agent_export']
 
 
 class TenantStatusUpdateSerializer(serializers.Serializer):
@@ -42,16 +63,24 @@ class TenantProvisionRequestSerializer(serializers.Serializer):
 
 
 class TenantResolutionSerializer(serializers.ModelSerializer):
-    """Réponse de GET /tenants/resolve/ — utilisée par la Tenant Resolution (Phase 2.1).
+    """
+    Réponse de GET /tenants/resolve/ — utilisée par la Tenant Resolution
+    (Phase 2.1, appelante : la Gateway) et par toute résolution interne
+    par UUID (Phase Medical-Monitoring tenant-aware, appelante :
+    clinical-agent — voir `?id=`).
 
-    Expose volontairement le strict minimum nécessaire à la Gateway pour
-    construire un Tenant Context : jamais `name`, ni aucun futur champ de
-    configuration métier.
+    Expose le minimum nécessaire à un appelant interne de confiance
+    (protégé par IsInternalService) pour construire un Tenant Context et
+    appliquer les règles qui en dépendent : jamais `name`, jamais un champ
+    de configuration métier complexe (Phase 9). `allow_clinical_agent_export`
+    reste un champ de PLATEFORME (au même titre que `status`), pas une
+    configuration métier — c'est pour cela qu'il est exposé ici, exactement
+    comme `status` l'était déjà.
     """
 
     class Meta:
         model = Tenant
-        fields = ['id', 'identifier', 'status']
+        fields = ['id', 'identifier', 'status', 'allow_clinical_agent_export']
 
 
 class PlatformServiceSerializer(serializers.ModelSerializer):

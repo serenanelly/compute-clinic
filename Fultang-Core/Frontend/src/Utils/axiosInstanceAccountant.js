@@ -1,8 +1,11 @@
 import axios from "axios";
 import { getToken } from './authToken';
+import { getGatewayBaseUrl } from './gatewayUrls';
 
+// getGatewayBaseUrl() cible le hostname courant (résolution de tenant par
+// sous-domaine) — voir axiosInstance.js / Utils/gatewayUrls.js pour le détail.
 const axiosInstanceAccountant = axios.create({
-    baseURL: import.meta.env.VITE_BACKEND_FULTANG_API_BASE_ACCOUNTANT_URL,
+    baseURL: `${getGatewayBaseUrl()}/compta-financiere`,
     headers: {
         'Content-Type': 'application/json'
     }

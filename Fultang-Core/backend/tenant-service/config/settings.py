@@ -112,6 +112,11 @@ TENANT_SERVICE_INTERNAL_TOKEN = os.environ.get('TENANT_SERVICE_INTERNAL_TOKEN', 
 PROVISIONING_SERVICE_PERSONNEL_URL = os.environ.get(
     'PROVISIONING_SERVICE_PERSONNEL_URL', 'http://fultang-personnel:8000',
 )
+# Medical-Monitoring : même mécanisme, une fois doté de l'équivalent Phase 6
+# (core/tenant_routing/) et de son endpoint interne symétrique de provisioning.
+PROVISIONING_SERVICE_MEDICAL_URL = os.environ.get(
+    'PROVISIONING_SERVICE_MEDICAL_URL', 'http://fultang-medical-backend:8000',
+)
 PROVISIONING_TIMEOUT_SECONDS = int(os.environ.get('PROVISIONING_TIMEOUT_SECONDS', '30'))
 
 

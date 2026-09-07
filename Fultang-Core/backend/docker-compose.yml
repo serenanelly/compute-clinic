@@ -97,12 +97,39 @@ services:
       - "9000:9000"
     volumes:
       - ./certs:/app/certs:ro
+    # Dev local uniquement : le Dockerfile expose un CMD avec TLS
+    # (--ssl-keyfile/--ssl-certfile) pour la prod, mais AUCUN autre appel
+    # interne de FullTang en dev ne parle HTTPS (Gateway↔services,
+    # signal Medical-Monitoring→clinical-agent inclus — voir
+    # medical_workflow/signals.py::CLINICAL_AGENT_URL, resté en
+    # `http://`). Avant ce chantier, ce décalage était invisible : le
+    # conteneur ne démarrait jamais (certs/ vide) et l'appel HTTP au
+    # signal échouait donc silencieusement (connexion refusée) de la
+    # même façon qu'un vrai mismatch TLS. Pas une régression introduite
+    # ici — un défaut de config latent, démasqué en le faisant enfin
+    # démarrer. Correction dev : down-scope au HTTP simple, cohérent
+    # avec le reste de la stack locale ; le Dockerfile/CMD (image prod)
+    # n'est pas modifié.
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9000", "--log-level", "info"]
     environment:
-      - MAIN_DB_URL=postgresql://fultang_user:fultang_password_here@fultang-medical-db-server:5432/fultang_medical_monitoring
+      # MAIN_DB_URL retiré : Medical-Monitoring est désormais en Database
+      # per Tenant — il n'existe plus "une" base principale unique (voir
+      # registry_client.py/engine_registry.py, qui résolvent une base par
+      # tenant via le Tenant Registry).
       - TAMPON_DB_URL=postgresql://admin:password@fultang-tampon-db:5432/tampon_clinical_cases
       - MEDTUTOR_API_KEY_HASH=${MEDTUTOR_API_KEY_HASH}
-      - FULTANG_RATE_LIMIT_REQUESTS=${FULTANG_RATE_LIMIT_REQUESTS}
-      - FULTANG_RATE_LIMIT_WINDOW_SECONDS=${FULTANG_RATE_LIMIT_WINDOW_SECONDS}
+      # :-defaut nécessaire : une variable présente mais vide (${VAR} sans
+      # valeur ni :-) écrase le fallback int(os.getenv(..., "10")) de
+      # main.py, puisque la variable EXISTE alors (vide), elle n'est pas
+      # absente — int('') lève, empêchant le service de démarrer.
+      - FULTANG_RATE_LIMIT_REQUESTS=${FULTANG_RATE_LIMIT_REQUESTS:-10}
+      - FULTANG_RATE_LIMIT_WINDOW_SECONDS=${FULTANG_RATE_LIMIT_WINDOW_SECONDS:-60}
+      # Tenant routing (chantier Medical-Monitoring tenant-aware) : mêmes
+      # noms de variables et même jeton partagé que le reste de FullTang.
+      - TENANT_SERVICE_URL=http://fultang-tenant-web:8000
+      - TENANT_SERVICE_INTERNAL_TOKEN=${TENANT_SERVICE_INTERNAL_TOKEN:-dev-local-only-shared-secret-change-me}
+      - TENANT_DB_USER=fultang_user
+      - TENANT_DB_PASSWORD=fultang_password_here
     depends_on:
       - tampon-db
     networks:

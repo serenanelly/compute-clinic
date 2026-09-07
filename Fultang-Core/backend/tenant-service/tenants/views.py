@@ -41,6 +41,7 @@ Gateway ↔ Tenant Service (IsInternalService, voir permissions.py),
 c'est-à-dire une preuve que l'appelant est bien la Gateway.
 """
 from django.contrib.auth.hashers import check_password
+from django.core.exceptions import ValidationError
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -66,6 +67,7 @@ from .serializers import (
     TenantResolutionSerializer,
     TenantSerializer,
     TenantStatusUpdateSerializer,
+    TenantUpdateSerializer,
 )
 from .services import PlatformServiceCatalog, TenantDatabaseService, TenantService
 
@@ -73,6 +75,7 @@ from .services import PlatformServiceCatalog, TenantDatabaseService, TenantServi
 class TenantViewSet(mixins.CreateModelMixin,
                      mixins.ListModelMixin,
                      mixins.RetrieveModelMixin,
+                     mixins.UpdateModelMixin,
                      viewsets.GenericViewSet):
     """ViewSet du Tenant Registry, adossée à TenantService plutôt qu'à l'ORM directement.
 
@@ -93,10 +96,27 @@ class TenantViewSet(mixins.CreateModelMixin,
         status_filter = self.request.query_params.get('status')
         return self.service.list_tenants(status=status_filter)
 
+    def get_serializer_class(self):
+        # `name`/`identifier`/`status` restent hors d'une mise à jour
+        # générale (status a sa propre action dédiée, voir update_status) —
+        # seule l'autorisation d'export clinical-agent est modifiable via
+        # PATCH/PUT général, cohérent avec TenantDatabaseUpdateSerializer.
+        if self.action in ('update', 'partial_update'):
+            return TenantUpdateSerializer
+        return TenantSerializer
+
     def perform_create(self, serializer):
         tenant = self.service.create_tenant(
             name=serializer.validated_data['name'],
             identifier=serializer.validated_data['identifier'],
+            allow_clinical_agent_export=serializer.validated_data.get('allow_clinical_agent_export'),
+        )
+        serializer.instance = tenant
+
+    def perform_update(self, serializer):
+        tenant = self.service.set_clinical_agent_export_authorization(
+            serializer.instance.id,
+            serializer.validated_data['allow_clinical_agent_export'],
         )
         serializer.instance = tenant
 
@@ -177,15 +197,32 @@ class TenantViewSet(mixins.CreateModelMixin,
 
     @action(detail=False, methods=['get'], url_path='resolve', permission_classes=[IsInternalService])
     def resolve(self, request):
-        """GET /tenants/resolve/?identifier=<identifier> — réservé à la Gateway (jeton interne requis)."""
+        """
+        GET /tenants/resolve/?identifier=<identifier>  — utilisé par la Gateway
+        GET /tenants/resolve/?id=<uuid>                — utilisé par tout appelant
+             interne qui connaît déjà le tenant_id mais pas l'identifier (ex:
+             clinical-agent, qui reçoit tenant_id via X-Tenant-ID, jamais un
+             hostname). Un seul des deux paramètres doit être fourni.
+
+        Réservé à la communication interne (jeton interne requis, IsInternalService).
+        """
         identifier = request.query_params.get('identifier')
-        if not identifier:
+        tenant_id = request.query_params.get('id')
+
+        if not identifier and not tenant_id:
             return Response(
-                {'detail': "Le paramètre 'identifier' est requis."},
+                {'detail': "Le paramètre 'identifier' ou 'id' est requis."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        tenant = self.service.get_tenant_by_identifier(identifier)
+        if identifier:
+            tenant = self.service.get_tenant_by_identifier(identifier)
+        else:
+            try:
+                tenant = self.service.get_tenant(tenant_id)
+            except (Tenant.DoesNotExist, ValueError, ValidationError):
+                tenant = None
+
         if tenant is None:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
@@ -337,6 +374,41 @@ class TenantDatabaseViewSet(mixins.CreateModelMixin,
             return Response(status=status.HTTP_404_NOT_FOUND)
 
         return Response(TenantDatabaseResolutionSerializer(tenant_database).data)
+
+    @action(detail=False, methods=['get'], url_path='resolve-active', permission_classes=[IsInternalService])
+    def resolve_active(self, request):
+        """
+        GET /tenant-databases/resolve-active/?service=<code>
+
+        Énumère toutes les configurations ACTIVE pour un service donné —
+        nécessaire au rattrapage périodique de clinical-agent
+        (`/sync/all`), qui doit savoir explicitement quels tenants ont une
+        base MEDICAL active plutôt que de deviner ou de parcourir un
+        registre auquel il n'a pas accès directement. Réservé à la
+        communication interne (même jeton partagé que `resolve`).
+
+        Ne remplace PAS `resolve` (résolution ponctuelle d'un couple
+        tenant+service) : cette action sert uniquement l'énumération
+        explicite et contrôlée décrite par la tâche (Phase 10 — jamais un
+        parcours implicite de "toutes les bases").
+        """
+        service_code = request.query_params.get('service')
+        if not service_code:
+            return Response(
+                {'detail': "Le paramètre 'service' est requis."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        tenant_databases = self.service.list_tenant_databases(
+            service_code=service_code, status=TenantDatabaseStatus.ACTIVE,
+        )
+        return Response([
+            {
+                'tenant_id': str(td.tenant_id),
+                **TenantDatabaseResolutionSerializer(td).data,
+            }
+            for td in tenant_databases
+        ])
 
 
 class PlatformAdminAuthVerifyView(APIView):

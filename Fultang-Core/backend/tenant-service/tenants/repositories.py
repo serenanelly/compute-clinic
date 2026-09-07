@@ -31,9 +31,26 @@ from .models import PlatformService, Tenant, TenantDatabase, TenantDatabaseStatu
 class TenantRepository:
     """Encapsule les opérations de lecture/écriture sur le modèle Tenant."""
 
-    def create(self, *, name: str, identifier: str) -> Tenant:
-        """Persiste un nouveau tenant avec le statut par défaut (ACTIVE)."""
-        return Tenant.objects.create(name=name, identifier=identifier)
+    def create(self, *, name: str, identifier: str, allow_clinical_agent_export: Optional[bool] = None) -> Tenant:
+        """
+        Persiste un nouveau tenant avec le statut par défaut (ACTIVE).
+
+        `allow_clinical_agent_export` est optionnel : si non fourni, le
+        défaut du modèle (`True`) s'applique — un appelant qui ne connaît
+        pas encore ce champ (scripts existants, tests plus anciens)
+        continue de fonctionner sans modification.
+        """
+        kwargs = {'name': name, 'identifier': identifier}
+        if allow_clinical_agent_export is not None:
+            kwargs['allow_clinical_agent_export'] = allow_clinical_agent_export
+        return Tenant.objects.create(**kwargs)
+
+    def update_allow_clinical_agent_export(self, tenant_id: UUID, value: bool) -> Tenant:
+        """Met à jour uniquement l'autorisation d'export clinical-agent."""
+        tenant = self.get_by_id(tenant_id)
+        tenant.allow_clinical_agent_export = value
+        tenant.save(update_fields=['allow_clinical_agent_export'])
+        return tenant
 
     def get_by_id(self, tenant_id: UUID) -> Tenant:
         """Retourne le tenant correspondant à `tenant_id`.

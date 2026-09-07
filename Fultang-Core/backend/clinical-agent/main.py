@@ -35,14 +35,23 @@ from typing import Optional
 from datetime import datetime
 from collections import defaultdict, deque
 
-from fastapi import FastAPI, HTTPException, Query, Header 
+from fastapi import FastAPI, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import text
 
-from database import init_tampon_db, MainSession, TamponSession
+from database import init_tampon_db, get_main_session_for_tenant, TamponSession
 from models import CasClinique, VisiteSynced
 from sync import sync_visite, sync_all_completed_visits
+from engine_registry import TenantDatabaseInactiveError
+from registry_client import (
+    TENANT_SERVICE_INTERNAL_TOKEN,
+    TenantDatabaseNotFoundError,
+    TenantNotFoundError,
+    TenantRegistryUnavailableError,
+    get_tenant_config,
+    list_active_tenant_databases,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -121,7 +130,42 @@ def verify_api_key(api_key: Optional[str]) -> None:
             status_code=401,
             detail = "Clé API invalide",
         )
-                   
+
+
+def verify_internal_service_token(token: Optional[str]) -> None:
+    """
+    Protège /sync/visite/{id} et /sync/all — même mécanisme que
+    IsInternalService côté tenant-service/service-personnel/Medical-Monitoring
+    (jeton partagé, comparaison en temps constant). Avant le chantier
+    Medical-Monitoring tenant-aware, ces endpoints n'étaient protégés que
+    par l'isolation réseau Docker ; maintenant qu'ils font confiance à un
+    `tenant_id` transmis par l'appelant pour choisir une base, cette
+    confiance doit être vérifiable — un appel non authentifié est rejeté.
+    """
+    if not token or not TENANT_SERVICE_INTERNAL_TOKEN:
+        raise HTTPException(status_code=401, detail="Authentification interne requise.")
+    if not hmac.compare_digest(token, TENANT_SERVICE_INTERNAL_TOKEN):
+        raise HTTPException(status_code=401, detail="Jeton de service interne invalide.")
+
+
+def verify_export_authorization(tenant_id: str) -> None:
+    """
+    Vérifie `allow_clinical_agent_export` AVANT toute lecture de données
+    médicales (voir sync_visite_endpoint/sync_all_endpoint) — le refus
+    intervient ici, jamais après coup. Un tenant inconnu ou un Registry
+    injoignable sont traités comme un refus explicite (jamais une
+    lecture "par défaut") ; ce sont des 503/404, pas des 200 silencieux.
+    """
+    try:
+        config = get_tenant_config(tenant_id)
+    except TenantNotFoundError:
+        raise HTTPException(status_code=404, detail="Tenant introuvable.")
+    except TenantRegistryUnavailableError:
+        raise HTTPException(status_code=503, detail="Tenant Registry indisponible — synchronisation refusée par prudence.")
+
+    if not config.allow_clinical_agent_export:
+        raise HTTPException(status_code=403, detail="Ce tenant n'autorise pas l'export vers clinical-agent.")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Planificateur de rattrapage périodique (toutes les 15 min)
@@ -130,13 +174,64 @@ def verify_api_key(api_key: Optional[str]) -> None:
 scheduler = BackgroundScheduler()
 
 
+def sync_all_known_tenants() -> dict:
+    """
+    Énumère EXPLICITEMENT les tenants ayant une base MEDICAL active
+    (via le Tenant Registry, `resolve-active`), puis lance un rattrapage
+    par tenant — jamais un parcours implicite "toutes les bases" (voir
+    §10 de la tâche). Utilisé au démarrage et par le planificateur
+    périodique UNIQUEMENT (jamais exposé comme endpoint public — c'est
+    un usage strictement interne, énuméré et contrôlé).
+
+    Pour chaque tenant : vérifie `allow_clinical_agent_export` AVANT
+    toute lecture — un tenant désactivé pour l'export est simplement
+    ignoré (pas une erreur), exactement comme le ferait un appel manuel
+    à /sync/all pour ce tenant.
+    """
+    try:
+        tenant_databases = list_active_tenant_databases()
+    except TenantRegistryUnavailableError as e:
+        logger.error(f"[Rattrapage global] Tenant Registry injoignable — aucun tenant énuméré : {e}")
+        return {"tenants_traites": 0, "resultats": []}
+
+    resultats = []
+    for tenant_id, _info in tenant_databases:
+        try:
+            config = get_tenant_config(tenant_id)
+        except (TenantNotFoundError, TenantRegistryUnavailableError) as e:
+            logger.warning(f"[Rattrapage global] tenant_id={tenant_id} ignoré (config injoignable) : {e}")
+            continue
+
+        if not config.allow_clinical_agent_export:
+            logger.info(f"[Rattrapage global] tenant_id={tenant_id} : export désactivé — ignoré.")
+            resultats.append({"tenant_id": tenant_id, "status": "export_disabled"})
+            continue
+
+        try:
+            main_db = get_main_session_for_tenant(tenant_id)
+        except (TenantDatabaseInactiveError, TenantDatabaseNotFoundError, TenantRegistryUnavailableError) as e:
+            logger.warning(f"[Rattrapage global] tenant_id={tenant_id} : base injoignable, ignoré : {e}")
+            continue
+
+        try:
+            with TamponSession() as tampon_db:
+                result = sync_all_completed_visits(tenant_id, main_db, tampon_db)
+            resultats.append({"tenant_id": tenant_id, "status": "synced", **result})
+        except Exception as e:
+            logger.error(f"[Rattrapage global] Erreur pour tenant_id={tenant_id} : {e}")
+            resultats.append({"tenant_id": tenant_id, "status": "error", "error": str(e)})
+        finally:
+            main_db.close()
+
+    return {"tenants_traites": len(resultats), "resultats": resultats}
+
+
 def scheduled_sync_job():
-    """Tâche planifiée : rattrapage des visites TERMINE non synchronisées."""
+    """Tâche planifiée : rattrapage des visites TERMINE non synchronisées, pour chaque tenant actif."""
     logger.info("=== [PLANIFICATEUR] Démarrage du rattrapage périodique ===")
     try:
-        with MainSession() as main_db, TamponSession() as tampon_db:
-            result = sync_all_completed_visits(main_db, tampon_db)
-        logger.info(f"[PLANIFICATEUR] Terminé : {result['total_pending']} visite(s) traitées.")
+        result = sync_all_known_tenants()
+        logger.info(f"[PLANIFICATEUR] Terminé : {result['tenants_traites']} tenant(s) traité(s).")
     except Exception as e:
         logger.error(f"[PLANIFICATEUR] Erreur : {e}")
 
@@ -151,12 +246,11 @@ async def lifespan(app: FastAPI):
     logger.info("Initialisation de la BD tampon...")
     init_tampon_db()
 
-    logger.info("Rattrapage initial des visites TERMINE...")
+    logger.info("Rattrapage initial des visites TERMINE (tous les tenants actifs)...")
     try:
-        with MainSession() as main_db, TamponSession() as tampon_db:
-            sync_all_completed_visits(main_db, tampon_db)
+        sync_all_known_tenants()
     except Exception as e:
-        logger.warning(f"Rattrapage initial échoué (BD principale peut-être pas encore prête) : {e}")
+        logger.warning(f"Rattrapage initial échoué (Tenant Registry ou bases peut-être pas encore prêts) : {e}")
 
     # Planificateur toutes les 15 minutes
     scheduler.add_job(scheduled_sync_job, "interval", minutes=15, id="periodic_sync")
@@ -199,7 +293,14 @@ app.add_middleware(
 
 @app.get("/health", tags=["Infra"])
 def health():
-    """Vérifie que le service est opérationnel."""
+    """
+    Vérifie que le service est opérationnel.
+
+    Il n'existe plus "une" base principale à vérifier (Medical-Monitoring
+    est en Database per Tenant) — `tenant_registry` remplace l'ancien
+    `main_db` : si le Registry est injoignable, aucune synchronisation
+    n'est possible pour AUCUN tenant, c'est le signal de santé pertinent.
+    """
     try:
         with TamponSession() as db:
             db.execute(text("SELECT 1"))
@@ -208,17 +309,16 @@ def health():
         tampon_ok = False
 
     try:
-        with MainSession() as db:
-            db.execute(text("SELECT 1"))
-        main_ok = True
+        list_active_tenant_databases()
+        registry_ok = True
     except Exception:
-        main_ok = False
+        registry_ok = False
 
-    status = "ok" if (tampon_ok and main_ok) else "degraded"
+    status = "ok" if (tampon_ok and registry_ok) else "degraded"
     return {
         "status": status,
         "tampon_db": "connected" if tampon_ok else "unreachable",
-        "main_db": "connected" if main_ok else "unreachable",
+        "tenant_registry": "connected" if registry_ok else "unreachable",
     }
 
 
@@ -236,35 +336,86 @@ def stats():
 
 
 @app.post("/sync/visite/{visite_id}", tags=["Synchronisation"])
-def sync_visite_endpoint(visite_id: str):
+def sync_visite_endpoint(
+    visite_id: str,
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_internal_service_token: Optional[str] = Header(None, alias="X-Internal-Service-Token"),
+):
     """
-    Synchronise une visite terminée dans la BD tampon.
-    Appelé par le signal Django de Medical-Monitoring dès qu'une visite passe à TERMINE.
+    Synchronise une visite terminée dans la BD tampon, pour le tenant
+    `X-Tenant-ID`. Appelé par le signal Django de Medical-Monitoring dès
+    qu'une visite passe à TERMINE (le tenant est capturé et transmis
+    explicitement par ce signal — voir medical_workflow/signals.py).
+
+    Exige le jeton de service interne (protection contre le spoofing
+    d'un `X-Tenant-ID` arbitraire) ET un `X-Tenant-ID` réel. Vérifie
+    `allow_clinical_agent_export` AVANT toute lecture — un refus
+    n'entraîne AUCUN accès à la base du tenant.
     """
-    logger.info(f"Demande de synchronisation reçue pour la visite : {visite_id}")
+    verify_internal_service_token(x_internal_service_token)
+    if not x_tenant_id:
+        raise HTTPException(status_code=400, detail="Le header X-Tenant-ID est requis.")
+
+    verify_export_authorization(x_tenant_id)
+
+    logger.info(f"Demande de synchronisation reçue pour la visite {visite_id} (tenant={x_tenant_id})")
     try:
-        with MainSession() as main_db, TamponSession() as tampon_db:
-            result = sync_visite(visite_id, main_db, tampon_db)
+        main_db = get_main_session_for_tenant(x_tenant_id)
+    except TenantDatabaseNotFoundError:
+        raise HTTPException(status_code=404, detail="Aucune base MEDICAL enregistrée pour ce tenant.")
+    except TenantDatabaseInactiveError:
+        raise HTTPException(status_code=503, detail="La base MEDICAL de ce tenant n'est pas active.")
+    except TenantRegistryUnavailableError:
+        raise HTTPException(status_code=503, detail="Tenant Registry indisponible.")
+
+    try:
+        with TamponSession() as tampon_db:
+            result = sync_visite(x_tenant_id, visite_id, main_db, tampon_db)
         return result
     except Exception as e:
         logger.error(f"Erreur lors de la synchronisation de la visite {visite_id} : {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        main_db.close()
 
 
 @app.post("/sync/all", tags=["Synchronisation"])
-def sync_all_endpoint():
+def sync_all_endpoint(
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_internal_service_token: Optional[str] = Header(None, alias="X-Internal-Service-Token"),
+):
     """
-    Synchronise toutes les visites TERMINE non encore traitées.
-    Utile pour le rattrapage manuel ou après une panne.
+    Synchronise toutes les visites TERMINE non encore traitées, POUR LE
+    SEUL TENANT `X-Tenant-ID` — jamais un parcours implicite de tous les
+    tenants (voir §10 de la tâche ; l'énumération explicite multi-tenant
+    est réservée à `sync_all_known_tenants`, usage interne uniquement,
+    jamais exposée ici). Utile pour un rattrapage manuel ciblé.
     """
-    logger.info("Synchronisation globale demandée.")
+    verify_internal_service_token(x_internal_service_token)
+    if not x_tenant_id:
+        raise HTTPException(status_code=400, detail="Le header X-Tenant-ID est requis.")
+
+    verify_export_authorization(x_tenant_id)
+
+    logger.info(f"Synchronisation globale demandée pour tenant={x_tenant_id}.")
     try:
-        with MainSession() as main_db, TamponSession() as tampon_db:
-            result = sync_all_completed_visits(main_db, tampon_db)
+        main_db = get_main_session_for_tenant(x_tenant_id)
+    except TenantDatabaseNotFoundError:
+        raise HTTPException(status_code=404, detail="Aucune base MEDICAL enregistrée pour ce tenant.")
+    except TenantDatabaseInactiveError:
+        raise HTTPException(status_code=503, detail="La base MEDICAL de ce tenant n'est pas active.")
+    except TenantRegistryUnavailableError:
+        raise HTTPException(status_code=503, detail="Tenant Registry indisponible.")
+
+    try:
+        with TamponSession() as tampon_db:
+            result = sync_all_completed_visits(x_tenant_id, main_db, tampon_db)
         return result
     except Exception as e:
-        logger.error(f"Erreur lors de la synchronisation globale : {e}")
+        logger.error(f"Erreur lors de la synchronisation globale pour tenant={x_tenant_id} : {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        main_db.close()
 
 
 @app.get("/export", tags=["Export"])

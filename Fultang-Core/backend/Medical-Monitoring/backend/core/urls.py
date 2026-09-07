@@ -21,6 +21,8 @@ from django.conf.urls.static import static
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 
+from core.views import ProvisionDatabaseView
+
 urlpatterns = [
     path('admin/', admin.site.urls),
 
@@ -29,6 +31,15 @@ urlpatterns = [
     # ------------------------------------------------------------
     path('api/medical-monitoring/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/medical-monitoring/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+
+    # ------------------------------------------------------------
+    # PROVISIONING INTERNE (tenant-service → Medical-Monitoring)
+    # ------------------------------------------------------------
+    path(
+        'api/medical-monitoring/internal/provision-database/',
+        ProvisionDatabaseView.as_view(),
+        name='internal-provision-database',
+    ),
 
     # ------------------------------------------------------------
     # DOCUMENTATION (Swagger/OpenAPI)
