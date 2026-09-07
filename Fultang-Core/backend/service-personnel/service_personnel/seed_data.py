@@ -169,6 +169,16 @@ def seed_personnel(services):
 
 
 if __name__ == '__main__':
+    # Phase 6 (Dynamic Database Routing) : ce script tourne au démarrage du
+    # conteneur, hors de tout cycle de requête HTTP — aucun mécanisme
+    # d'authentification n'établit donc de Tenant Context automatiquement.
+    # Les comptes de démonstration seedés ici appartiennent délibérément au
+    # pool non assigné (tenant_id=None, voir Phase 3) : c'est exactement ce
+    # contexte qu'on établit explicitement, pour que le Database Router les
+    # route vers 'default' plutôt que de refuser faute de contexte.
+    from api.tenant_routing.context import set_tenant_context
+    set_tenant_context(None)
+
     print('=== Seed personnel Fultang ===\n')
     svc_map = get_service_map()
     print(f"Services : {len(svc_map)}")

@@ -15,8 +15,15 @@ que DRF peut utiliser via request.user. Elle ne revalide pas le JWT : elle
 fait confiance à la Gateway, qui est seule responsable de garantir que ces
 headers ne reflètent jamais une valeur fournie librement par le client
 (voir api-gateway/app/main.py::_strip_client_identity_headers).
+
+Phase 6 (Dynamic Database Routing) : c'est ICI, au moment même où
+`tenant_id` est déterminé à partir du header de confiance, que le Tenant
+Context est établi (voir tenant_routing/context.py) — jamais ailleurs,
+jamais depuis une source moins fiable.
 """
 from rest_framework.authentication import BaseAuthentication
+
+from .tenant_routing.context import set_tenant_context
 
 
 class GatewayUser:
@@ -65,6 +72,14 @@ class GatewayHeaderAuthentication(BaseAuthentication):
 
         roles = [r.strip() for r in user_roles_raw.split(",") if r.strip()]
         user = GatewayUser(user_id=user_id, roles=roles, tenant_id=tenant_id)
+
+        # Établit le Tenant Context pour le Database Router (Phase 6).
+        # Le token n'a pas besoin d'être conservé ici : le nettoyage en
+        # fin de requête est garanti par TenantContextCleanupMiddleware,
+        # quel que soit le nombre de fois où le contexte a été redéfini
+        # pendant le traitement de la requête.
+        set_tenant_context(tenant_id)
+
         return (user, None)  # (user, auth_token)
 
     def authenticate_header(self, request):

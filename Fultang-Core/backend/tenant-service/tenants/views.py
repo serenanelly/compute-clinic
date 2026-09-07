@@ -16,6 +16,13 @@ Endpoint exposé (Phase 2.1) :
            identifier vers {id, identifier, status}, réservé à la
            communication interne Gateway → Tenant Service.
 
+Endpoint exposé (Phase 6) :
+    GET    /api/tenant-databases/resolve/?tenant=<uuid>&service=<code> →
+           résoudre (tenant, service) vers {database_name, host, port,
+           status}, réservé à la communication interne (n'importe quel
+           microservice FullTang faisant du Dynamic Database Routing —
+           pas seulement la Gateway).
+
 Volontairement absents à ce stade : suppression, mise à jour libre du
 nom/identifier, pagination avancée, filtres au-delà du statut — ils
 pourront être ajoutés sans remise en cause de cette structure.
@@ -33,18 +40,29 @@ autant PAS publique : elle exige le jeton de service interne partagé
 Gateway ↔ Tenant Service (IsInternalService, voir permissions.py),
 c'est-à-dire une preuve que l'appelant est bien la Gateway.
 """
+from django.contrib.auth.hashers import check_password
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from .models import PlatformService, Tenant, TenantDatabase, TenantDatabaseStatus, TenantStatus
+from .models import PlatformAdmin, PlatformService, Tenant, TenantDatabase, TenantDatabaseStatus, TenantStatus
 from .permissions import IsInternalService, IsPlatformAdmin
+from .provisioning import (
+    ProvisioningOrchestrator,
+    ServiceNotActiveError,
+    TenantNotActiveForProvisioningError,
+    TenantNotFoundForProvisioningError,
+    UnknownServiceError,
+)
 from .serializers import (
     PlatformServiceSerializer,
+    TenantDatabaseResolutionSerializer,
     TenantDatabaseSerializer,
     TenantDatabaseStatusUpdateSerializer,
     TenantDatabaseUpdateSerializer,
+    TenantProvisionRequestSerializer,
     TenantResolutionSerializer,
     TenantSerializer,
     TenantStatusUpdateSerializer,
@@ -97,6 +115,65 @@ class TenantViewSet(mixins.CreateModelMixin,
             tenant = self.service.deactivate_tenant(tenant.id)
 
         return Response(TenantSerializer(tenant).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='provision')
+    def provision(self, request, id=None):
+        """
+        POST /tenants/{id}/provision/ — Tenant Provisioning (Phase 7).
+
+        Réservé au PLATFORM_ADMIN (permission de classe, comme le reste
+        de ce ViewSet) : c'est une opération d'infrastructure, jamais
+        accessible à un rôle métier tenant-scope (§14 de la tâche).
+
+        Corps attendu : `{"services": ["PERSONNEL", ...]}`. Toujours
+        200 si la demande elle-même est valide (tenant + tous les
+        services existent et sont ACTIVE) — le corps de la réponse
+        détaille alors le résultat PAR service (ACTIVE/FAILED/SKIPPED),
+        un échec physique sur un service n'étant jamais une raison de
+        renvoyer une erreur HTTP globale (voir §10 de la tâche).
+        400/404/409 uniquement si la demande elle-même est invalide
+        (tenant introuvable, tenant inactif, service inconnu/inactif) —
+        dans ce cas, AUCUNE ressource n'est créée.
+        """
+        tenant = self.get_object()
+
+        body_serializer = TenantProvisionRequestSerializer(data=request.data)
+        body_serializer.is_valid(raise_exception=True)
+        service_codes = body_serializer.validated_data['services']
+
+        orchestrator = ProvisioningOrchestrator()
+        try:
+            results = orchestrator.provision(tenant.id, service_codes)
+        except TenantNotFoundForProvisioningError:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        except TenantNotActiveForProvisioningError as exc:
+            return Response(
+                {'detail': str(exc)}, status=status.HTTP_409_CONFLICT,
+            )
+        except UnknownServiceError as exc:
+            return Response(
+                {'detail': str(exc), 'service': exc.service_code}, status=status.HTTP_400_BAD_REQUEST,
+            )
+        except ServiceNotActiveError as exc:
+            return Response(
+                {'detail': str(exc), 'service': exc.service_code}, status=status.HTTP_409_CONFLICT,
+            )
+
+        return Response(
+            {
+                'tenant': str(tenant.id),
+                'results': [
+                    {
+                        'service': result.service_code,
+                        'status': result.status,
+                        'database_name': result.database_name,
+                        'detail': result.detail,
+                    }
+                    for result in results
+                ],
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=False, methods=['get'], url_path='resolve', permission_classes=[IsInternalService])
     def resolve(self, request):
@@ -236,3 +313,69 @@ class TenantDatabaseViewSet(mixins.CreateModelMixin,
         updated = self.service.set_status(instance.id, new_status)
 
         return Response(TenantDatabaseSerializer(updated).data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], url_path='resolve', permission_classes=[IsInternalService])
+    def resolve(self, request):
+        """
+        GET /tenant-databases/resolve/?tenant=<uuid>&service=<code>
+
+        Réservé aux microservices FullTang (Phase 6 : Dynamic Database
+        Routing) — même mécanisme que GET /tenants/resolve/ (jeton
+        interne partagé). Retourne 404 si aucune configuration n'existe
+        pour ce couple ; ne devine jamais une base de repli.
+        """
+        tenant_id = request.query_params.get('tenant')
+        service_code = request.query_params.get('service')
+        if not tenant_id or not service_code:
+            return Response(
+                {'detail': "Les paramètres 'tenant' et 'service' sont requis."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        tenant_database = self.service.get_for_tenant_and_service(tenant_id, service_code)
+        if tenant_database is None:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        return Response(TenantDatabaseResolutionSerializer(tenant_database).data)
+
+
+class PlatformAdminAuthVerifyView(APIView):
+    """
+    POST /api/platform-admin/login/ — vérifie des identifiants PLATFORM_ADMIN.
+
+    Symétrique de `service-personnel/api/views.py::AuthVerifyView` : appelée
+    par la Gateway (jamais directement par un client), précède toute
+    authentification DRF (pas de jeton à ce stade), ne fait confiance à
+    aucun rôle fourni par l'appelant — le rôle `PLATFORM_ADMIN` n'est
+    renvoyé QUE si l'email/mot de passe correspondent à un `PlatformAdmin`
+    actif. Réponse au même format que `AuthVerifyView` ({id, email, roles,
+    nom, prenom}) pour que la Gateway puisse minter le JWT de la même
+    façon, sans code spécifique.
+
+    Un PLATFORM_ADMIN n'a et n'aura jamais de `tenant_id` — ce champ est
+    absent de la réponse (la Gateway construit alors un JWT sans
+    `tenant_id`, exactement comme pour un compte du pool non assigné).
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        email = (request.data.get('email') or '').strip().lower()
+        password = request.data.get('password')
+
+        if not email or not password:
+            return Response(
+                {'detail': "Email et mot de passe requis."}, status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        admin = PlatformAdmin.objects.filter(email=email, is_active=True).first()
+        if admin is None or not check_password(password, admin.password):
+            return Response({'detail': "Identifiants invalides"}, status=status.HTTP_401_UNAUTHORIZED)
+
+        return Response({
+            'id': str(admin.id),
+            'email': admin.email,
+            'roles': ['PLATFORM_ADMIN'],
+            'nom': admin.nom,
+            'prenom': admin.prenom,
+        })

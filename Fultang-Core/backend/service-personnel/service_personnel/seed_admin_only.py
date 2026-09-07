@@ -44,6 +44,12 @@ def seed_admin():
     print(f"{'+' if created else '~'} Admin: {email}")
 
 if __name__ == '__main__':
+    # Phase 6 (Dynamic Database Routing) : script hors cycle de requête HTTP
+    # — établit explicitement le pool non assigné (tenant_id=None, Phase 3)
+    # pour ce compte de démonstration. Voir seed_data.py pour le détail.
+    from api.tenant_routing.context import set_tenant_context
+    set_tenant_context(None)
+
     print('=== Seeding Admin only (No Services) ===')
     seed_admin()
     print('Done!')

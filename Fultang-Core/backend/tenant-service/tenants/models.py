@@ -142,10 +142,27 @@ class PlatformService(models.Model):
 
 
 class TenantDatabaseStatus(models.TextChoices):
-    """États possibles d'une association Tenant + Service → Database."""
+    """
+    États possibles d'une association Tenant + Service → Database.
+
+    Cycle de vie du provisioning (Phase 7) — réutilise ce même champ
+    plutôt que d'introduire un second système d'état sur `Tenant` :
+
+        PENDING → PROVISIONING → ACTIVE
+                       ↓
+                    FAILED  (peut être re-tenté : redevient PROVISIONING)
+
+    PENDING et FAILED sont tous deux des points de départ valides pour
+    une tentative de provisioning (`ProvisioningOrchestrator`, voir
+    provisioning.py) — FAILED n'est pas un état terminal, un nouvel
+    appel de provisioning pour le même (tenant, service) reprend depuis
+    FAILED.
+    """
     PENDING = 'PENDING', 'En attente de provisioning'
+    PROVISIONING = 'PROVISIONING', 'Provisioning en cours'
     ACTIVE = 'ACTIVE', 'Actif'
     INACTIVE = 'INACTIVE', 'Inactif'
+    FAILED = 'FAILED', 'Échec du provisioning'
 
 
 class TenantDatabase(models.Model):
@@ -216,6 +233,17 @@ class TenantDatabase(models.Model):
             "de passe lui-même."
         ),
     )
+    last_error = models.CharField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text=(
+            "Phase 7 : résumé lisible de la dernière erreur de provisioning "
+            "(status=FAILED). Jamais un secret/credential — un message "
+            "d'erreur technique court. Vide dès que le statut redevient "
+            "ACTIVE ou PROVISIONING."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -230,3 +258,34 @@ class TenantDatabase(models.Model):
 
     def __str__(self):
         return f"{self.tenant.identifier} / {self.service.code} → {self.database_name}"
+
+
+class PlatformAdmin(models.Model):
+    """
+    Identité PLATFORM_ADMIN — démonstration frontend (Phase "Platform Admin UI").
+
+    Volontairement séparé du modèle `Personnel` de `service-personnel` :
+    un PLATFORM_ADMIN n'appartient à AUCUN tenant (il n'a pas de
+    `tenant_id`, contrairement à tout compte métier), et sa gestion
+    complète (CRUD, plusieurs comptes, rotation de mot de passe...) est
+    hors périmètre de cette étape — un seul compte de démonstration est
+    seedé (voir la migration de seed associée).
+
+    Ce modèle ne fait que stocker un identifiant + un mot de passe
+    hashé (`django.contrib.auth.hashers`, même mécanisme que
+    `Personnel.mot_de_passe` dans service-personnel — pas un nouveau
+    système de hachage). La vérification de rôle PLATFORM_ADMIN reste
+    entièrement côté backend : `PlatformAdminAuthVerifyView` (views.py)
+    est le SEUL endroit qui peut faire naître ce rôle dans un JWT.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    email = models.EmailField(unique=True)
+    password = models.CharField(max_length=255, help_text="Hashé via django.contrib.auth.hashers.make_password.")
+    nom = models.CharField(max_length=100, blank=True, default='')
+    prenom = models.CharField(max_length=100, blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.email

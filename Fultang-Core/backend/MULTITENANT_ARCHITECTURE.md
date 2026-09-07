@@ -109,8 +109,8 @@ Roadmap complète (12 phases) :
 | 3 | Tenant-Aware Authentication | Implémenté et testé |
 | 4 | Tenant Context Propagation | Implémenté et testé pour les services métier classiques (4/4) ; Medical Monitoring / Clinical Agent exclus par décision architecturale, voir [§13](#13-medical-monitoring--clinical-agent) |
 | 5 | Tenant Database Management | Implémenté et testé (registre logique `TenantDatabase`/`PlatformService`) — voir [§9.1](#91-phase-5--tenant-database-management-registre-logique) |
-| 6 | Dynamic Database Routing | Non implémenté |
-| 7 | Tenant Provisioning | Non implémenté |
+| 6 | Dynamic Database Routing | Implémenté et testé pour `service-personnel` — voir [§9.2](#92-phase-6--dynamic-database-routing) |
+| 7 | Tenant Provisioning | Implémenté et testé pour `service-personnel` (création physique de base + migration) ; déclaratif seul (`SKIPPED`) pour les autres services — voir [§10.2](#102-phase-7--tenant-provisioning) |
 | 8 | Data Migration | Non implémenté |
 | 9 | Tenant Configuration | Non implémenté |
 | 10 | Tenant Isolation & Security Testing | Non implémenté |
@@ -505,10 +505,10 @@ Distinction stricte à faire, car ces notions sont **souvent confondues** :
 | **Contexte tenant propagé** (`X-Tenant-ID` jusqu'au service, `GatewayUser.tenant_id`) | **Implémenté et testé** pour les 4 services métier classiques (voir [§8.4](#84-services-mis-à-jour-vs-non-mis-à-jour)) |
 | **Registre logique Tenant + Service → Database** (`TenantDatabase`, Phase 5) | **Implémenté et testé** — voir §9.1 ci-dessous |
 | **Isolation réelle des données métier** (un `Medecin` du Tenant A invisible au Tenant B dans les réponses API) | **Non implémenté** — `PersonnelViewSet`, `MedecinViewSet`, etc. ne filtrent pas par `tenant_id` |
-| **Routage dynamique des bases de données** (une requête HTTP effectivement dirigée vers la bonne base selon le tenant) | **Non implémenté** (Phase 6) |
-| **Création physique des bases PostgreSQL par tenant** | **Non implémenté** (Phase 7 : Tenant Provisioning) |
+| **Routage dynamique des bases de données** (une requête HTTP effectivement dirigée vers la bonne base selon le tenant) | **Implémenté et testé pour `service-personnel`** — voir §9.2 ci-dessous. Les 3 autres services adaptés en Phase 4 (Gestion-Infrastructures, ComptaMatiere, fultang-compta-financiere) n'ont PAS de router — décision de périmètre, voir §9.2 |
+| **Création physique des bases PostgreSQL par tenant** | **Partiellement implémenté** — 2 bases pilotes créées manuellement pour la démonstration (§9.2), pas de provisioning automatisé (Phase 7) |
 
-**Le database routing n'est toujours PAS terminé.** Toutes les données de tous les tenants vivent aujourd'hui dans les mêmes tables PostgreSQL de chaque service métier. La Phase 5 ajoute le **registre** de l'association tenant+service→base (déclaratif), mais aucune requête n'est encore routée en fonction de lui, et aucune base physique n'a été créée.
+**Le database routing est maintenant implémenté pour `service-personnel`.** Une requête authentifiée pour le Tenant A utilise exclusivement la base PostgreSQL du Tenant A pour ce service ; le Tenant B, exclusivement la sienne. Les 3 autres services adaptés en Phase 4 n'ont volontairement pas reçu de router dans cette phase (voir §9.2.7) — leurs données métier restent, comme avant, dans une base unique par service.
 
 ### 9.1 Phase 5 — Tenant Database Management (registre logique)
 
@@ -569,19 +569,327 @@ PATCH      /api/tenant-databases/{id}/status/ → changement de statut logique
 
 **Ce que la Phase 5 ne fait explicitement PAS** : routage dynamique des requêtes (Phase 6), création/suppression physique de base PostgreSQL, Docker Compose pour de nouvelles bases, provisioning automatique (Phase 7), migration de données existantes (Phase 8), activation/désactivation fonctionnelle d'un service pour un tenant (Phase 9), modification de Medical Monitoring/Clinical Agent/JWT/Tenant Resolution/`tenant_id` sur les modèles métier.
 
+### 9.2 Phase 6 — Dynamic Database Routing
+
+**Statut : Implémenté et testé pour `service-personnel`.** Une requête authentifiée pour le Tenant A utilise exclusivement `DB_A_personnel` ; le Tenant B, exclusivement `DB_B_personnel`. Aucune fuite possible d'un tenant vers la base d'un autre, ni vers une base "par défaut" implicite.
+
+#### 9.2.1 Flux complet d'une requête
+
+```
+Client (JWT tenant_id=A)
+   │  Authorization: Bearer <JWT>
+   ▼
+API Gateway (inchangé — Phase 3/4)
+   │  décode JWT, compare tenant demandé (hostname) vs tenant du token,
+   │  injecte X-User-ID / X-User-Roles / X-Tenant-ID (jamais depuis le client)
+   ▼
+service-personnel : GatewayHeaderAuthentication.authenticate()
+   │  lit X-Tenant-ID → établit le Tenant Context (contextvar)
+   ▼
+Tenant Context = {tenant_id: A}
+   ▼
+Vue DRF (ex: MedecinViewSet) → Medecin.objects.filter(...)
+   ▼
+TenantDatabaseRouter.db_for_read(Medecin)
+   │  app_label 'api' est tenant-scopé → résout l'alias pour tenant A
+   ▼
+pool_registry.ensure_connection_alias('A')
+   │  alias déjà enregistré ? → oui : retour immédiat (chemin rapide)
+   │                          → non : verrou par tenant, cache, Registry
+   ▼
+django.db.connections['tenant_A_personnel']  (connexion persistante, CONN_MAX_AGE)
+   ▼
+PostgreSQL : DB_A_personnel
+   ▼
+Réponse — ne contient QUE les données du Tenant A
+```
+
+À la fin de la requête, `TenantContextCleanupMiddleware` réinitialise le Tenant Context — le thread/worker qui traitera la prochaine requête (potentiellement pour le Tenant B) repart d'un état neutre.
+
+#### 9.2.2 Tenant Context
+
+Fichier : `service-personnel/api/tenant_routing/context.py`. Implémenté avec `contextvars.ContextVar` (pas `threading.local`) — sémantique de reset précise via un `Token`, et compatible avec une future migration vers un serveur ASGI.
+
+Établi à DEUX endroits, jamais ailleurs :
+1. **`GatewayHeaderAuthentication.authenticate()`** — pour toutes les requêtes authentifiées normales, à partir de `X-Tenant-ID` (le même header anti-spoofing de la Phase 4).
+2. **`AuthVerifyView.post()`** — cas particulier : ce endpoint précède toute authentification DRF (`authentication_classes = []`, c'est lui qui établit l'identité), il reçoit donc `tenant_id` directement dans le corps de la requête (déjà résolu par la Gateway via Tenant Resolution, comme depuis la Phase 3) et l'utilise pour établir le contexte AVANT sa propre requête de vérification des identifiants.
+
+**`tenant_id=None` est un état explicite valide** ("pool non assigné", Phase 3), pas une absence de contexte. Il route vers `'default'`. **L'absence totale de contexte** (aucun des deux mécanismes ci-dessus n'a jamais été appelé) lève `TenantContextMissingError` — voir §9.2.3.
+
+**Isolation stricte entre requêtes** : `TenantContextCleanupMiddleware` (dernier de `MIDDLEWARE`, pour englober tout le cycle y compris l'authentification DRF qui a lieu pendant `get_response`) réinitialise le contexte dans un `finally`, y compris en cas d'exception. Vérifié par test (`test_sequential_requests_do_not_leak_context`) : une requête simulée sans tenant établi APRÈS une requête avec Tenant A ne voit jamais Tenant A.
+
+#### 9.2.3 Réconciliation Phase 3 / Phase 6 — décision signalée
+
+La tâche demande : *"tenant_id absent/invalide → refus explicite"*. La Phase 3 avait délibérément conservé `tenant_id=None` ("pool non assigné") comme état valide, pour la compatibilité locale/dev. Ces deux décisions semblaient en tension — résolu ainsi (signalé avant implémentation, comme demandé) :
+
+- `tenant_id=None`, **établi explicitement** par le mécanisme d'authentification (jamais par défaut implicite) → route vers `'default'`, la base historique. Ce n'est pas une fuite : `'default'` ne contient les données d'AUCUN tenant réel, seulement le pool historique, et cette route est prévisible et documentée, pas devinée.
+- **Absence totale de contexte** (bug, code exécuté hors cycle de requête) → `TenantContextMissingError`, jamais de repli.
+- **`tenant_id` réel mais non routable** (tenant/DB introuvable, inactif, Registry injoignable sans cache) → exception dédiée, jamais de repli vers `'default'` ni vers la base d'un autre tenant.
+
+#### 9.2.4 Registry client et cache
+
+Fichiers : `registry_client.py`, `cache.py`.
+
+`registry_client.resolve_tenant_database(tenant_id)` appelle `GET tenant-service/api/tenant-databases/resolve/?tenant=<id>&service=PERSONNEL` (nouvel endpoint Phase 6, même mécanisme `IsInternalService`/jeton partagé que `GET /tenants/resolve/` depuis la Phase 2.1 — `service-personnel` devient un second appelant de confiance du même mécanisme, aucun nouveau protocole). Utilise `urllib` (stdlib, déjà employé ailleurs dans FullTang pour ce type d'appel — Medical-Monitoring `signals.py`), pas de nouvelle dépendance.
+
+**Cache (`TenantDatabaseCache`)** :
+- **Ce qui est mis en cache** : `TenantDatabaseInfo` (database_name, host, port, status) par tenant_id.
+- **Durée de vie** : `TENANT_DB_CACHE_TTL_SECONDS` (défaut 300s, configurable par environnement).
+- **Création d'une entrée** : lazy, au premier accès pour un tenant — jamais de pré-chargement.
+- **Invalidation** : uniquement par expiration TTL dans cette phase (pas de webhook/signal actif — limite documentée : un changement de config côté Registry met jusqu'à TTL secondes à être pris en compte ici).
+- **Après redémarrage** : cache en mémoire de PROCESSUS — vidé entièrement. Non problématique : la prochaine requête de chaque tenant reconstruit son entrée depuis le Registry (source de vérité), au prix d'un aller-retour réseau une fois par tenant.
+- **Si le Registry est temporairement indisponible** : décision explicite — une entrée en cache existante (même expirée) est réutilisée avec un avertissement loggué (dégradation gracieuse) ; en l'absence de toute entrée, l'appel est refusé explicitement (`TenantRegistryUnavailableError` propagée) — deviner une base ici serait le risque de fuite que cette phase élimine.
+
+#### 9.2.5 Pools de connexions
+
+Fichier : `pool_registry.py`. Technique : `django.db.connections.databases` est un dict mutable au runtime (vérifié empiriquement contre le code de `ConnectionHandler` — Django 6.0.3 le documente comme "conservé pour compatibilité", ce qui fonctionne exactement comme avant : y ajouter un alias au runtime le rend immédiatement utilisable, Django ne fait cette découverte qu'une fois au démarrage puis conserve le dict en mémoire).
+
+**Ce n'est PAS un vrai pool multi-connexions.** Django + psycopg2 (pas psycopg3, pas pgbouncer dans l'infra actuelle de FullTang) n'a pas de pool natif. Le mécanisme réellement disponible et utilisé est `CONN_MAX_AGE` : une connexion persistante réutilisée par thread/alias (au lieu d'ouvrir/fermer une connexion à chaque requête), fermée après N secondes d'inactivité. Avec plusieurs workers, chacun garde SA connexion persistante par alias — dans les faits, un ensemble de connexions réutilisées par tenant, dimensionné par le nombre de workers du déploiement. Documenté honnêtement comme tel, jamais présenté comme un pool qu'il n'est pas.
+
+**Configurable, jamais figé** : `TENANT_DB_CONN_MAX_AGE` (variable d'environnement, défaut 60s). Point d'extension explicite pour une configuration PAR TENANT en Phase 9 (ex: `TenantDatabase` porterait un champ optionnel de configuration de pool, lu par `_build_connection_settings()` — pas construit maintenant).
+
+#### 9.2.6 Concurrence — verrouillage de création de pool
+
+`threading.Lock()` **par tenant, par PROCESSUS PYTHON** (pas un verrou global unique — le Tenant A qui crée son pool ne bloque jamais les requêtes du Tenant B).
+
+- **Portée assumée pour cette phase** : verrou LOCAL au processus. Le déploiement actuel de FullTang n'exécute qu'**une seule instance** de `service-personnel` (vérifié dans tous les `docker-compose*.yml` du projet — aucun mécanisme de scaling horizontal n'existe). Cette portée est donc suffisante aujourd'hui.
+- **Limite explicite documentée** : si FullTang passe à plusieurs instances de `service-personnel`, ce verrou ne coordonnera PAS les instances entre elles — chaque instance enregistrerait indépendamment son propre alias vers la même base PostgreSQL. **Pas dangereux** (PostgreSQL gère nativement des connexions concurrentes depuis plusieurs clients), seulement **redondant** (travail de résolution refait par instance). Un déploiement horizontal voudrait un verrou distribué (`pg_advisory_lock` PostgreSQL, ou `SETNX` Redis) — non implémenté ici : aucune infrastructure de ce type n'existe encore dans FullTang, l'introduire maintenant serait une dépendance nouvelle non justifiée par le besoin actuel.
+- **Vérifié par test** (`test_concurrent_first_access_creates_pool_only_once`) : 10 threads appelant simultanément la résolution d'un même tenant jamais encore résolu → une seule résolution effective (les 9 autres attendent le verrou puis réutilisent le résultat).
+
+#### 9.2.7 Database Router
+
+Fichier : `router.py`, classe `TenantDatabaseRouter`, activée via `DATABASE_ROUTERS = ['api.tenant_routing.router.TenantDatabaseRouter']`.
+
+```python
+TENANT_SCOPED_APPS = {"api"}              # seul app_label métier de ce service
+ALWAYS_MIGRATABLE_APPS = {"migrations"}   # bookkeeping Django requis sur chaque alias
+```
+
+Ne connaît QUE l'app_label du modèle et le Tenant Context — jamais une chambre, un service hospitalier, ou toute spécificité métier d'un tenant :
+- `db_for_read`/`db_for_write` : si `app_label != 'api'` → `None` (Django utilise `'default'`, comportement inchangé pour tout le reste, y compris `django.contrib.admin`/`auth`/`sessions`/`contenttypes` — c'est la distinction TENANT vs PLATFORM/SYSTEM CONTEXT au niveau de ce service : les tables système restent dans `'default'`, jamais dans une base tenant, et un accès "plateforme" ne donne jamais accès arbitrairement à la base d'un tenant).
+- Sinon → exige un Tenant Context (`require_tenant_context()`, lève si absent) et résout l'alias correspondant.
+- `allow_relation` : autorise une relation SEULEMENT si les deux objets vivent dans la même base — empêche toute jointure implicite entre bases.
+- `allow_migrate` : `api`/`migrations` migrable partout où demandé explicitement (`'default'` OU un alias tenant) ; les apps système ne sont JAMAIS migrées sur un alias tenant.
+
+**Distinction TENANT vs PLATFORM/SYSTEM CONTEXT (§6 de la tâche)** : pour ce service, "PLATFORM" ne signifie PAS "un administrateur accède à toutes les bases tenant" — cela n'existe nulle part dans le code. Cela signifie uniquement que les tables SYSTÈME de ce service lui-même (auth, admin, sessions) continuent, comme avant cette phase, à vivre dans `'default'`, indépendamment de tout tenant. Le vrai Tenant Registry et les opérations de plateforme au sens large vivent entièrement dans `tenant-service`, un service séparé.
+
+**Décision de périmètre** : seul `service-personnel` a reçu ce router. Les 3 autres services adaptés en Phase 4 (Gestion-Infrastructures, ComptaMatiere, fultang-compta-financiere) continuent d'utiliser une base unique par service — non modifiés dans cette phase (l'objectif de la tâche était explicitement `service-personnel`). Étendre le mécanisme aux autres services suivrait exactement le même patron (`tenant_routing/` est conçu pour être copié/adapté, comme `authentication.py` l'a été en Phase 4).
+
+#### 9.2.8 Nouvel endpoint tenant-service
+
+`GET /api/tenant-databases/resolve/?tenant=<uuid>&service=<code>` (`tenant-service/tenants/views.py`) — réutilise `TenantDatabaseService.get_for_tenant_and_service()` (déjà écrit en Phase 5, jamais utilisé par un endpoint HTTP jusqu'ici). Protégé par `IsInternalService` (même jeton partagé que `GET /tenants/resolve/`). Réponse minimale : `{database_name, host, port, status}` — jamais `secret_reference`, `id`, `tenant`, ou `service`.
+
+#### 9.2.9 Bases pilotes réelles
+
+Deux tenants déjà existants dans le Registry (`hopital-central` = `57d9d34f-65cc-4b45-8b5f-0aa87c2c90b8`, `clinique-paix` = `6d480feb-887d-4778-8406-c3fb848deef3`) reçoivent chacun une base PostgreSQL PERSONNEL réellement distincte sur le serveur `fultang-postgres` déjà utilisé par `service-personnel` :
+
+```
+hopital-central → tenant_hopital_central_personnel   (alias runtime: tenant_57d9d34f65cc4b458b5f0aa87c2c90b8_personnel)
+clinique-paix   → tenant_clinique_paix_personnel      (alias runtime: tenant_6d480feb887d47788406c3fb848deef3_personnel)
+```
+
+(le nom de base physique est fourni par le Registry ; l'alias de connexion Django, lui, est dérivé déterministe de l'UUID du tenant — voir `_alias_for()`). Chaque base a reçu uniquement les tables de l'app `api` (`migrate api --database=<alias>`, jamais les tables système), confirmé par `\dt api_*` directement sur PostgreSQL (11 tables identiques dans les deux bases, aucune fuite de structure).
+
+**Preuve d'isolation réalisée en conditions réelles (pas de mock)** :
+1. Insertion d'un médecin distinct dans chaque base via le Tenant Context réel (`bertrand.owona@hopital-central.local` / Tenant A, `aline.fokou@clinique-paix.local` / Tenant B).
+2. Vérification directe en SQL brut (bypass complet de l'application) : chaque base ne contient que son propre médecin ; la base `default` (`service_personnel`) n'en contient aucun des deux.
+3. Login réel via le flux complet Client → Gateway → service-personnel (`POST /auth/login`, `Host: hopital-central.fulltang.com` / `Host: clinique-paix.fulltang.com`) : chaque médecin obtient un JWT avec le `tenant_id` correct.
+4. `GET /personnel/medecins/` via la Gateway avec chaque JWT : Tenant A ne voit que Bertrand Owona (`count: 1`), Tenant B ne voit que Aline Fokou (`count: 1`) — jamais l'un chez l'autre.
+5. Scénarios d'attaque testés en conditions réelles :
+   - Login avec l'email d'un médecin du Tenant A sous le hostname du Tenant B → `401 Identifiants invalides` (l'email n'existe pas dans cette base).
+   - Token JWT du Tenant A réutilisé sous le hostname du Tenant B (et inversement) → `403 Ce token n'est pas valide pour l'établissement demandé` (contrôle Phase 3, réaffirmé fonctionnel après Phase 6).
+   - Login sous un tenant `INACTIVE` (`clinique-fermee`) → `403 Le tenant 'clinique-fermee' est inactif` (rejeté par la Gateway avant même d'atteindre `service-personnel` — Phase 2.2, inchangé).
+
+**Credentials** : un seul compte PostgreSQL applicatif partagé (`TENANT_DB_USER`/`TENANT_DB_PASSWORD`, mêmes valeurs par défaut que `POSTGRES_USER`/`POSTGRES_PASSWORD` existants) est utilisé pour se connecter à TOUTES les bases tenant de ce service dans cette phase — **`TenantDatabase.secret_reference` n'est PAS utilisé pour la connexion réelle** (il reste la référence opaque définie en Phase 5, non branchée sur un mécanisme fonctionnel, puisqu'aucun Secret Manager n'existe encore). C'est un pont pragmatique assumé pour permettre une démonstration réelle sans construire tout un Secret Manager dans cette tâche (explicitement hors périmètre, §6 de la tâche) — à remplacer en Phase 7 par des credentials réellement uniques par tenant.
+
+#### 9.2.10 Limite découverte pendant la validation pilote — désactivation d'un alias déjà enregistré
+
+**Constat (test réel, pas théorique)** : une fois qu'`ensure_connection_alias(tenant_id)` a enregistré l'alias d'un tenant dans `connections.databases` (première requête réussie pour ce tenant sur ce processus), toute requête suivante emprunte le "chemin rapide" (`pool_registry.py` ligne 140 : `if alias in connections.databases: return alias`) et ne revérifie **jamais** le statut auprès du Registry — même si le TTL du cache a expiré, même si le `TenantDatabase` est ensuite passé à `INACTIVE`.
+
+Vérifié en conditions réelles : `clinique-paix` passé à `INACTIVE` dans `tenant-service` (+ cache local invalidé explicitement) puis requête `GET /personnel/medecins/` avec un JWT Tenant B valide → **toujours `200 OK`**, alors qu'une tentative de PREMIER accès pour un tenant `INACTIVE` est, elle, correctement refusée (`test_inactive_database_is_refused_and_not_registered`).
+
+**Ce n'est pas une fuite inter-tenant** (Tenant B continue de voir uniquement sa propre base, jamais celle d'un autre tenant) — c'est une limite de **révocation en temps réel** : une désactivation ne prend effet, pour un tenant déjà résolu par un processus, qu'au redémarrage de ce processus (qui vide `connections.databases` et repart de `settings.DATABASES`).
+
+**Décision** : documentée ici comme limite assumée de cette phase, non corrigée dans le code — la tâche demande explicitement de ne pas anticiper de mécanisme non requis (§8/§16 de la tâche) et aucune exigence de révocation "live" n'a été formulée. Candidate naturelle pour la Phase 7 (voir §19) : soit revérifier le statut à chaque résolution (coût : un aller-retour cache/Registry par requête, annule l'intérêt du chemin rapide), soit exposer une action explicite « invalider l'alias d'un tenant » côté administration, déclenchée au moment de la désactivation.
+
 ---
 
 ## 10. Provisioning
 
-**Statut : Non implémenté.**
+### 10.1 Provisioning de comptes utilisateurs — toujours non implémenté
+
+**Statut : Non implémenté** (hors périmètre de la Phase 7, qui porte exclusivement sur le provisioning des **ressources d'infrastructure** — voir §10.2).
 
 Aucun endpoint ne permet aujourd'hui :
 - de créer un utilisateur **déjà rattaché** à un tenant via l'API (le champ `tenant_id` est `editable=False`, donc jamais accepté en écriture par les serializers existants — décision de sécurité délibérée, voir [§6.1](#61-association-utilisateur--tenant)) ;
-- de provisionner automatiquement les ressources d'un nouveau tenant (base de données, configuration par défaut, compte Hospital Admin initial).
+- de créer automatiquement un compte Hospital Admin initial lors du provisioning d'un tenant.
 
-**À faire** : un flux dédié (probablement réservé à `PLATFORM_ADMIN`) pour assigner un `tenant_id` à un compte, et/ou créer un compte directement dans le contexte d'un tenant. Actuellement, la seule façon d'assigner un `tenant_id` est un accès direct à l'ORM (shell Django, script de seed) — utilisé uniquement pour les tests de vérification de cette documentation.
+**À faire** (candidat pour une phase ultérieure, non planifiée) : un flux dédié (probablement réservé à `PLATFORM_ADMIN`) pour assigner un `tenant_id` à un compte, et/ou créer un compte directement dans le contexte d'un tenant. Actuellement, la seule façon d'assigner un `tenant_id` est un accès direct à l'ORM (shell Django, script de seed). La Phase 7 (§10.2) ne crée aucune "configuration initiale minimale" au-delà de la base de données elle-même et de son schéma : conformément à la tâche ("si aucune configuration initiale n'est actuellement nécessaire, ne l'invente pas"), aucun compte, aucune donnée de référence métier n'est créé automatiquement par le provisioning.
 
-**Provisioning des bases (Phase 7, distinct)** : la Phase 5 permet de **déclarer** qu'un tenant utilise telle base pour tel service (`TenantDatabase`, statut `PENDING` par défaut), mais ne crée physiquement aucune base PostgreSQL. La Phase 7 devra : créer la base physique, faire passer `TenantDatabase.status` à `ACTIVE` une fois confirmée, et générer/enregistrer le vrai secret référencé par `secret_reference`.
+### 10.2 Phase 7 — Tenant Provisioning
+
+**Statut : Implémenté et testé pour `service-personnel`.** Un `PLATFORM_ADMIN` peut déclencher, via un seul appel HTTP, la création physique réelle d'une base PostgreSQL pour un tenant + un service, l'enregistrement de son `TenantDatabase`, et l'initialisation de son schéma — automatisant ce qui, en Phase 6, se faisait entièrement à la main (voir §9.2.9, le script de pilotage manuel).
+
+#### 10.2.1 Pourquoi ce module est nécessaire, et son rôle exact
+
+Avant la Phase 7, faire fonctionner un nouveau tenant nécessitait, à la main : `CREATE DATABASE` sur le serveur PostgreSQL, `POST /api/tenant-databases/` sur tenant-service, `PATCH .../status/` vers `ACTIVE`, puis un accès shell à service-personnel pour lancer `migrate --database=<alias>`. La Phase 7 automatise EXACTEMENT cette séquence, sans en changer la nature :
+
+- **Relation avec le Tenant Registry** : le provisioning COMMENCE par consulter `Tenant` (existence, statut ACTIVE) — il ne le modifie jamais, ne le duplique jamais. `tenant-service` reste l'unique source de vérité sur "qui sont les tenants".
+- **Relation avec `TenantDatabase`** : le provisioning est le SEUL mécanisme (avec l'API Phase 5 manuelle, toujours disponible) qui écrit dans `TenantDatabase` — mais il réutilise le modèle et les repositories existants tels quels (voir §10.2.9), il n'introduit aucun second modèle.
+- **Relation avec le Database Router (Phase 6)** : le provisioning ne route jamais une requête et ne lit jamais `TenantDatabase` pour décider où envoyer une requête métier — il ne fait que PRODUIRE une ligne `TenantDatabase` en état `ACTIVE` que le Router de la Phase 6 (`ensure_connection_alias`) sait déjà consommer sans aucune modification. Aucune logique de résolution de base n'est dupliquée entre les deux (voir §10.2.9 pour le détail de la réutilisation de code).
+
+#### 10.2.2 Constat d'inspection — pourquoi seul PERSONNEL est physiquement automatisé
+
+Avant d'écrire une seule ligne de code, inspection de l'infrastructure réelle des 4 services adaptés en Phase 4 :
+
+| Service | Serveur PostgreSQL | Bases multiples par tenant ? |
+|---|---|---|
+| `service-personnel` | `fultang-postgres` (partagé) | **Oui** — Dynamic Database Routing, Phase 6 |
+| `Gestion-Infrastructures` | `infrastructure-db` (dédié, un seul) | Non |
+| `ComptaMatiere` | `compta-matiere-db` (dédié, un seul) | Non |
+| `fultang-compta-financiere` | `compta-financiere-db` (dédié, un seul) | Non |
+
+Seul `service-personnel` dispose d'une infrastructure capable d'héberger plusieurs bases par tenant (Phase 6 — `api/tenant_routing/`). Les 3 autres services ont chacun UN SEUL serveur PostgreSQL dédié à eux-mêmes, sans aucun mécanisme de routage dynamique. Créer physiquement une base "par tenant" pour eux nécessiterait d'abord de leur donner l'équivalent de la Phase 6 (`tenant_routing/`, Database Router, endpoint interne de provisioning) — **explicitement hors périmètre de cette phase** (règle §22 de la tâche : ne pas élargir le périmètre à la Phase 8/9/refonte).
+
+**Décision (documentée, pas devinée)** : le provisioning AUTOMATISÉ (création physique + migration) n'est câblé, dans cette phase, que pour `PERSONNEL` (`PROVISIONING_CAPABLE_SERVICES` dans `tenant-service/tenants/provisioning.py`). Pour tout autre service demandé (`INFRASTRUCTURE`, `COMPTA`, `COMPTA_MATIERE`, `MEDICAL`), le provisioning renvoie un résultat `SKIPPED` explicite — **il ne crée PAS de ligne `TenantDatabase` fictive** (une entrée `PENDING` qui ne progressera jamais automatiquement serait malhonnête). Un `PLATFORM_ADMIN` qui veut déclarer une configuration pour l'un de ces services peut toujours utiliser l'API Phase 5 existante (`POST /api/tenant-databases/`), inchangée.
+
+#### 10.2.3 Flux complet
+
+```
+PLATFORM_ADMIN
+   │  POST /api/tenants/{id}/provision/  {"services": ["PERSONNEL", "INFRASTRUCTURE"]}
+   ▼
+tenant-service : TenantViewSet.provision()  (IsPlatformAdmin)
+   │  1. Validation AMONT (refus de la demande ENTIÈRE si invalide) :
+   │       tenant existe et ACTIVE ? service(s) existent et ACTIVE dans PlatformService ?
+   ▼
+ProvisioningOrchestrator.provision()
+   │  2. Pour CHAQUE service, indépendamment :
+   │       service capable de provisioning physique (PERSONNEL) ?
+   │         NON → résultat SKIPPED, aucune ligne créée
+   │         OUI → nom de base déterministe, get_or_create_declarative (idempotent),
+   │               claim_for_provisioning (CAS atomique PENDING/FAILED → PROVISIONING)
+   │                 CAS perdu (déjà en cours/fait ailleurs) → rapporte l'état actuel, s'arrête
+   │                 CAS gagné → appelle le service propriétaire :
+   ▼
+service-personnel : POST /api/internal/provision-database/  (IsInternalService)
+   │  3. pool_registry.provision_database(tenant_id) :
+   │       - dérive le nom physique lui-même (jamais une chaîne reçue du réseau)
+   │       - CREATE DATABASE si absente (idempotent, connexion admin autocommit)
+   │       - enregistre l'alias dans connections.databases
+   │       - migrate 'api' --database=<alias>
+   │       - échec migration → alias désenregistré, erreur remontée (pas de DROP)
+   ▼
+tenant-service : mark_active() ou mark_failed(error)
+   ▼
+Réponse : {"results": [{"service": "PERSONNEL", "status": "ACTIVE", ...}, ...]}
+```
+
+À l'issue d'un provisioning réussi pour PERSONNEL, le Database Router de la Phase 6 (`ensure_connection_alias`, §9.2) retrouve cette association exactement comme s'il s'agissait d'un provisioning manuel — vérifié en conditions réelles avec un processus `service-personnel` **redémarré** entre le provisioning et la première requête métier (voir §10.2.10).
+
+#### 10.2.4 Génération déterministe et sûre des noms de base (§5 de la tâche)
+
+Le nom physique d'une base tenant est **entièrement dérivé** de deux valeurs déjà typées et déjà validées — jamais d'un texte libre :
+
+```python
+f"tenant_{tenant_id.hex}_{service_code.lower()}"
+```
+
+- `tenant_id` : un `UUID` (typé par le champ `Tenant.id`, jamais une chaîne arbitraire).
+- `service_code` : déjà vérifié comme existant et `ACTIVE` dans le catalogue `PlatformService` AVANT que ce nom ne soit calculé (§10.2.3, étape de validation amont).
+
+Résultat : `tenant_<32 caractères hexadécimaux>_<code service en minuscules>` — sans tiret, sans caractère spécial, sans collision possible entre deux tenants (UUID) ni entre deux services d'un même tenant (code différent). Encore quoté via `psycopg2.sql.Identifier` côté service-personnel avant `CREATE DATABASE` — défense en profondeur, même si la chaîne est déjà garantie sûre par construction (jamais de confiance aveugle en une chaîne SQL, même auto-générée).
+
+**Décision volontaire** : `tenant-service` recalcule ce nom lui-même (`_deterministic_database_name`, dans `provisioning.py`) pour créer la ligne `TenantDatabase` initiale, MAIS c'est `service-personnel` qui a le dernier mot — il ignore tout nom qu'on pourrait lui envoyer et calcule le sien via `pool_registry._alias_for()` (fonction déjà existante depuis la Phase 6, réutilisée sans modification). Les deux formules sont **identiques par construction** et **doivent le rester** — un doublon assumé et documenté (deux services déployés séparément, sans bibliothèque partagée), pas un oubli. `tenant-service` persiste ensuite le nom RENVOYÉ par service-personnel comme source de vérité finale (`TenantDatabase.database_name` est mis à jour après le retour de l'appel physique).
+
+#### 10.2.5 Idempotence (§7 de la tâche)
+
+Deux niveaux, documentés séparément :
+
+- **Niveau `TenantDatabase`** (tenant-service) : `get_or_create_declarative` s'appuie sur la `UniqueConstraint(tenant, service)` déjà existante (Phase 5) — un second appel pour le même couple retrouve la ligne existante, n'en crée jamais une deuxième. Un service déjà `ACTIVE` renvoie un résultat "déjà provisionné, aucune action refaite" sans déclencher le moindre appel physique.
+- **Niveau base PostgreSQL** (service-personnel) : `_create_database_if_missing` vérifie l'existence (`SELECT 1 FROM pg_database ...`) AVANT toute tentative de `CREATE DATABASE` — un second appel est un no-op silencieux côté PostgreSQL, jamais une erreur `DuplicateDatabase` rattrapée après coup.
+- **Niveau schéma** : `migrate` est nativement idempotent (Django ne réapplique jamais une migration déjà enregistrée) — un second appel de provisioning, même après un premier succès, ne casse rien.
+
+Vérifié en conditions réelles (pas seulement en test) : deux appels HTTP successifs `POST /tenants/{id}/provision/` pour le même tenant renvoient le second avec `"detail": "Déjà provisionné (aucune action refaite)."`, sans second `CREATE DATABASE` ni second `migrate`.
+
+#### 10.2.6 Concurrence (§8 de la tâche)
+
+**Décision explicite : mécanismes PostgreSQL natifs, PAS de verrou applicatif** — à la différence du `threading.Lock()` local-process de la Phase 6 (§9.2.6, explicitement limité à un déploiement mono-instance), le provisioning utilise :
+
+1. La `UniqueConstraint(tenant, service)` (Phase 5, inchangée) : deux créations concurrentes pour le même couple → une seule réussit, l'autre lève `IntegrityError`, rattrapée pour relire la ligne créée par l'autre.
+2. Une mise à jour conditionnelle atomique (`TenantDatabase.objects.filter(id=..., status__in=[PENDING, FAILED]).update(status=PROVISIONING)`) pour "réclamer" le droit de lancer le provisioning physique — un `UPDATE ... WHERE` porté entièrement par PostgreSQL, qui ne retourne `1` (gagné) que pour EXACTEMENT un appelant, même avec plusieurs requêtes strictement simultanées.
+
+**Ces deux mécanismes sont valides même avec plusieurs instances de `tenant-service`** (contrairement au verrou local-process de la Phase 6) : ce sont des garanties PostgreSQL, pas des garanties de processus. C'est un choix délibérément plus robuste que la Phase 6 pour cette raison précise — le provisioning est une opération plus rare et plus sensible qu'une requête de routage ordinaire, elle mérite une garantie qui survit à un futur passage à plusieurs instances de `tenant-service`.
+
+**Vérifié en conditions réelles** (pas seulement en test) : 5 requêtes HTTP `POST /provision/` lancées simultanément (5 threads) pour un même tenant neuf → exactement UNE ligne `TenantDatabase` créée, exactement UN appel physique déclenché (résultat `ACTIVE`), les 4 autres ont vu `PROVISIONING` et n'ont déclenché aucune action (voir rapport final pour la trace complète).
+
+**Limite non couverte** : deux appels de provisioning strictement simultanés pour le MÊME tenant mais des SERVICES DIFFÉRENTS ne se bloquent jamais entre eux (ce n'est pas nécessaire : `UniqueConstraint(tenant, service)` est par couple, pas par tenant seul) — un tenant peut voir plusieurs de ses services se provisionner en parallèle, ce qui est le comportement souhaité (§4 : chaque service est indépendant).
+
+#### 10.2.7 Gestion des échecs partiels (§10 de la tâche)
+
+**Deux échelles d'échec, traitées différemment, documentées séparément** :
+
+1. **Échec de VALIDATION** (tenant/service inconnu ou inactif) : refus de la demande ENTIÈRE avant toute création — aucune ligne `TenantDatabase` touchée, aucune ambiguïté possible. Ce sont des erreurs de saisie du `PLATFORM_ADMIN`, pas des échecs d'infrastructure.
+2. **Échec PHYSIQUE** (un service par ailleurs valide, mais dont la création/migration échoue) : NE bloque JAMAIS les autres services demandés dans le même appel (chacun est traité indépendamment, §10.2.3). Le service en échec passe en `FAILED` avec `TenantDatabase.last_error` renseigné (résumé technique court, jamais un secret).
+
+**Stratégie de récupération retenue : reprise par nouvel appel (retry), PAS de rollback automatique par `DROP DATABASE`.** Justification :
+- `CREATE DATABASE` et `migrate` sont TOUS DEUX naturellement idempotents (§10.2.5) — un nouvel appel de provisioning, après correction de la cause (réseau rétabli, etc.), reprend exactement là où l'échec s'est produit, sans dupliquer le travail déjà fait.
+- `DROP DATABASE` est une opération destructive qu'il serait risqué d'automatiser sur la seule foi d'un échec de migration (qui peut être transitoire — verrou PostgreSQL momentané, redémarrage du service, etc.) : un `DROP` automatique pourrait détruire une base par ailleurs saine à cause d'une erreur passagère.
+- Si la base a été créée mais que la migration échoue, l'ALIAS de connexion est explicitement désenregistré (`del connections.databases[alias]`) avant de relever l'erreur — une requête ordinaire sur CE MÊME processus ne peut donc jamais atteindre une base au schéma non confirmé (elle repasse par le chemin Registry normal, qui la refuse tant que `tenant-service` ne rapporte pas `ACTIVE` — voir §9.2.10).
+
+**Vérifié en conditions réelles** (pas un test mocké) : callback pointé vers une adresse injoignable → `FAILED` avec `last_error` contenant le message d'erreur réseau réel ; callback restauré ; nouvel appel de provisioning → `ACTIVE`, `last_error` vidé. Voir rapport final pour la trace complète.
+
+**Limite assumée** : si la création de la base RÉUSSIT mais que le processus `tenant-service` crashe avant de recevoir la réponse et d'appeler `mark_active()`, la ligne `TenantDatabase` reste en `PROVISIONING` indéfiniment (ni `ACTIVE` ni `FAILED`) alors que la base et son schéma sont en réalité prêts. Un nouvel appel de provisioning ne "reprendrait" PAS ce cas : `claim_for_provisioning` ne réclame que depuis `PENDING`/`FAILED`, jamais depuis `PROVISIONING` (il suppose qu'un autre appel est en cours). **Non résolu dans cette phase** — candidat Phase 8 : un TTL ou un mécanisme de reprise explicite pour les lignes bloquées en `PROVISIONING` (voir §19).
+
+#### 10.2.8 Migrations (§11 de la tâche)
+
+Le provisioning migre UNIQUEMENT l'app `api` de `service-personnel` sur la base tenant nouvellement créée (`call_command('migrate', 'api', database=alias)`) — aucune app système (`auth`, `admin`, `sessions`) n'est jamais migrée sur une base tenant (cohérent avec le Router de la Phase 6, `allow_migrate`, inchangé). Aucun système de migration de masse construit : chaque appel de provisioning migre UNE base, pour UN tenant, à la demande — exactement le périmètre demandé (§11 : "ne construis pas un système complexe de migration de masse").
+
+#### 10.2.9 Sécurité (§14 de la tâche)
+
+- **`POST /tenants/{id}/provision/`** (tenant-service) : réservé à `PLATFORM_ADMIN` — même permission de classe (`IsPlatformAdmin`) que le reste de `TenantViewSet`, aucun nouveau système d'autorisation introduit.
+- **`POST /api/internal/provision-database/`** (service-personnel) : réservé aux appels porteurs du jeton `TENANT_SERVICE_INTERNAL_TOKEN` (nouvelle classe `api/permissions.py::IsInternalService`, symétrique — même jeton, même comparaison `hmac.compare_digest` — de celle déjà utilisée côté tenant-service). Ce endpoint ne passe jamais par `GatewayHeaderAuthentication` (comme `AuthVerifyView`) : ce n'est pas un utilisateur qui l'appelle, mais un autre service de confiance.
+- **`PLATFORM_ADMIN` ne donne accès à AUCUNE donnée métier tenant** (§14 de la tâche, rappel explicite) : le provisioning crée une base VIDE (schéma seul, aucune donnée) — `PLATFORM_ADMIN` déclenche une opération d'infrastructure, il n'obtient à aucun moment un accès aux futures données métier qui y seront stockées (le Router de la Phase 6, inchangé, continue de exiger un Tenant Context applicatif pour toute lecture/écriture — un `PLATFORM_ADMIN` n'en a pas).
+- **Credentials** : `tenant-service` NE CONNAÎT JAMAIS de mot de passe PostgreSQL réel — il envoie uniquement `tenant_id` à service-personnel, qui utilise SES PROPRES credentials (`TENANT_DB_USER`/`TENANT_DB_PASSWORD`, déjà configurés depuis la Phase 6) pour la connexion admin. `TenantDatabase.secret_reference` reçoit une valeur `"shared:PERSONNEL_DB_USER/PERSONNEL_DB_PASSWORD"` — une RÉFÉRENCE, jamais un secret — cohérent avec la Phase 5 (`secret_reference` n'a jamais été branché sur un mécanisme fonctionnel, ni en Phase 5, ni en Phase 6, ni ici). **Aucun mot de passe n'est jamais loggué, écrit dans le modèle, ou transmis entre tenant-service et service-personnel.**
+- **Réutilisation, pas de duplication de logique de résolution** (§16 de la tâche) : `provision_database` (service-personnel) réutilise `_alias_for()` et `_build_connection_settings()`, déjà écrits en Phase 6 pour `ensure_connection_alias` — le provisioning ne réimplémente PAS sa propre construction de configuration de connexion.
+
+#### 10.2.10 Validation pilote réelle (Docker + PostgreSQL, pas de mock)
+
+Quatre tenants pilotes créés spécifiquement pour cette phase (`provisioning-test`, `provisioning-test-2`, `provisioning-concurrency-test`, `provisioning-failure-test`), **sans toucher aux tenants pilotes de la Phase 6** (`hopital-central`, `clinique-paix`, dont les bases et données restent intactes) :
+
+1. `provisioning-test` : provisionné via l'API réelle (`POST /tenants/{id}/provision/` avec `services: ["PERSONNEL", "INFRASTRUCTURE"]`) → PERSONNEL réellement créé et migré (`\dt api_*` confirme les 11 tables), INFRASTRUCTURE correctement rapporté `SKIPPED`. Un médecin distinct inséré via le vrai Tenant Context ; **le conteneur `service-personnel` a été REDÉMARRÉ** (processus neuf, aucun alias résiduel en mémoire) puis un login réel via la Gateway (`Host: provisioning-test.fulltang.com`) a confirmé que le Router de la Phase 6 retrouve la base sans AUCUNE modification de son code.
+2. `provisioning-test-2` : second tenant provisionné pour confirmer l'absence de collision — base physique distincte (`tenant_92ec83f5...` vs `tenant_324adb4a...`) confirmée par `SELECT datname FROM pg_database`.
+3. `provisioning-concurrency-test` : 5 requêtes HTTP concurrentes (§10.2.6) → 1 seule ligne `TenantDatabase`, 1 seul provisioning physique réel, résultat final cohérent `ACTIVE`.
+4. `provisioning-failure-test` : échec physique réel simulé (callback pointé vers un hôte injoignable) → `FAILED` avec message d'erreur réel capturé dans `last_error` ; callback restauré ; nouvel appel → `ACTIVE`, erreur effacée (§10.2.7).
+
+#### 10.2.11 Décisions prises
+
+| Décision | Détail |
+|---|---|
+| Provisioning physique automatisé UNIQUEMENT pour `PERSONNEL` | Seul service disposant de l'équivalent Phase 6 (Dynamic Database Routing) — voir §10.2.2 |
+| Service non capable → `SKIPPED`, aucune ligne `TenantDatabase` fictive créée | Une entrée `PENDING` qui ne progresserait jamais serait malhonnête — voir §10.2.2 |
+| Nom physique de base = `tenant_<uuid_hex>_<service_code>`, recalculé indépendamment par le service propriétaire (jamais une chaîne réseau de confiance aveugle) | Déterministe, sans collision, jamais dérivé d'une entrée libre — voir §10.2.4 |
+| Idempotence via vérification d'existence AVANT création (jamais capture d'erreur "déjà existant" après coup) | §10.2.5 |
+| Concurrence via contrainte d'unicité PostgreSQL + `UPDATE ... WHERE` conditionnel (CAS), PAS de `threading.Lock()` | Valide même multi-instance, contrairement au verrou local-process de la Phase 6 — décision consciente d'être plus robuste ici — voir §10.2.6 |
+| `TenantDatabaseStatus` étendu (`PROVISIONING`, `FAILED`) plutôt qu'un second système d'état sur `Tenant` | Règle explicite de la tâche — voir §9 |
+| Échec physique → `FAILED` + `last_error`, reprise par nouvel appel (retry), jamais de `DROP DATABASE` automatique | `CREATE DATABASE`/`migrate` sont nativement idempotents ; un `DROP` automatique serait risqué sur un échec potentiellement transitoire — voir §10.2.7 |
+| Alias désenregistré si la migration échoue après création physique de la base | Aucun alias enregistré ne doit jamais pointer vers un schéma non confirmé — voir §10.2.7 |
+| `tenant-service` ne connaît/ne transmet jamais de credential PostgreSQL réel | Cohérent avec `secret_reference` en référence opaque depuis la Phase 5 — voir §10.2.9 |
+| Réutilisation stricte de `_alias_for`/`_build_connection_settings` (Phase 6) — aucune logique de résolution dupliquée | Règle explicite de la tâche (§16) — voir §10.2.9 |
+| Validation tenant/service AMONT et globale (refuse la demande entière) séparée de l'exécution PAR SERVICE (indépendante, jamais bloquante entre services) | Distingue une erreur de saisie (§15 de la tâche) d'un échec d'infrastructure (§10 de la tâche) — voir §10.2.3 et §10.2.7 |
+
+#### 10.2.12 Décisions reportées
+
+| Décision reportée | Vers quelle phase / pourquoi |
+|---|---|
+| Secret Manager réel (Vault, AWS Secrets Manager, etc.) | Non planifiée — `secret_reference` reste une référence non branchée, credentials PostgreSQL partagés (hérité de la Phase 6, §12 de la tâche) |
+| Provisioning physique pour INFRASTRUCTURE/COMPTA/COMPTA_MATIERE/MEDICAL | Nécessite d'abord de donner à ces services l'équivalent de la Phase 6 (Dynamic Database Routing) — hors périmètre Phase 7 (§22 de la tâche) |
+| Reprise automatique d'un provisioning bloqué en `PROVISIONING` (processus crashé après création physique réussie) | Phase 8 candidate — TTL ou mécanisme de reprise explicite, voir §10.2.7 |
+| Configuration métier initiale (chambres, services hospitaliers, référentiels propres à chaque établissement) | Phase 9 (Tenant Configuration) — explicitement non anticipée dans cette phase (§13 de la tâche) |
+| Provisioning de comptes utilisateurs (Hospital Admin initial, etc.) | Non planifiée — voir §10.1, distinct du provisioning d'infrastructure |
+| Provisioning à très grande échelle (création en masse, files d'attente, retries planifiés) | Non planifiée — cette phase ne couvre qu'un provisioning à la demande, un tenant à la fois (§22 de la tâche) |
+| Verrou de création distribué (`pg_advisory_lock`/Redis) pour un futur déploiement multi-instance de `tenant-service` | Non nécessaire aujourd'hui — le CAS PostgreSQL (§10.2.6) suffit déjà pour la correction ; un verrou distribué n'ajouterait qu'une optimisation de contention, pas une garantie manquante |
+| Révocation en temps réel d'un alias déjà résolu par un processus `service-personnel` | Limite héritée de la Phase 6 (§9.2.10), toujours non résolue — non traitée par cette phase |
 
 ---
 
@@ -676,6 +984,16 @@ Décisions prises et vérifiées :
 | **Limite actuelle de cette confiance** : un accès réseau direct à un service métier (contournant la Gateway) permettrait d'injecter ces headers librement — la Gateway n'ajoute pas de signature, seulement une garantie qu'**elle-même** ne les laisse pas passer telles quelles depuis un client externe | Toute la chaîne | Non testé — dépend de l'isolation réseau Docker |
 | Communications service-to-service **encore directes**, non authentifiées (sauf `tenant-service.resolve`) | [§12](#12-service-to-service) | — |
 | Endpoint `GET /tenants/resolve/` protégé par jeton interne (`hmac.compare_digest`), pas public | `tenant-service/permissions.py` | Tests + Docker réel |
+| **(Phase 6)** Tenant Context établi UNIQUEMENT par le mécanisme d'authentification (jamais décodé JWT/paramètre libre par le Router) | `GatewayHeaderAuthentication.authenticate()`, `AuthVerifyView.post()` | Tests |
+| **(Phase 6)** Requête sans Tenant Context établi → refus explicite (`TenantContextMissingError`), jamais de repli vers `'default'` | `router.py::_resolve_alias` | Tests |
+| **(Phase 6)** `tenant_id` réel mais non routable (introuvable/inactif/Registry indisponible sans cache) → refus explicite, jamais de repli vers une autre base | `pool_registry.py`, `cache.py` | Tests + Docker réel |
+| **(Phase 6)** Endpoint `GET /tenant-databases/resolve/` protégé par le même jeton interne, jamais public | `tenant-service/permissions.py` (réutilisé) | Tests + Docker réel |
+| **(Phase 6)** Isolation absolue : Tenant A ne peut jamais lire/écrire la base du Tenant B | `router.py` (alias distincts par tenant) | Tests + Docker réel avec 2 vraies bases séparées |
+| **(Phase 7)** `POST /tenants/{id}/provision/` réservé à `PLATFORM_ADMIN` — même permission de classe que le reste du Tenant Management, aucun nouveau système d'autorisation | `tenant-service/tenants/views.py::TenantViewSet.provision` | Tests + Docker réel (403 confirmé pour ADMIN/anonyme) |
+| **(Phase 7)** `POST /api/internal/provision-database/` réservé au jeton interne partagé, jamais accessible via `GatewayHeaderAuthentication` | `service-personnel/api/permissions.py::IsInternalService` (symétrique de celle de tenant-service) | Tests + Docker réel (403 confirmé pour jeton absent/faux) |
+| **(Phase 7)** `tenant-service` ne connaît/ne transmet jamais de mot de passe PostgreSQL réel — seul `tenant_id` transite, service-personnel utilise ses propres credentials | `tenants/provisioning.py::_call_physical_provisioning` | Lecture de code + Docker réel |
+| **(Phase 7)** Nom physique de base jamais dérivé d'une entrée libre — dérivé uniquement d'un `UUID` typé + d'un code de service déjà validé contre le catalogue, re-quoté via `psycopg2.sql.Identifier` avant `CREATE DATABASE` | `tenants/provisioning.py::_deterministic_database_name`, `pool_registry.py::_create_database_if_missing` | Tests + Docker réel |
+| **(Phase 7)** Validation amont refuse la demande ENTIÈRE (tenant/service inconnu ou inactif) avant toute création — jamais d'état partiel dû à une erreur de saisie | `tenants/provisioning.py::ProvisioningOrchestrator.provision` | Tests + Docker réel |
 
 ### Améliorations de sécurité futures identifiées (non implémentées)
 
@@ -683,6 +1001,12 @@ Décisions prises et vérifiées :
 - Isolation réseau empêchant un accès direct aux services métier en contournant la Gateway.
 - `tenant-service` (identité PLATFORM_ADMIN, transversale par nature), `Medical-Monitoring` et `clinical-agent` (conception tenant dédiée requise, voir [§13](#13-medical-monitoring--clinical-agent)) restent hors de `GatewayUser.tenant_id` — décision délibérée, pas un oubli.
 - Autorisation au niveau objet (un `Medecin` du Tenant A ne doit pas être lisible/modifiable via l'API par un utilisateur du Tenant B) — actuellement absente de tous les `ModelViewSet` métier.
+- **(Phase 6)** Verrou de création de pool LOCAL au processus — pas de coordination inter-instances en cas de déploiement horizontal futur (voir [§9.2.6](#926-concurrence--verrouillage-de-création-de-pool)).
+- **(Phase 6)** Credentials PostgreSQL partagés entre toutes les bases tenant d'un service (pas de secret unique par tenant) — dépend de la mise en place d'un vrai Secret Manager, hors périmètre de cette phase (voir [§9.2.9](#929-bases-pilotes-réelles)).
+- **(Phase 6)** Cache de résolution non invalidé activement (seulement par TTL) — un changement de configuration côté Registry met jusqu'à `TENANT_DB_CACHE_TTL_SECONDS` avant d'être pris en compte.
+- **(Phase 6)** Alias de connexion déjà enregistré non revérifié auprès du Registry (chemin rapide) — désactiver un `TenantDatabase` ne révoque pas l'accès d'un processus qui a déjà résolu ce tenant, seul un redémarrage du processus applique la désactivation. Découvert et vérifié en conditions réelles pendant la validation pilote (voir [§9.2.10](#9210-limite-découverte-pendant-la-validation-pilote--désactivation-dun-alias-déjà-enregistré)).
+- **(Phase 7)** Credentials PostgreSQL toujours partagés pour la création physique (même limite que la Phase 6, héritée) — pas de Secret Manager, voir [§10.2.9](#1029-sécurité-14-de-la-tâche).
+- **(Phase 7)** Une ligne `TenantDatabase` bloquée en `PROVISIONING` (processus crashé après création physique réussie mais avant confirmation) n'est jamais reprise automatiquement — voir [§10.2.7](#1027-gestion-des-échecs-partiels-10-de-la-tâche), limite assumée, candidate Phase 8.
 
 ---
 
@@ -707,12 +1031,24 @@ Décisions prises et vérifiées :
 | `GatewayUser.tenant_id` — fultang-compta-financiere (headers + fallback JWT) | `apps/caisse/tests.py::GatewayHeaderAuthenticationTenantTests` (4 tests) | ✅ (sqlite local, exécution réelle) | Implémenté et testé |
 | PlatformService — catalogue plateforme (CRUD, format de code, permissions) | `tenant-service/tenants/tests.py::PlatformService{Model,API}Tests` (6 tests) | ✅ (sqlite + Docker/Postgres réel) | Implémenté et testé |
 | TenantDatabase — multi-services par tenant, multi-tenants par service, unicité, service invalide, statuts, permissions, secrets | `tenant-service/tenants/tests.py::TenantDatabase{Model,API}Tests` (20 tests) | ✅ (sqlite + Docker/Postgres réel + curl live) | Implémenté et testé |
-| Isolation des données métier (cross-tenant) | — | — | **Non implémenté, non testé** |
-| Database routing par tenant | — | — | **Non implémenté, non testé** (Phase 6) |
-| Création physique des bases par tenant | — | — | **Non implémenté, non testé** (Phase 7) |
+| **(Phase 6)** Tenant Context — établissement, isolation entre requêtes, refus si jamais établi, `None` = état valide | `service-personnel/api/tests.py::TenantContextTests` (5 tests) | ✅ (Docker + Postgres réel) | Implémenté et testé |
+| **(Phase 6)** Cache TTL du mapping tenant → base — premier accès, expiration, invalidation, Registry indisponible (avec/sans entrée en cache) | `service-personnel/api/tests.py::TenantDatabaseCacheTests` (6 tests) | ✅ (Docker + Postgres réel) | Implémenté et testé |
+| **(Phase 6)** Enregistrement d'alias de connexion — chemin rapide, refus si inactif, création concurrente (10 threads simultanés → une seule résolution) | `service-personnel/api/tests.py::PoolRegistryTests` (4 tests) | ✅ (Docker + Postgres réel) | Implémenté et testé |
+| **(Phase 6)** `TenantDatabaseRouter` — apps système vs tenant, refus si contexte absent/tenant inactif/tenant inconnu, `allow_relation`/`allow_migrate` | `service-personnel/api/tests.py::TenantDatabaseRouterTests` (11 tests) | ✅ (Docker + Postgres réel) | Implémenté et testé |
+| **(Phase 6)** Endpoint `GET /tenant-databases/resolve/` — jeton requis, réponse minimale (jamais `secret_reference`), 404/400 | `tenant-service/tenants/tests.py::TenantDatabaseResolveEndpointTests` (7 tests) | ✅ (sqlite + Docker/Postgres réel) | Implémenté et testé |
+| **(Phase 6)** Isolation des données — Tenant A/B, 2 vraies bases PostgreSQL distinctes, login réel, JWT réel, requêtes HTTP réelles à travers la Gateway | Vérification manuelle en conditions réelles, voir [§9.2.9](#929-bases-pilotes-réelles) — pas de test automatisé dédié | ✅ (SQL brut + HTTP live, 2 bases pilotes réelles : `hopital-central`, `clinique-paix`) | Implémenté et vérifié |
+| **(Phase 7)** Génération déterministe du nom de base — pas de collision entre tenants/services | `tenant-service/tenants/tests.py::DeterministicDatabaseNamingTests` (4 tests) | ✅ | Implémenté et testé |
+| **(Phase 7)** `ProvisioningOrchestrator` — tenant/service inconnu ou inactif, service capable/non capable, idempotence, échec physique + retry, CAS de concurrence | `tenant-service/tenants/tests.py::ProvisioningOrchestratorTests` (11 tests) | ✅ | Implémenté et testé |
+| **(Phase 7)** Endpoint `POST /tenants/{id}/provision/` — permissions, 404/409/400, réponse structurée par service | `tenant-service/tenants/tests.py::TenantProvisionEndpointTests` (7 tests) | ✅ | Implémenté et testé |
+| **(Phase 7)** `IsInternalService` (service-personnel) — jeton correct/faux/absent/non configuré | `service-personnel/api/tests.py::IsInternalServicePermissionTests` (4 tests) | ✅ (Docker + Postgres réel) | Implémenté et testé |
+| **(Phase 7)** Endpoint `POST /api/internal/provision-database/` — permissions, validation, délégation, 502 sur échec | `service-personnel/api/tests.py::ProvisionDatabaseEndpointTests` (5 tests) | ✅ (Docker + Postgres réel) | Implémenté et testé |
+| **(Phase 7)** Création physique idempotente + nettoyage d'alias sur échec de migration | `service-personnel/api/tests.py::DatabaseProvisioningUnitTests` (4 tests) | ✅ (Docker + Postgres réel, psycopg2 mocké) | Implémenté et testé |
+| **(Phase 7)** Provisioning réel de bout en bout — création physique, migration, isolation, collision, concurrence (5 requêtes simultanées), échec réel + retry, processus redémarré | Validation pilote Docker, voir [§10.2.10](#10210-validation-pilote-réelle-docker--postgresql-pas-de-mock) — pas de test automatisé dédié | ✅ (4 tenants pilotes réels, PostgreSQL réel, HTTP live à travers la Gateway) | Implémenté et vérifié |
+| Création physique des bases pour l'ensemble des tenants (hors pilotes, mass provisioning) | — | — | **Non implémenté, non testé** (hors périmètre Phase 7, voir §22 de la tâche) |
+| Provisioning physique pour INFRASTRUCTURE/COMPTA/COMPTA_MATIERE/MEDICAL | — | — | **Non implémenté** (décision de périmètre — ces services n'ont pas l'équivalent Phase 6, voir [§10.2.2](#1022-constat-dinspection--pourquoi-seul-personnel-est-physiquement-automatisé)) |
 | Medical Monitoring / Clinical Agent — logique tenant dédiée | — | — | **Non implémenté** (audit documenté, [§13](#13-medical-monitoring--clinical-agent)) |
 
-**Total tests automatisés multitenant actuels** : 47 (tenant-service, dont 26 Phase 5) + 33 (api-gateway) + 11 (service-personnel) + 3 (Gestion-Infrastructures) + 3 (ComptaMatiere) + 4 (fultang-compta-financiere) = **101 tests**, tous verts, exécutés à la fois en isolation (mocks httpx pour la Gateway, sqlite pour les tests Django hors service-personnel) et **en conditions réelles** (Docker + PostgreSQL pour tenant-service, service-personnel et Gestion-Infrastructures, requêtes curl live à travers la stack complète pour les flux critiques, y compris tentative de duplication, service inconnu, et blocage d'un rôle tenant-scope sur `/tenant-databases/`).
+**Total tests automatisés multitenant actuels** : 76 (tenant-service, dont 26 Phase 5 + 7 Phase 6 + 22 Phase 7) + 33 (api-gateway) + 50 (service-personnel, dont 26 Phase 6 + 13 Phase 7) + 3 (Gestion-Infrastructures) + 3 (ComptaMatiere) + 4 (fultang-compta-financiere) = **169 tests**, tous verts, exécutés à la fois en isolation (mocks httpx pour la Gateway, sqlite pour les tests Django hors service-personnel, psycopg2/appel physique mockés dans les tests unitaires) et **en conditions réelles** (Docker + PostgreSQL pour tenant-service, service-personnel et Gestion-Infrastructures, requêtes curl/urllib live à travers la stack complète pour les flux critiques — nouveau en Phase 7 : provisioning réel de bout en bout, y compris concurrence à 5 requêtes simultanées et cycle échec réel → retry → succès).
 
 > **Anomalie non liée à cette phase** : les tests métier préexistants de `Gestion-Infrastructures` (7) et `fultang-compta-financiere` (10) échouent (401/403) car ils n'envoient aucun header d'authentification — confirmé pré-existant (`git diff` ne montre aucune ligne modifiée sur ces tests), même symptôme que `service-personnel` en Phase 1. Non corrigé, hors périmètre.
 
@@ -812,6 +1148,90 @@ Décisions prises et vérifiées :
 - Aucune base PostgreSQL physique créée, aucun Docker Compose modifié pour de nouvelles bases, aucun mécanisme de Secret Manager construit.
 - Tenant Resolution, JWT, Medical Monitoring, Clinical Agent — non touchés, hors périmètre explicite.
 
+### Phase 6 — Dynamic Database Routing (cette tâche, non commitée)
+
+#### Fichiers créés
+
+| Fichier | Rôle |
+|---|---|
+| `service-personnel/api/tenant_routing/__init__.py` | Documentation du sous-package |
+| `service-personnel/api/tenant_routing/context.py` | Tenant Context (`contextvars.ContextVar`), `TenantContextMissingError` |
+| `service-personnel/api/tenant_routing/registry_client.py` | Appel HTTP interne vers `tenant-service` (nouvel endpoint `resolve/`) |
+| `service-personnel/api/tenant_routing/cache.py` | Cache TTL du mapping tenant → base, dégradation gracieuse |
+| `service-personnel/api/tenant_routing/pool_registry.py` | Enregistrement de connexion par tenant, verrouillage de création |
+| `service-personnel/api/tenant_routing/router.py` | `TenantDatabaseRouter` (le `DATABASE_ROUTERS`) |
+| `service-personnel/api/tenant_routing/middleware.py` | `TenantContextCleanupMiddleware` (isolation entre requêtes) |
+
+#### Fichiers modifiés
+
+| Fichier | Modification | Raison | Impact |
+|---|---|---|---|
+| `service-personnel/service_personnel/settings.py` | + `DATABASE_ROUTERS`, + `TenantContextCleanupMiddleware` (fin de `MIDDLEWARE`), + `TENANT_SERVICE_URL`/`TENANT_SERVICE_INTERNAL_TOKEN`/`TENANT_SERVICE_TIMEOUT_SECONDS`/`TENANT_DB_CACHE_TTL_SECONDS`/`TENANT_DB_CONN_MAX_AGE`/`TENANT_DB_USER`/`TENANT_DB_PASSWORD` | Activer le routing, tout configurable par environnement | Additif — `DATABASES['default']` inchangé |
+| `service-personnel/api/authentication.py` | `GatewayHeaderAuthentication.authenticate()` établit le Tenant Context juste après avoir déterminé `tenant_id` | C'est le seul endroit de confiance où `tenant_id` est connu pour une requête authentifiée normale | Additif — comportement d'authentification (headers, `GatewayUser`) inchangé |
+| `service-personnel/api/views.py` | `AuthVerifyView.post()` établit explicitement le Tenant Context depuis le `tenant_id` du corps de requête, avant ses requêtes ORM | `AuthVerifyView` précède toute authentification DRF (`authentication_classes = []`), `GatewayHeaderAuthentication` ne s'exécute jamais pour lui | Nécessaire pour que le login lui-même soit routé vers la bonne base — sans ce changement, Phase 6 aurait cassé le login pour tout tenant réel |
+| `service-personnel/api/exceptions.py` | `fultang_exception_handler` traduit les exceptions de routage (`TenantContextMissingError`, `TenantDatabaseInactiveError`, `TenantDatabaseNotFoundError`, `TenantRegistryUnavailableError`) en 503 explicite | Éviter un 500 générique exposant `str(exc)` ; réponse uniforme pour toutes les vues, pas seulement `AuthVerifyView` | Additif — le comportement pour les autres exceptions (404/400/403/500) est inchangé |
+| `service-personnel/api/tests.py` | `_create_medecin` utilise `.using('default')` ; `AuthVerifyTenantScopingTests` neutralise `ensure_connection_alias` (→ `'default'`) en `setUp` ; + ~35 nouveaux tests Phase 6 | Les tests Phase 3/4/5 utilisent des `tenant_id` aléatoires non enregistrés dans le vrai Tenant Registry — les faire passer par le VRAI routing les casserait (appel réseau vers un tenant inexistant) alors qu'ils testent le filtrage par colonne, pas le routing physique | **Nécessaire pour la non-régression** — décision documentée en §9.2.3 et dans les docstrings des tests concernés |
+| `tenant-service/tenants/views.py` | + action `resolve` sur `TenantDatabaseViewSet` (`GET /api/tenant-databases/resolve/`), réutilise `TenantDatabaseService.get_for_tenant_and_service` (Phase 5, jusqu'ici jamais exposé en HTTP) | Permettre à `service-personnel` (et tout futur service adaptant ce mécanisme) de résoudre sa base sans dupliquer la logique du Registry | Additif — CRUD `TenantDatabase`/`PlatformService` inchangé |
+| `tenant-service/tenants/serializers.py` | + `TenantDatabaseResolutionSerializer` (database_name/host/port/status uniquement) | Réponse minimale pour `resolve/`, jamais `secret_reference` | Additif |
+| `tenant-service/tenants/tests.py` | + 7 tests (`TenantDatabaseResolveEndpointTests`) | Couvrir permissions et cas d'erreur du nouvel endpoint | Additif |
+| `MULTITENANT_ARCHITECTURE.md` | §2, §9 (+ §9.2 complet), §15, §16, §17, §19 mis à jour | Documenter la Phase 6 | Aucun impact code |
+
+**Fichiers volontairement NON modifiés (Phase 6)** :
+- `Tenant`, `TenantDatabase`, `PlatformService` (modèles Phase 1/5) — aucun champ ajouté, la Phase 6 consomme le registre existant sans le modifier.
+- Les 3 autres services adaptés en Phase 4 (Gestion-Infrastructures, ComptaMatiere, fultang-compta-financiere) — aucun router, aucune base séparée pour eux dans cette phase (décision de périmètre explicite, l'objectif de la tâche était `service-personnel`).
+- `Medical-Monitoring`, `clinical-agent`, `api-gateway/app/main.py` (JWT, Tenant Resolution) — non touchés, hors périmètre explicite de la tâche.
+- Modèles métier (`Medecin`, `Personnel`, etc.) — aucun `tenant_id` supplémentaire ajouté, aucune relation modifiée.
+- `docker-compose.yml` — aucune nouvelle base déclarée en Docker Compose ; les 2 bases pilotes sont créées manuellement (`CREATE DATABASE`) sur le serveur PostgreSQL déjà existant, pas via un nouveau service Compose (le provisioning automatisé appartient à la Phase 7).
+
+### Phase 7 — Tenant Provisioning (cette tâche, non commitée)
+
+#### Fichiers créés
+
+| Fichier | Rôle |
+|---|---|
+| `tenant-service/tenants/provisioning.py` | `ProvisioningOrchestrator` — orchestration complète (validation, idempotence, CAS de concurrence, dispatch physique/déclaratif) |
+| `service-personnel/api/permissions.py` | `IsInternalService` — symétrique de celle de tenant-service, pour l'endpoint interne de provisioning |
+
+#### Fichiers modifiés
+
+| Fichier | Modification | Raison | Impact |
+|---|---|---|---|
+| `tenant-service/tenants/models.py` | `TenantDatabaseStatus` : + `PROVISIONING`, + `FAILED` ; `TenantDatabase` : + `last_error` (CharField) | Cycle de vie du provisioning (§9 de la tâche) — réutilise le champ `status` existant plutôt que d'introduire un second système d'état sur `Tenant` (règle explicite de la tâche) | Migration nécessaire (voir ci-dessous) ; aucune donnée existante perdue (`FAILED`/`PROVISIONING` sont de nouvelles valeurs de choix, `last_error` a un défaut `''`) |
+| `tenant-service/tenants/repositories.py` | `TenantDatabaseRepository` : + `get_or_create_declarative` (idempotence via `IntegrityError`), + `claim_for_provisioning` (CAS atomique), + `mark_active`, + `mark_failed` | Concurrence et idempotence portées par PostgreSQL (contrainte d'unicité + `UPDATE ... WHERE`), pas par un verrou applicatif (§8 de la tâche — explicitement plus robuste que le `threading.Lock()` de la Phase 6 face à un futur déploiement multi-instance) | Additif — méthodes existantes (`create`, `update_status`, etc.) inchangées, toujours utilisées par l'API Phase 5 |
+| `tenant-service/tenants/serializers.py` | + `TenantProvisionRequestSerializer` (validation de forme du payload `{"services": [...]}`) | Payload du nouvel endpoint | Additif |
+| `tenant-service/tenants/views.py` | `TenantViewSet` : + action `provision` (`POST /tenants/{id}/provision/`) | Point d'entrée HTTP du provisioning, réservé `PLATFORM_ADMIN` (permission de classe déjà en place, aucune nouvelle permission créée côté tenant-service) | Additif — CRUD `Tenant` existant inchangé |
+| `tenant-service/config/settings.py` | + `PROVISIONING_SERVICE_PERSONNEL_URL`, + `PROVISIONING_TIMEOUT_SECONDS` | URL/timeout du seul service physiquement provisionnable dans cette phase, configurables par environnement (pas de valeur figée en dur) | Additif |
+| `service-personnel/api/tenant_routing/pool_registry.py` | + `provision_database()`, + `_create_database_if_missing()`, + `_admin_connection_params()`, + `DatabaseProvisioningError` | Création physique réelle (`CREATE DATABASE` via psycopg2 admin, autocommit) + migration (`migrate api`), réutilisant `_alias_for`/`_build_connection_settings` de la Phase 6 sans les dupliquer | Additif — `ensure_connection_alias` (chemin de requête ordinaire, Phase 6) totalement inchangé ; `provision_database` est un chemin séparé, appelé uniquement par le nouvel endpoint interne |
+| `service-personnel/api/views.py` | + `ProvisionDatabaseView` (`POST /api/internal/provision-database/`) | Endpoint interne symétrique, appelé par tenant-service | Additif — aucune vue existante modifiée |
+| `service-personnel/api/urls.py` | + route `internal/provision-database/` | Exposer la nouvelle vue | Additif |
+| `service-personnel/service_personnel/settings.py` | *(aucune modification — `TENANT_DB_USER`/`PASSWORD`/`DATABASES['default']` déjà présents depuis la Phase 6, réutilisés tels quels pour la connexion admin)* | — | — |
+| `tenant-service/tenants/tests.py` | + `DeterministicDatabaseNamingTests` (4), + `ProvisioningOrchestratorTests` (11), + `TenantProvisionEndpointTests` (7) | Couvrir génération de nom, orchestration, endpoint HTTP | Additif |
+| `service-personnel/api/tests.py` | + `IsInternalServicePermissionTests` (4), + `ProvisionDatabaseEndpointTests` (5), + `DatabaseProvisioningUnitTests` (4) | Couvrir permission, endpoint, création physique/nettoyage | Additif |
+| `MULTITENANT_ARCHITECTURE.md` | §2, §10 (nouveau §10.2 complet), §15, §16, §17, §19 mis à jour | Documenter la Phase 7 | Aucun impact code |
+
+#### Migrations
+
+| Migration | Contenu |
+|---|---|
+| `tenant-service/tenants/migrations/0004_tenantdatabase_last_error_and_more.py` | `AddField(last_error)` + `AlterField(status, choices=...)` — générée par `makemigrations`, appliquée sur `tenant_registry_db` réel sans perte de données (vérifié : les 2 `TenantDatabase` existants de la Phase 6 restent `ACTIVE`, `last_error` vide par défaut) |
+
+Aucune migration côté `service-personnel` : `provision_database` réutilise le mécanisme de migration PAR TENANT déjà existant (Phase 6, `migrate api --database=<alias>`), il n'ajoute aucun modèle ni champ à `service-personnel` lui-même.
+
+#### Variables d'environnement ajoutées
+
+| Variable | Service | Défaut | Rôle |
+|---|---|---|---|
+| `PROVISIONING_SERVICE_PERSONNEL_URL` | tenant-service | `http://fultang-personnel:8000` | URL du service PERSONNEL pour l'appel physique de provisioning |
+| `PROVISIONING_TIMEOUT_SECONDS` | tenant-service | `30` | Timeout de l'appel physique (plus long que `TENANT_SERVICE_TIMEOUT_SECONDS`/5s de la Phase 6 : `CREATE DATABASE` + `migrate` prennent plus de temps qu'une simple résolution) |
+
+**Fichiers volontairement NON modifiés (Phase 7)** :
+- `Tenant` (modèle) — aucun champ de statut de provisioning ajouté ici (règle explicite de la tâche : réutiliser `TenantDatabase.status`, pas créer un second système d'état).
+- `PlatformService` — catalogue consommé tel quel (existence + statut ACTIVE vérifiés), jamais modifié par le provisioning.
+- Le Database Router (Phase 6, `router.py`) et `ensure_connection_alias` — le provisioning les laisse totalement intacts ; il PRODUIT une configuration qu'ils savent déjà consommer, sans qu'aucune ligne de leur code n'ait dû changer (vérifié par la validation pilote avec un processus `service-personnel` redémarré, §10.2.10).
+- Gestion-Infrastructures, ComptaMatiere, fultang-compta-financiere, Medical-Monitoring, clinical-agent — aucun fichier touché ; provisioning physique non câblé pour eux dans cette phase (décision de périmètre, §10.2.2).
+- `docker-compose.yml` (racine) — aucune modification : les nouveaux réglages (`PROVISIONING_SERVICE_PERSONNEL_URL`, `PROVISIONING_TIMEOUT_SECONDS`) utilisent leurs valeurs par défaut (le conteneur `tenant-service` atteint déjà `fultang-personnel` sur le réseau Docker partagé, sans variable d'environnement supplémentaire nécessaire).
+- Aucun modèle métier (`Medecin`, `Personnel`, etc.), aucune donnée métier créée par le provisioning — seule une base VIDE (schéma seul) est produite (§10.1 : pas de "configuration initiale" inventée).
+
 ---
 
 ## 18. Ce qui a été conservé
@@ -824,9 +1244,14 @@ Explicitement, sans modification de mécanisme :
 - **`GatewayHeaderAuthentication`** — le principe (headers non signés, confiance en la Gateway) est conservé ; seule son extension à `tenant_id` a été ajoutée, service par service.
 - **Architecture des services** — aucun microservice fusionné, séparé ou renommé.
 - **Communication service-to-service directe** — décision explicitement maintenue (voir [§12](#12-service-to-service)).
-- **Routage actuel des bases de données** — une base PostgreSQL par service, non touché.
+- **Routage des bases des 3 autres services adaptés en Phase 4** (Gestion-Infrastructures, ComptaMatiere, fultang-compta-financiere) — une base PostgreSQL par service, non touché ; seul `service-personnel` a reçu le Dynamic Database Router en Phase 6.
 - **`Medical-Monitoring` et `clinical-agent`** — code, flux de synchronisation (signal Django → HTTP direct → base tampon → export), et mécanisme d'autorisation (`X-API-Key` unique) laissés tels quels ; seule une analyse a été produite ([§13](#13-medical-monitoring--clinical-agent)), aucune ligne de code modifiée.
-- **Modèles métier, migrations métier, querysets, ViewSets** des 4 services adaptés — aucun filtrage ni champ ajouté au-delà de la classe d'authentification.
+- **Modèles métier, migrations métier, querysets, ViewSets** des 4 services adaptés — aucun filtrage ni champ ajouté au-delà de la classe d'authentification (Phase 4) / du Database Router (Phase 6, `service-personnel` uniquement).
+- **`TenantDatabase`/`PlatformService`** (Phase 5) — consommés tels quels par le Dynamic Database Router (Phase 6), aucun champ ajouté.
+- **Tests Phase 3/4/5 de `service-personnel`** — tous continuent de passer sans modification de leur intention (adaptation technique documentée en §9.2.3, pas de réécriture de ce qu'ils vérifient).
+- **Database Router et `ensure_connection_alias`** (Phase 6) — **zéro ligne modifiée** par la Phase 7 ; le provisioning produit une configuration que ce mécanisme consomme sans le savoir, vérifié avec un processus `service-personnel` redémarré entre le provisioning et la première requête (§10.2.10).
+- **`TenantDatabase`/`PlatformService`** (Phase 5) — toujours aucun champ ajouté par la Phase 7 au-delà de `last_error` (texte d'erreur, pas une donnée métier) ; le modèle `Tenant` reste totalement inchangé.
+- **Tests Phase 1 à 6** — tous continuent de passer sans modification (169/169 tests multitenant verts après la Phase 7, voir [§16](#16-tests-et-validation)).
 
 ---
 
@@ -847,29 +1272,54 @@ FAIT
 │                                                         Medical Monitoring / Clinical Agent
 │                                                         délibérément exclus (conception dédiée requise,
 │                                                         voir §13) — pas un manque, une décision.
-└── Tenant Database Management (registre logique) ..... Phase 5 CLÔTURÉE : catalogue PlatformService +
-                                                          association TenantDatabase (Tenant + Service →
-                                                          Database), contraintes d'unicité, permissions
-                                                          PLATFORM_ADMIN, 26 tests. Purement déclaratif —
-                                                          aucune base physique créée, aucun routage.
+├── Tenant Database Management (registre logique) ..... Phase 5 CLÔTURÉE : catalogue PlatformService +
+│                                                         association TenantDatabase (Tenant + Service →
+│                                                         Database), contraintes d'unicité, permissions
+│                                                         PLATFORM_ADMIN, 26 tests. Purement déclaratif —
+│                                                         aucune base physique créée, aucun routage.
+├── Dynamic Database Routing (Phase 6) ................. CLÔTURÉE pour service-personnel : Tenant Context
+│                                                         (contextvars), cache TTL, verrouillage de création
+│                                                         de pool, Database Router, isolation vérifiée avec
+│                                                         2 vraies bases PostgreSQL séparées. Les 3 autres
+│                                                         services adaptés en Phase 4 n'ont pas de router
+│                                                         (décision de périmètre, pas un manque).
+└── Tenant Provisioning (Phase 7) ...................... CLÔTURÉE pour service-personnel : création physique
+                                                          réelle de base (psycopg2, idempotente) + migration
+                                                          automatisées via POST /tenants/{id}/provision/,
+                                                          concurrence par CAS PostgreSQL (pas de verrou
+                                                          applicatif), échec → FAILED + retry (pas de rollback
+                                                          destructif). Déclaratif seul (SKIPPED) pour les 3
+                                                          autres services adaptés en Phase 4 (pas de router
+                                                          Phase 6 pour eux — décision de périmètre, pas un
+                                                          manque). Provisioning de comptes utilisateurs
+                                                          toujours hors périmètre (§10.1).
 
 À FAIRE
-├── Dynamic Database Routing (Phase 6) ................. non implémenté — router une requête réelle vers
-│                                                          la bonne base selon TenantDatabase
-├── Tenant Provisioning (Phase 7) ...................... non implémenté — créer physiquement les bases,
-│                                                          faire passer TenantDatabase.status à ACTIVE,
-│                                                          brancher un vrai Secret Manager sur secret_reference
-├── Provisioning des comptes utilisateurs .............. non implémenté
+├── Extension du Dynamic Database Router (Phase 6) + du provisioning physique (Phase 7) aux 3 autres
+│    services adaptés en Phase 4 (Gestion-Infrastructures, ComptaMatiere, fultang-compta-financiere)
+├── Verrou de création de pool distribué (si passage à plusieurs instances par service)
+├── Reprise automatique d'un provisioning bloqué en PROVISIONING (processus crashé après création physique
+│    réussie mais avant confirmation) — voir §10.2.7, non résolu dans cette phase
+├── Provisioning des comptes utilisateurs .............. non implémenté (§10.1)
 ├── Migration des comptes existants (tenant_id NULL) .. non implémenté
 ├── Conception tenant dédiée pour Medical Monitoring / Clinical Agent (Phase 9 notamment)
 ├── Isolation des données métier (filtrage par tenant dans les ViewSets)
 ├── Configuration complète des tenants (Phase 9 : modules, feature flags, activation/
 │                                        désactivation fonctionnelle d'un service par tenant)
 ├── Sécurisation approfondie service-to-service ....... non implémenté
-├── Tests d'isolation (cross-tenant data leakage) ..... non implémenté
+├── Tests d'isolation (cross-tenant data leakage) ..... vérifié pour service-personnel (Phase 6, 2 bases
+│                                                          pilotes réelles) ; non fait pour les 3 autres
+│                                                          services adaptés en Phase 4 (pas de router)
+├── Révocation en temps réel d'un alias déjà résolu — désactiver un TenantDatabase ne prend effet, pour
+│    un processus qui a déjà résolu ce tenant, qu'à son redémarrage (voir §9.2.10, découvert et vérifié
+│    pendant la validation pilote de la Phase 6, toujours non résolu après la Phase 7)
+├── Secret Manager réel (Vault, AWS Secrets Manager, etc.) — secret_reference reste une référence non
+│    branchée, credentials PostgreSQL partagés pour toute création physique (Phase 6 et 7)
+├── Provisioning à très grande échelle (création en masse de tenants, files d'attente, retries automatiques
+│    planifiés) — cette phase ne couvre qu'un provisioning à la demande, un tenant à la fois
 └── Opérations multitenant (backup/restore par tenant, etc.)
 ```
 
 ---
 
-*Document maintenu à jour à chaque phase du projet multitenant. Dernière mise à jour : Phase 5 — Tenant Database Management.*
+*Document maintenu à jour à chaque phase du projet multitenant. Dernière mise à jour : Phase 7 — Tenant Provisioning.*

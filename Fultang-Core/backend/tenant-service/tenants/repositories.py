@@ -19,9 +19,10 @@ Sera réutilisé tel quel par les phases futures qui ont besoin d'un accès
 bas niveau aux tenants sans passer par l'API HTTP (ex: Dynamic Database
 Routing en Phase 6, Tenant Provisioning en Phase 7).
 """
-from typing import Optional
+from typing import Optional, Tuple
 from uuid import UUID
 
+from django.db import IntegrityError, transaction
 from django.db.models import QuerySet
 
 from .models import PlatformService, Tenant, TenantDatabase, TenantDatabaseStatus, TenantStatus
@@ -142,3 +143,82 @@ class TenantDatabaseRepository:
     def update_status(self, tenant_database_id: UUID, status: TenantDatabaseStatus) -> TenantDatabase:
         """Met à jour uniquement le statut logique d'une configuration."""
         return self.update_fields(tenant_database_id, status=status)
+
+    # --- Phase 7 : Tenant Provisioning ---------------------------------
+    #
+    # Les méthodes ci-dessous existent uniquement pour le provisioning
+    # automatisé (voir provisioning.py). Elles s'appuient sur deux
+    # mécanismes PostgreSQL natifs plutôt que sur un verrou applicatif :
+    #   1. La contrainte d'unicité (tenant, service) déjà présente sur ce
+    #      modèle (Meta.constraints) — deux créations concurrentes pour
+    #      le même couple : une seule réussit, l'autre lève IntegrityError.
+    #   2. Une mise à jour conditionnelle atomique (`UPDATE ... WHERE
+    #      status IN (...)`, via QuerySet.update()) pour "réclamer" le
+    #      droit de lancer le provisioning physique — équivalent à un
+    #      verrou "compare-and-swap" porté par PostgreSQL lui-même, donc
+    #      valide même avec plusieurs instances de tenant-service (à la
+    #      différence du threading.Lock() local-process de la Phase 6).
+
+    def get_or_create_declarative(
+        self, *, tenant_id: UUID, service_code: str, database_name: str,
+        host: str, port: int, secret_reference: str,
+    ) -> Tuple[TenantDatabase, bool]:
+        """
+        Retourne la configuration existante pour (tenant, service), ou en
+        crée une nouvelle en PENDING si elle n'existe pas encore.
+
+        Idempotent par construction : si deux appels concurrents tentent
+        tous deux la création, la contrainte d'unicité fait échouer l'un
+        des deux avec IntegrityError — on rattrape ce cas précis et on
+        relit la ligne créée par l'autre appel, plutôt que de laisser
+        l'erreur remonter (un appel de provisioning répété ne doit
+        jamais être une erreur, voir §7 de la tâche).
+        """
+        try:
+            with transaction.atomic():
+                instance = TenantDatabase.objects.create(
+                    tenant_id=tenant_id,
+                    service_id=service_code,
+                    database_name=database_name,
+                    host=host,
+                    port=port,
+                    secret_reference=secret_reference,
+                )
+            return instance, True
+        except IntegrityError:
+            existing = self.get_for_tenant_and_service(tenant_id, service_code)
+            if existing is None:
+                # Ne peut arriver que dans une fenêtre de course extrêmement
+                # étroite (suppression concomitante) — ne jamais deviner,
+                # on relaisse l'appelant réessayer explicitement.
+                raise
+            return existing, False
+
+    def claim_for_provisioning(self, tenant_database_id: UUID) -> bool:
+        """
+        Tente de faire passer la configuration de PENDING/FAILED à
+        PROVISIONING de façon atomique.
+
+        Retourne True si CET appel a "gagné" le droit de lancer le
+        provisioning physique, False si un autre appel (concurrent, ou
+        un état déjà ACTIVE) a la main — l'appelant ne doit alors
+        déclencher AUCUNE action physique, seulement rapporter l'état
+        courant (voir provisioning.py).
+        """
+        updated_count = TenantDatabase.objects.filter(
+            id=tenant_database_id,
+            status__in=[TenantDatabaseStatus.PENDING, TenantDatabaseStatus.FAILED],
+        ).update(status=TenantDatabaseStatus.PROVISIONING, last_error='')
+        return updated_count == 1
+
+    def mark_active(self, tenant_database_id: UUID) -> TenantDatabase:
+        """Provisioning physique réussi : PROVISIONING → ACTIVE, erreur effacée."""
+        return self.update_fields(
+            tenant_database_id, status=TenantDatabaseStatus.ACTIVE, last_error='',
+        )
+
+    def mark_failed(self, tenant_database_id: UUID, error: str) -> TenantDatabase:
+        """Provisioning physique en échec : PROVISIONING → FAILED, avec un résumé de la cause."""
+        return self.update_fields(
+            tenant_database_id, status=TenantDatabaseStatus.FAILED, last_error=error[:500],
+        )

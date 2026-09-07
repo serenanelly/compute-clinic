@@ -1,11 +1,14 @@
 import axiosInstance from '../Utils/axiosInstance';
+import { getGatewayBaseUrl } from '../Utils/gatewayUrls';
 
 /**
  * Service API pour la gestion du personnel hospitalier.
  * Centralise tous les appels API lies au personnel.
  */
 
-const gatewayUrl = (import.meta.env.VITE_BACKEND_FULTANG_API_BASE_MEDICALSTAFF_URL || "http://localhost:8080/medical").replace(/\/medical\/?$/, '');
+// getGatewayBaseUrl() cible le hostname courant (Phase 2.1 : résolution de
+// tenant par sous-domaine) — voir Utils/gatewayUrls.js pour le détail.
+const gatewayUrl = getGatewayBaseUrl();
 const BASE_URL = `${gatewayUrl}/personnel/personnel`;
 
 /**

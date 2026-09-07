@@ -52,6 +52,11 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # Phase 6 (Dynamic Database Routing) : DOIT rester en dernier pour
+    # englober tout le cycle de la requête, y compris l'authentification
+    # DRF qui établit le Tenant Context pendant le dispatch de la vue —
+    # voir api/tenant_routing/middleware.py.
+    'api.tenant_routing.middleware.TenantContextCleanupMiddleware',
 ]
 
 # Configuration REST Framework
@@ -168,6 +173,40 @@ DATABASES = {
         'PORT': os.environ.get('POSTGRES_PORT', '5432'),
     }
 }
+
+# Phase 6 — Dynamic Database Routing.
+# 'default' reste la base des tables système Django (auth, admin,
+# sessions, contenttypes) ET du "pool non assigné" (tenant_id=None,
+# Phase 3) — voir api/tenant_routing/router.py pour la logique complète.
+DATABASE_ROUTERS = ['api.tenant_routing.router.TenantDatabaseRouter']
+
+# Communication interne vers le Tenant Registry (tenant-service), pour
+# résoudre "quelle base pour ce tenant + PERSONNEL ?" (Phase 5,
+# TenantDatabase). Même jeton partagé que celui déjà utilisé par la
+# Gateway pour /tenants/resolve/ (Phase 2.1) — service-personnel devient
+# un second appelant de confiance du même mécanisme IsInternalService,
+# aucun nouveau protocole introduit.
+TENANT_SERVICE_URL = os.environ.get('TENANT_SERVICE_URL', 'http://fultang-tenant-web:8000')
+TENANT_SERVICE_INTERNAL_TOKEN = os.environ.get('TENANT_SERVICE_INTERNAL_TOKEN', '')
+TENANT_SERVICE_TIMEOUT_SECONDS = int(os.environ.get('TENANT_SERVICE_TIMEOUT_SECONDS', '5'))
+
+# Cache TTL du mapping tenant → base (voir api/tenant_routing/cache.py).
+TENANT_DB_CACHE_TTL_SECONDS = int(os.environ.get('TENANT_DB_CACHE_TTL_SECONDS', '300'))
+
+# Connexions persistantes par tenant (voir api/tenant_routing/pool_registry.py
+# pour la distinction avec un vrai pool multi-connexions). Configurable
+# par environnement — jamais une valeur unique figée dans le code ;
+# point d'extension pour une configuration PAR TENANT en Phase 9.
+TENANT_DB_CONN_MAX_AGE = int(os.environ.get('TENANT_DB_CONN_MAX_AGE', '60'))
+
+# Identifiants de connexion PostgreSQL utilisés pour TOUTES les bases
+# tenant de ce service (pas de credential par tenant dans cette phase —
+# aucun Secret Manager n'est encore implémenté dans FullTang, voir Phase
+# 5 §6 et MULTITENANT_ARCHITECTURE.md). `TenantDatabase.secret_reference`
+# n'est PAS utilisé pour se connecter ici : c'est une référence opaque
+# réservée à un futur Secret Manager, pas un mécanisme fonctionnel.
+TENANT_DB_USER = os.environ.get('TENANT_DB_USER', os.environ.get('POSTGRES_USER', 'admin'))
+TENANT_DB_PASSWORD = os.environ.get('TENANT_DB_PASSWORD', os.environ.get('POSTGRES_PASSWORD', 'password'))
 
 
 # Password validation

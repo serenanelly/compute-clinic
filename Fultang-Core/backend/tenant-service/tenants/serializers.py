@@ -23,6 +23,24 @@ class TenantStatusUpdateSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=TenantStatus.choices)
 
 
+class TenantProvisionRequestSerializer(serializers.Serializer):
+    """
+    Payload attendu par POST /tenants/{id}/provision/ (Phase 7).
+
+    `services` est une liste de codes (ex: ["PERSONNEL", "INFRASTRUCTURE"])
+    — pas obligatoirement tout le catalogue plateforme : un tenant peut
+    n'activer qu'un sous-ensemble de services (voir §4 de la tâche).
+    Chaque code est vérifié contre le catalogue PlatformService par
+    `ProvisioningOrchestrator`, pas ici (ce serializer ne fait que la
+    validation de forme : une liste non vide de chaînes).
+    """
+
+    services = serializers.ListField(
+        child=serializers.CharField(max_length=50),
+        allow_empty=False,
+    )
+
+
 class TenantResolutionSerializer(serializers.ModelSerializer):
     """Réponse de GET /tenants/resolve/ — utilisée par la Tenant Resolution (Phase 2.1).
 
@@ -102,3 +120,21 @@ class TenantDatabaseStatusUpdateSerializer(serializers.Serializer):
     """Payload attendu par PATCH /tenant-databases/{id}/status/."""
 
     status = serializers.ChoiceField(choices=TenantDatabaseStatus.choices)
+
+
+class TenantDatabaseResolutionSerializer(serializers.ModelSerializer):
+    """
+    Réponse de GET /tenant-databases/resolve/ — utilisée par le Dynamic
+    Database Router de chaque microservice (Phase 6), réservé à la
+    communication interne (IsInternalService).
+
+    Expose volontairement le strict minimum nécessaire pour ouvrir une
+    connexion (database_name, host, port, status) — jamais
+    `secret_reference` (les credentials réels ne transitent pas par ce
+    canal dans cette phase, voir MULTITENANT_ARCHITECTURE.md) ni `id`/
+    `tenant`/`service`, non nécessaires à l'appelant.
+    """
+
+    class Meta:
+        model = TenantDatabase
+        fields = ['database_name', 'host', 'port', 'status']

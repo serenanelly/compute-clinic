@@ -1,6 +1,7 @@
 import constate from "constate";
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
+import { getGatewayBaseUrl } from "./gatewayUrls";
 
 export const [FultangProvider, useAuthentication] = constate(
   useLogin,
@@ -64,7 +65,7 @@ function useLogin() {
 
   async function login(data) {
     try {
-      const gatewayURL = import.meta.env.VITE_API_GATEWAY_URL || "http://localhost:8080";
+      const gatewayURL = getGatewayBaseUrl();
       console.log('=== TENTATIVE DE CONNEXION (Gateway) ===');
       console.log('URL Gateway:', gatewayURL);
       console.log('Données envoyées:', { email: data.email, password: '***' });
@@ -178,6 +179,68 @@ function useLogin() {
     }
   }
 
+  async function loginPlatformAdmin(data) {
+    // Identité distincte du personnel d'un tenant (voir login() ci-dessus) :
+    // endpoint Gateway dédié, jamais de tenant_id, rôle "platform_admin"
+    // uniquement si le backend (tenant-service) le confirme — jamais
+    // déduit ou fourni par ce frontend.
+    try {
+      const gatewayURL = getGatewayBaseUrl();
+      const response = await axios.post(
+        `${gatewayURL}/auth/platform-admin/login`,
+        { email: data.email, password: data.password }
+      );
+
+      if (response.status === 200 && response.data.access_token) {
+        setIsLoading(false);
+        saveAuthParameters(response.data.access_token, response.data.refresh_token);
+
+        const admin = response.data.user;
+        const roles = admin.roles || [];
+
+        if (!roles.includes('PLATFORM_ADMIN')) {
+          // Ne devrait jamais arriver (le backend ne renvoie ce rôle que
+          // pour un compte PlatformAdmin valide) — refus par prudence.
+          return { success: false, error: "Accès refusé", detail: "Ce compte n'a pas le rôle Platform Admin." };
+        }
+
+        const user = {
+          id: admin.id,
+          idpersonnel: admin.id,
+          nom: admin.nom || '',
+          prenom: admin.prenom || '',
+          email: admin.email,
+          role: 'platform_admin',
+          poste: 'platform_admin',
+        };
+
+        setUserData(user);
+        setUserRole('platform_admin');
+        setIsLogged(true);
+        saveUserData(user, 'platform_admin');
+
+        return { success: true, role: 'platform_admin', message: 'Connexion réussie' };
+      }
+    } catch (error) {
+      setIsLoading(false);
+      if (error.response) {
+        return {
+          success: false,
+          status: error.response.status,
+          error: error.response.data.error || "Erreur d'authentification",
+          detail: error.response.data.detail || "Identifiants invalides"
+        };
+      } else if (error.request) {
+        return {
+          success: false,
+          error: "Erreur de connexion",
+          detail: "Impossible de contacter le serveur. Vérifiez que la Gateway et le backend sont démarrés."
+        };
+      }
+      return { success: false, error: "Erreur", detail: error.message };
+    }
+  }
+
   async function getCurrentUserInfos() {
     const token = localStorage.getItem("token_key_fultang");
     if (token) {
@@ -278,6 +341,7 @@ function useLogin() {
   const authMethods = useMemo(
     () => ({
       login,
+      loginPlatformAdmin,
       setIsLoading,
       isLoading,
       userData,

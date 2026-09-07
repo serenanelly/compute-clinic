@@ -6,13 +6,14 @@ import { useAuthentication } from "../Utils/Provider.jsx";
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { Loading } from "./Loading.jsx";
 
-export function CustomDashboard({ children, linkList, requiredRole }) {
+export function CustomDashboard({ children, linkList, requiredRole, brandLabel = "Fultang Clinic" }) {
 
 
     CustomDashboard.propTypes = {
         children: PropTypes.node.isRequired,
         linkList: PropTypes.array.isRequired,
         requiredRole: PropTypes.string.isRequired,
+        brandLabel: PropTypes.string,
     }
 
 
@@ -123,7 +124,7 @@ export function CustomDashboard({ children, linkList, requiredRole }) {
             <div
                 className="w-[18%] fixed h-screen bg-gradient-to-t from-primary-start to-primary-end flex flex-col overflow-y-auto scrollbar">
                 <h1 className="text-3xl font-bold ml-6 mb-10 mt-7 text-white">
-                    Fultang Clinic
+                    {brandLabel}
                 </h1>
                 <nav className="flex flex-col space-y-1.5 mb-2 ">
                     {linkList.map((item, index) => renderLink(item, index))}

@@ -102,6 +102,18 @@ DATABASES = {
 # non défini = accès refusé par défaut sur GET /tenants/resolve/.
 TENANT_SERVICE_INTERNAL_TOKEN = os.environ.get('TENANT_SERVICE_INTERNAL_TOKEN', '')
 
+# Phase 7 (Tenant Provisioning) : URL du service PERSONNEL, seul service
+# disposant aujourd'hui d'un mécanisme de Dynamic Database Routing
+# (Phase 6) et donc du endpoint interne symétrique
+# POST /api/internal/provision-database/. Voir tenants/provisioning.py
+# (PROVISIONING_CAPABLE_SERVICES) — étendre à un autre service consiste
+# à lui donner l'équivalent de la Phase 6 puis à ajouter une entrée ici,
+# jamais à modifier la logique d'orchestration elle-même.
+PROVISIONING_SERVICE_PERSONNEL_URL = os.environ.get(
+    'PROVISIONING_SERVICE_PERSONNEL_URL', 'http://fultang-personnel:8000',
+)
+PROVISIONING_TIMEOUT_SECONDS = int(os.environ.get('PROVISIONING_TIMEOUT_SECONDS', '30'))
+
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators

@@ -1,3 +1,5 @@
+import uuid
+
 from rest_framework import status
 from rest_framework.test import APITestCase
 from django.db import IntegrityError, transaction
@@ -537,3 +539,341 @@ class TenantDatabaseAPITests(APITestCase):
     def test_model_has_no_password_field(self):
         model_field_names = {f.name for f in TenantDatabase._meta.get_fields()}
         self.assertFalse({'password', 'credential', 'credentials', 'db_password'} & model_field_names)
+
+
+@override_settings(TENANT_SERVICE_INTERNAL_TOKEN=TEST_INTERNAL_TOKEN)
+class TenantDatabaseResolveEndpointTests(APITestCase):
+    """
+    GET /api/tenant-databases/resolve/ — Phase 6, utilisé par le Dynamic
+    Database Router de chaque microservice. Réservé au jeton interne
+    partagé (IsInternalService), pas public, pas PLATFORM_ADMIN.
+    """
+
+    def setUp(self):
+        self.tenant = _make_tenant('hopital-central', 'Hôpital Central')
+        self.personnel = _make_service('PERSONNEL', 'Service Personnel')
+        self.tdb = TenantDatabase.objects.create(
+            tenant=self.tenant, service=self.personnel,
+            database_name='db_hc_personnel', host='fultang-tenant-db',
+            secret_reference='ref-1',
+        )
+        self.tdb.status = TenantDatabaseStatus.ACTIVE
+        self.tdb.save(update_fields=['status'])
+
+    def _resolve(self, tenant_id, service_code, token=None):
+        credentials = {}
+        if token is not None:
+            credentials['HTTP_X_INTERNAL_SERVICE_TOKEN'] = token
+        self.client.credentials(**credentials)
+        return self.client.get('/api/tenant-databases/resolve/', {'tenant': tenant_id, 'service': service_code})
+
+    def test_valid_internal_token_resolves_database(self):
+        response = self._resolve(str(self.tenant.id), 'PERSONNEL', token=TEST_INTERNAL_TOKEN)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['database_name'], 'db_hc_personnel')
+        self.assertEqual(response.data['status'], TenantDatabaseStatus.ACTIVE)
+
+    def test_response_never_includes_secret_reference(self):
+        response = self._resolve(str(self.tenant.id), 'PERSONNEL', token=TEST_INTERNAL_TOKEN)
+        self.assertNotIn('secret_reference', response.data)
+        self.assertNotIn('id', response.data)
+
+    def test_missing_token_is_rejected(self):
+        response = self._resolve(str(self.tenant.id), 'PERSONNEL', token=None)
+        self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_wrong_token_is_rejected(self):
+        response = self._resolve(str(self.tenant.id), 'PERSONNEL', token='wrong-token')
+        self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_platform_admin_role_alone_is_not_sufficient(self):
+        """IsInternalService exige le jeton — un simple rôle PLATFORM_ADMIN ne suffit pas."""
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        response = self.client.get(
+            '/api/tenant-databases/resolve/', {'tenant': str(self.tenant.id), 'service': 'PERSONNEL'},
+        )
+        self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_unknown_tenant_service_pair_returns_404(self):
+        other_tenant = _make_tenant('clinique-paix', 'Clinique de la Paix')
+        response = self._resolve(str(other_tenant.id), 'PERSONNEL', token=TEST_INTERNAL_TOKEN)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_missing_query_params_returns_400(self):
+        self.client.credentials(HTTP_X_INTERNAL_SERVICE_TOKEN=TEST_INTERNAL_TOKEN)
+        response = self.client.get('/api/tenant-databases/resolve/', {'tenant': str(self.tenant.id)})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+# =============================================================================
+# Phase 7 — Tenant Provisioning
+# =============================================================================
+
+from unittest.mock import patch
+
+from .provisioning import (
+    PhysicalProvisioningError,
+    ProvisioningOrchestrator,
+    ServiceNotActiveError,
+    TenantNotActiveForProvisioningError,
+    TenantNotFoundForProvisioningError,
+    UnknownServiceError,
+    _deterministic_database_name,
+)
+
+
+class DeterministicDatabaseNamingTests(TestCase):
+    """§5 : noms de base déterministes, sûrs, sans collision, jamais dérivés d'une entrée libre."""
+
+    def test_name_is_deterministic_for_same_inputs(self):
+        tenant = _make_tenant()
+        self.assertEqual(
+            _deterministic_database_name(tenant.id, 'PERSONNEL'),
+            _deterministic_database_name(tenant.id, 'PERSONNEL'),
+        )
+
+    def test_different_tenants_never_collide(self):
+        tenant_a = _make_tenant('hopital-central', 'Hôpital Central')
+        tenant_b = _make_tenant('clinique-paix', 'Clinique de la Paix')
+        self.assertNotEqual(
+            _deterministic_database_name(tenant_a.id, 'PERSONNEL'),
+            _deterministic_database_name(tenant_b.id, 'PERSONNEL'),
+        )
+
+    def test_different_services_for_same_tenant_never_collide(self):
+        tenant = _make_tenant()
+        self.assertNotEqual(
+            _deterministic_database_name(tenant.id, 'PERSONNEL'),
+            _deterministic_database_name(tenant.id, 'INFRASTRUCTURE'),
+        )
+
+    def test_name_contains_no_dash_and_is_a_safe_sql_identifier_shape(self):
+        tenant = _make_tenant()
+        name = _deterministic_database_name(tenant.id, 'PERSONNEL')
+        self.assertRegex(name, r'^tenant_[0-9a-f]{32}_[a-z0-9_]+$')
+
+
+class ProvisioningOrchestratorTests(TestCase):
+    """
+    §7/§8/§10/§15 : orchestration du provisioning, indépendante du
+    transport HTTP (testée directement contre `ProvisioningOrchestrator`).
+    L'appel physique réel (`_call_physical_provisioning`) est mocké ici —
+    la preuve avec un vrai service-personnel est faite séparément
+    (validation pilote Docker, voir rapport final Phase 7).
+    """
+
+    def setUp(self):
+        self.tenant = _make_tenant()
+        _make_service('PERSONNEL', 'Service Personnel')
+        _make_service('INFRASTRUCTURE', 'Infrastructure')
+        self.orchestrator = ProvisioningOrchestrator()
+
+    def _physical_success(self, service_code, callback_url, tenant_id):
+        return {'database_name': f'tenant_x_{service_code.lower()}', 'host': 'fultang-personnel', 'port': 5432}
+
+    def test_unknown_tenant_raises(self):
+        with self.assertRaises(TenantNotFoundForProvisioningError):
+            self.orchestrator.provision(uuid.uuid4(), ['PERSONNEL'])
+
+    def test_inactive_tenant_raises_and_creates_nothing(self):
+        self.tenant.status = TenantStatus.INACTIVE
+        self.tenant.save(update_fields=['status'])
+
+        with self.assertRaises(TenantNotActiveForProvisioningError):
+            self.orchestrator.provision(self.tenant.id, ['PERSONNEL'])
+
+        self.assertEqual(TenantDatabase.objects.filter(tenant=self.tenant).count(), 0)
+
+    def test_unknown_service_raises_and_creates_nothing(self):
+        with self.assertRaises(UnknownServiceError):
+            self.orchestrator.provision(self.tenant.id, ['PERSONNEL', 'DOES_NOT_EXIST'])
+
+        # Aucune ligne créée, pas même pour PERSONNEL (le service valide) :
+        # la validation amont refuse la demande ENTIÈRE (§15 de la tâche).
+        self.assertEqual(TenantDatabase.objects.filter(tenant=self.tenant).count(), 0)
+
+    def test_inactive_service_raises(self):
+        inactive_service = _make_service('COMPTA_MATIERE', 'Comptabilité Matière')
+        inactive_service.status = 'INACTIVE'
+        inactive_service.save(update_fields=['status'])
+
+        with self.assertRaises(ServiceNotActiveError):
+            self.orchestrator.provision(self.tenant.id, ['COMPTA_MATIERE'])
+
+    def test_capable_service_is_physically_provisioned(self):
+        with patch('tenants.provisioning._call_physical_provisioning', side_effect=self._physical_success):
+            results = self.orchestrator.provision(self.tenant.id, ['PERSONNEL'])
+
+        self.assertEqual(results[0].status, TenantDatabaseStatus.ACTIVE)
+        tenant_database = TenantDatabase.objects.get(tenant=self.tenant, service_id='PERSONNEL')
+        self.assertEqual(tenant_database.status, TenantDatabaseStatus.ACTIVE)
+
+    def test_non_capable_service_is_skipped_and_creates_no_row(self):
+        """§4 de la tâche : ne pas fabriquer une TenantDatabase PENDING qui ne progressera jamais."""
+        results = self.orchestrator.provision(self.tenant.id, ['INFRASTRUCTURE'])
+
+        self.assertEqual(results[0].status, "SKIPPED")
+        self.assertEqual(TenantDatabase.objects.filter(tenant=self.tenant, service_id='INFRASTRUCTURE').count(), 0)
+
+    def test_multiple_services_are_independent(self):
+        """§4/§10 : plusieurs services demandés ensemble, chacun avec son propre résultat indépendant."""
+        with patch('tenants.provisioning._call_physical_provisioning', side_effect=self._physical_success):
+            results = self.orchestrator.provision(self.tenant.id, ['PERSONNEL', 'INFRASTRUCTURE'])
+
+        by_service = {r.service_code: r.status for r in results}
+        self.assertEqual(by_service['PERSONNEL'], TenantDatabaseStatus.ACTIVE)
+        self.assertEqual(by_service['INFRASTRUCTURE'], "SKIPPED")
+
+    def test_idempotent_reprovisioning_of_already_active_service_is_a_noop(self):
+        with patch('tenants.provisioning._call_physical_provisioning', side_effect=self._physical_success) as mock_call:
+            self.orchestrator.provision(self.tenant.id, ['PERSONNEL'])
+            self.orchestrator.provision(self.tenant.id, ['PERSONNEL'])
+
+        mock_call.assert_called_once()  # jamais un second appel physique pour un service déjà ACTIVE
+        self.assertEqual(TenantDatabase.objects.filter(tenant=self.tenant, service_id='PERSONNEL').count(), 1)
+
+    def test_physical_failure_marks_failed_with_reason_and_creates_no_duplicate_row(self):
+        with patch('tenants.provisioning._call_physical_provisioning', side_effect=PhysicalProvisioningError("injoignable")):
+            results = self.orchestrator.provision(self.tenant.id, ['PERSONNEL'])
+
+        self.assertEqual(results[0].status, TenantDatabaseStatus.FAILED)
+        tenant_database = TenantDatabase.objects.get(tenant=self.tenant, service_id='PERSONNEL')
+        self.assertEqual(tenant_database.status, TenantDatabaseStatus.FAILED)
+        self.assertIn("injoignable", tenant_database.last_error)
+
+    def test_retry_after_failure_succeeds_and_clears_error(self):
+        with patch('tenants.provisioning._call_physical_provisioning', side_effect=PhysicalProvisioningError("injoignable")):
+            self.orchestrator.provision(self.tenant.id, ['PERSONNEL'])
+
+        with patch('tenants.provisioning._call_physical_provisioning', side_effect=self._physical_success):
+            results = self.orchestrator.provision(self.tenant.id, ['PERSONNEL'])
+
+        self.assertEqual(results[0].status, TenantDatabaseStatus.ACTIVE)
+        tenant_database = TenantDatabase.objects.get(tenant=self.tenant, service_id='PERSONNEL')
+        self.assertEqual(tenant_database.status, TenantDatabaseStatus.ACTIVE)
+        self.assertEqual(tenant_database.last_error, '')
+
+    def test_concurrent_provisioning_claims_exactly_once(self):
+        """
+        §8 : simule la course entre deux appels concurrents pour le même
+        (tenant, service) — seul celui qui gagne le CAS
+        (claim_for_provisioning) déclenche l'appel physique.
+        """
+        tenant_database, _ = self.orchestrator._tenant_databases.get_or_create_declarative(
+            tenant_id=self.tenant.id, service_code='PERSONNEL',
+            database_name='tenant_x_personnel', host='', port=5432, secret_reference='shared:x',
+        )
+
+        first_claim = self.orchestrator._tenant_databases.claim_for_provisioning(tenant_database.id)
+        second_claim = self.orchestrator._tenant_databases.claim_for_provisioning(tenant_database.id)
+
+        self.assertTrue(first_claim)
+        self.assertFalse(second_claim)
+
+
+@override_settings(TENANT_SERVICE_INTERNAL_TOKEN=TEST_INTERNAL_TOKEN)
+class TenantProvisionEndpointTests(APITestCase):
+    """POST /api/tenants/{id}/provision/ — permissions, validations amont, réponse structurée."""
+
+    def setUp(self):
+        self.tenant = _make_tenant()
+        _make_service('PERSONNEL', 'Service Personnel')
+
+    def _provision(self, tenant_id, services, headers=None):
+        self.client.credentials(**(headers or {}))
+        return self.client.post(f'/api/tenants/{tenant_id}/provision/', {'services': services}, format='json')
+
+    def test_anonymous_is_rejected(self):
+        response = self._provision(self.tenant.id, ['PERSONNEL'])
+        self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_business_admin_role_is_rejected(self):
+        response = self._provision(self.tenant.id, ['PERSONNEL'], ADMIN_HEADERS)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unknown_tenant_returns_404(self):
+        response = self._provision(uuid.uuid4(), ['PERSONNEL'], PLATFORM_ADMIN_HEADERS)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_inactive_tenant_returns_409(self):
+        self.tenant.status = TenantStatus.INACTIVE
+        self.tenant.save(update_fields=['status'])
+        response = self._provision(self.tenant.id, ['PERSONNEL'], PLATFORM_ADMIN_HEADERS)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+
+    def test_unknown_service_returns_400(self):
+        response = self._provision(self.tenant.id, ['NOT_A_SERVICE'], PLATFORM_ADMIN_HEADERS)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_empty_services_list_returns_400(self):
+        response = self._provision(self.tenant.id, [], PLATFORM_ADMIN_HEADERS)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_valid_request_returns_per_service_results(self):
+        with patch(
+            'tenants.provisioning._call_physical_provisioning',
+            return_value={'database_name': 'tenant_x_personnel', 'host': 'fultang-personnel', 'port': 5432},
+        ):
+            response = self._provision(self.tenant.id, ['PERSONNEL'], PLATFORM_ADMIN_HEADERS)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['results'][0]['service'], 'PERSONNEL')
+        self.assertEqual(response.data['results'][0]['status'], TenantDatabaseStatus.ACTIVE)
+
+
+# =============================================================================
+# Platform Admin — Login (frontend Platform Admin, étape de démonstration)
+# =============================================================================
+
+from django.contrib.auth.hashers import make_password
+
+from .models import PlatformAdmin
+
+
+class PlatformAdminAuthVerifyTests(APITestCase):
+    """
+    POST /api/platform-admin/login/ — seul endroit du backend qui peut
+    faire naître le rôle PLATFORM_ADMIN dans un JWT (voir Gateway
+    /auth/platform-admin/login, qui appelle cet endpoint).
+    """
+
+    def setUp(self):
+        self.email = 'platform-admin-test@fultang.local'
+        self.password = 'CorrectHorseBatteryStaple1!'
+        self.admin = PlatformAdmin.objects.create(
+            email=self.email, password=make_password(self.password), nom='Test', prenom='Admin',
+        )
+
+    def _login(self, email, password):
+        return self.client.post('/api/platform-admin/login/', {'email': email, 'password': password}, format='json')
+
+    def test_valid_credentials_return_platform_admin_role(self):
+        response = self._login(self.email, self.password)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['roles'], ['PLATFORM_ADMIN'])
+        self.assertEqual(response.data['email'], self.email)
+        self.assertNotIn('password', response.data)
+
+    def test_wrong_password_is_rejected(self):
+        response = self._login(self.email, 'wrong-password')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_unknown_email_is_rejected(self):
+        response = self._login('nobody@fultang.local', self.password)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_inactive_account_is_rejected(self):
+        self.admin.is_active = False
+        self.admin.save(update_fields=['is_active'])
+        response = self._login(self.email, self.password)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_missing_fields_return_400(self):
+        response = self.client.post('/api/platform-admin/login/', {'email': self.email}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_no_authentication_required_to_attempt_login(self):
+        """Symétrique de AuthVerifyView (service-personnel) : précède toute authentification DRF."""
+        self.client.credentials()  # aucun header d'identité
+        response = self._login(self.email, self.password)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)

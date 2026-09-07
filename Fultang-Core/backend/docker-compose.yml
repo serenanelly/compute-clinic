@@ -28,6 +28,17 @@ services:
       - POSTGRES_PASSWORD=password
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
+      # Phase 6 (Dynamic Database Routing) : communication interne vers
+      # le Tenant Registry, même jeton partagé que la Gateway (dev
+      # uniquement — à surcharger via un .env / secret en production).
+      - TENANT_SERVICE_URL=http://fultang-tenant-web:8000
+      - TENANT_SERVICE_INTERNAL_TOKEN=${TENANT_SERVICE_INTERNAL_TOKEN:-dev-local-only-shared-secret-change-me}
+      # Credentials PostgreSQL partagés pour TOUTES les bases tenant de ce
+      # service dans cette phase (pas de Secret Manager — voir Phase 5 §6
+      # et MULTITENANT_ARCHITECTURE.md §9.2.9). Par défaut, identiques à
+      # POSTGRES_USER/PASSWORD ci-dessus.
+      - TENANT_DB_USER=admin
+      - TENANT_DB_PASSWORD=password
     # Bind-mount du code source (comme les autres microservices) : les modifs
     # sont prises en compte par runserver sans rebuild d'image.
     volumes:

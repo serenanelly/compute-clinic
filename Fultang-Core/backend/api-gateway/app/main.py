@@ -641,6 +641,53 @@ async def login(credentials: LoginCredentials, request: Request):
         raise HTTPException(status_code=503, detail="Service Personnel indisponible")
 
 
+@app.post(
+    "/auth/platform-admin/login", response_model=TokenResponse, tags=["Authentification"],
+    summary="Connexion Platform Admin",
+)
+@limiter.limit("5/minute")
+async def platform_admin_login(credentials: LoginCredentials, request: Request):
+    """
+    Authentifie une identité PLATFORM_ADMIN — distincte de `/auth/login`
+    (comptes métier d'un tenant).
+
+    Un PLATFORM_ADMIN n'appartient à AUCUN tenant : contrairement à
+    `/auth/login`, cet endpoint ne résout JAMAIS de tenant depuis le
+    hostname et n'inclut jamais de `tenant_id` dans le JWT émis — le rôle
+    et l'identité viennent exclusivement de `tenant-service`
+    (`PlatformAdminAuthVerifyView`), jamais du client.
+    """
+    try:
+        response = await client.post(
+            f"{settings.SERVICE_TENANT_URL}/api/platform-admin/login/",
+            json=credentials.dict(),
+        )
+        if response.status_code != 200:
+            raise HTTPException(status_code=401, detail="Identifiants invalides")
+
+        user_data = response.json()
+
+        token_claims = {
+            "sub": str(user_data["id"]),
+            "tenant_id": None,
+            "roles": user_data.get("roles") or [],
+            "email": user_data.get("email") or "",
+            "nom": user_data.get("nom") or "",
+            "prenom": user_data.get("prenom") or "",
+        }
+        access_token = create_access_token(data=token_claims)
+        refresh_token = create_refresh_token(data=token_claims)
+
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "user": user_data,
+        }
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="Tenant Service indisponible")
+
+
 @app.post("/auth/refresh", response_model=TokenRefreshResponse, tags=["Authentification"], summary="Rafraîchir l'access token")
 async def refresh_token(body: RefreshRequest):
     """Renouvelle l'access token à partir d'un refresh token valide, en conservant son contexte tenant."""

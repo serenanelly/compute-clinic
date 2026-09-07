@@ -1,9 +1,10 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    ServiceViewSet, MedecinViewSet, MedecinGeneralisteViewSet, InfirmiereViewSet, ReceptionnisteViewSet, 
-    ComptableFinancierViewSet, ComptableMatiereViewSet, LaborantinViewSet, 
-    PharmacienViewSet, DirecteurViewSet, AdminViewSet, AuthVerifyView, PersonnelViewSet
+    ServiceViewSet, MedecinViewSet, MedecinGeneralisteViewSet, InfirmiereViewSet, ReceptionnisteViewSet,
+    ComptableFinancierViewSet, ComptableMatiereViewSet, LaborantinViewSet,
+    PharmacienViewSet, DirecteurViewSet, AdminViewSet, AuthVerifyView, PersonnelViewSet,
+    ProvisionDatabaseView,
 )
 
 router = DefaultRouter()
@@ -22,5 +23,6 @@ router.register(r'personnel', PersonnelViewSet, basename='personnel')
 
 urlpatterns = [
     path('auth/verify/', AuthVerifyView.as_view(), name='auth-verify'),
+    path('internal/provision-database/', ProvisionDatabaseView.as_view(), name='internal-provision-database'),
     path('', include(router.urls)),
 ]

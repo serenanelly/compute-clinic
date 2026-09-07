@@ -16,6 +16,10 @@ from rest_framework.views import APIView
 from rest_framework import status
 from django.contrib.auth.hashers import check_password
 
+from .permissions import IsInternalService
+from .tenant_routing.context import set_tenant_context
+from .tenant_routing.pool_registry import DatabaseProvisioningError, provision_database
+
 @extend_schema_view(
     list=extend_schema(summary="Lister tous les services", description="Récupère la liste de tous les services médicaux et administratifs de l'hôpital."),
     retrieve=extend_schema(summary="Récupérer un service", description="Récupère les détails d'un service spécifique de l'hôpital."),
@@ -232,6 +236,14 @@ class AuthVerifyView(APIView):
     Le même email peut désormais exister dans deux tenants différents : ce
     sont deux comptes distincts, la recherche est donc systématiquement
     scopée par (email, tenant_id).
+
+    Phase 6 (Dynamic Database Routing) : ce endpoint précède toute
+    authentification DRF (authentication_classes = []), donc
+    GatewayHeaderAuthentication ne s'exécute jamais ici — c'est pourquoi
+    le Tenant Context est établi EXPLICITEMENT ci-dessous, à partir du
+    même `tenant_id` que la Gateway a résolu par Tenant Resolution
+    (jamais un paramètre libre : c'est la même valeur de confiance que
+    reçoit AuthVerifyView depuis toujours, voir Phase 3).
     """
     permission_classes = []
     authentication_classes = []
@@ -243,6 +255,15 @@ class AuthVerifyView(APIView):
 
         if not email or not password:
             return Response({"detail": "Email et mot de passe requis"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Doit être fait AVANT tout accès ORM ci-dessous (y compris les
+        # logs de debug qui suivent) — voir tenant_routing/router.py.
+        # Les exceptions de routage (base indisponible/non provisionnée,
+        # Registry injoignable) ne sont PAS interceptées ici : le
+        # gestionnaire d'exceptions global (api.exceptions, EXCEPTION_HANDLER)
+        # les traduit uniformément en 503, pour cette vue comme pour
+        # toutes les autres — jamais de repli vers une autre base.
+        set_tenant_context(tenant_id)
 
         # DEBUG LOGS
         print(f"Tentative de connexion pour: {email} (tenant_id={tenant_id})")
@@ -567,3 +588,44 @@ class PersonnelViewSet(viewsets.ViewSet):
             "consultations": 0,
             "rendezvous": 0
         })
+
+
+class ProvisionDatabaseView(APIView):
+    """
+    POST /api/internal/provision-database/ — Tenant Provisioning (Phase 7).
+
+    Endpoint interne symétrique de `tenant-service`'s
+    `POST /tenants/{id}/provision/` : tenant-service appelle CE endpoint
+    pour déclencher la création physique réelle de la base PostgreSQL
+    d'un tenant pour ce service, puis l'initialisation de son schéma.
+
+    Comme `AuthVerifyView`, ce endpoint ne passe jamais par
+    `GatewayHeaderAuthentication` (il n'est pas appelé via la Gateway,
+    mais directement par tenant-service — communication service-to-service
+    directe, décision déjà actée en Phase 4/6) : l'autorisation repose
+    entièrement sur `IsInternalService` (jeton partagé
+    TENANT_SERVICE_INTERNAL_TOKEN, même mécanisme que
+    `tenant_routing/registry_client.py` dans l'autre sens).
+
+    Ne reçoit QUE `tenant_id` — jamais un nom de base fourni par
+    l'appelant : ce service dérive lui-même le nom physique (voir
+    `pool_registry.provision_database`), il ne fait jamais confiance à
+    une chaîne SQL reçue par le réseau, même d'un appelant de confiance.
+    """
+    authentication_classes = []
+    permission_classes = [IsInternalService]
+
+    def post(self, request):
+        tenant_id = request.data.get('tenant_id')
+        if not tenant_id:
+            return Response({'detail': "Le champ 'tenant_id' est requis."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            result = provision_database(tenant_id)
+        except DatabaseProvisioningError as exc:
+            return Response(
+                {'detail': "Provisioning physique échoué.", 'error': str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response(result, status=status.HTTP_200_OK)
