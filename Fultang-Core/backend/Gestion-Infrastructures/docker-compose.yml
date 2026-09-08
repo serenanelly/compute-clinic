@@ -29,6 +29,10 @@ services:
       - "8002:8000"
     environment:
       - DB_HOST=infrastructure-db
+      - TENANT_SERVICE_URL=http://fultang-tenant-web:8000
+      - TENANT_SERVICE_INTERNAL_TOKEN=${TENANT_SERVICE_INTERNAL_TOKEN:-dev-local-only-shared-secret-change-me}
+      - TENANT_DB_USER=infrastructure_user
+      - TENANT_DB_PASSWORD=password
     depends_on:
       infrastructure-db:
         condition: service_healthy

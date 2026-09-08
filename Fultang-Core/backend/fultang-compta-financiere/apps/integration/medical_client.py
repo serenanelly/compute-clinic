@@ -101,10 +101,24 @@ def _extract_bearer_token(auth_header: str | None) -> str | None:
 
 
 def _get(path: str, token: str | None = None, timeout: int = 8) -> dict | list | None:
-    """GET Medical API — essaie le service interne puis la Gateway (JWT requis)."""
+    """GET Medical API — essaie le service interne puis la Gateway (JWT requis).
+
+    Transmet X-Tenant-ID (Tenant Context courant — voir
+    config/tenant_routing/context.py) sur les DEUX chemins : la Gateway
+    ET le repli direct SERVICE_MEDICAL_URL (qui contourne la Gateway).
+    Sans ce header, un appel direct qui aboutirait accidentellement
+    perdrait silencieusement le tenant courant côté Medical-Monitoring.
+    Absent si aucun Tenant Context réel n'est établi (pool non assigné,
+    ou hors cycle de requête) — jamais envoyé comme la chaîne "None".
+    """
     headers = {'Accept': 'application/json'}
     if token:
         headers['Authorization'] = f'Bearer {token}'
+
+    from config.tenant_routing.context import get_current_tenant_context
+    tenant_context = get_current_tenant_context()
+    if tenant_context is not None and tenant_context.tenant_id:
+        headers['X-Tenant-ID'] = tenant_context.tenant_id
 
     # Gateway en premier : le JWT auth/personnel est accepté ; l'appel direct Medical renvoie souvent 401.
     bases = [_gateway_medical_url(), f'{_base_url()}{API_PREFIX}']

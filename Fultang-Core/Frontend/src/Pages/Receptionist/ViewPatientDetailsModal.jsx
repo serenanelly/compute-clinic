@@ -4,15 +4,17 @@ import userIcon from "../../assets/userIcon.png";
 import { Mail, Phone, MapPin, Calendar, User, XIcon, Heart, Users, Briefcase, Hash, Loader2 } from 'lucide-react';
 import { getPatientDossier } from "../../services/medicalDossierApi.js";
 import { mapDossierToForm, mapListPatientToForm } from "../../services/patientRegistrationApi.js";
-
-const MEDICAL_BASE = import.meta.env.VITE_BACKEND_FULTANG_API_BASE_MEDICALSTAFF_URL?.replace(/\/$/, '') || 'http://localhost:8080/medical';
+import { getGatewayBaseUrl } from "../../Utils/gatewayUrls";
 
 /** Construit l'URL complète d'une photo patient (chemin relatif ou absolu). */
 const resolvePhotoUrl = (photo) => {
     if (!photo) return null;
     if (photo.startsWith('http') || photo.startsWith('data:')) return photo;
     // Chemin relatif Django ex: /media/patients/photos/patient_xxx.png
-    return `${MEDICAL_BASE}${photo}`;
+    // getGatewayBaseUrl() cible le hostname courant (résolution de tenant
+    // par sous-domaine) — un env var statique enverrait cette requête vers
+    // un hostname fixe au lieu du tenant réellement ouvert dans le navigateur.
+    return `${getGatewayBaseUrl()}/medical${photo}`;
 };
 
 export function ViewPatientDetailsModal({ isOpen, patient, onClose }) {

@@ -57,6 +57,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'config.tenant_routing.middleware.TenantContextCleanupMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -91,6 +92,19 @@ DATABASES = {
         'PORT': os.environ.get('DB_PORT', '5432'),
     }
 }
+
+DATABASE_ROUTERS = ['config.tenant_routing.router.TenantDatabaseRouter']
+
+# Tenant Registry (tenant-service) — communication service-to-service
+# directe pour résoudre/provisionner la base PostgreSQL de chaque tenant
+# pour ce service (voir config/tenant_routing/).
+TENANT_SERVICE_URL = os.environ.get('TENANT_SERVICE_URL', 'http://fultang-tenant-web:8000')
+TENANT_SERVICE_INTERNAL_TOKEN = os.environ.get('TENANT_SERVICE_INTERNAL_TOKEN', '')
+TENANT_SERVICE_TIMEOUT_SECONDS = int(os.environ.get('TENANT_SERVICE_TIMEOUT_SECONDS', '5'))
+TENANT_DB_CACHE_TTL_SECONDS = int(os.environ.get('TENANT_DB_CACHE_TTL_SECONDS', '300'))
+TENANT_DB_CONN_MAX_AGE = int(os.environ.get('TENANT_DB_CONN_MAX_AGE', '60'))
+TENANT_DB_USER = os.environ.get('TENANT_DB_USER', 'infrastructure_user')
+TENANT_DB_PASSWORD = os.environ.get('TENANT_DB_PASSWORD', 'password')
 
 
 # Password validation

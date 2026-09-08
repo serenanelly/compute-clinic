@@ -30,6 +30,10 @@ services:
       DJANGO_SECRET_KEY: django-insecure-m-t$k@#v@q^4-@-(0*@d7o#*e^p-@!#0*(0-@*0*@*0*@*0*
       DJANGO_DEBUG: "True"
       DJANGO_ALLOWED_HOSTS: "*"
+      TENANT_SERVICE_URL: http://fultang-tenant-web:8000
+      TENANT_SERVICE_INTERNAL_TOKEN: ${TENANT_SERVICE_INTERNAL_TOKEN:-dev-local-only-shared-secret-change-me}
+      TENANT_DB_USER: nehemie
+      TENANT_DB_PASSWORD: nehemie
     depends_on:
       compta-matiere-db:
         condition: service_healthy

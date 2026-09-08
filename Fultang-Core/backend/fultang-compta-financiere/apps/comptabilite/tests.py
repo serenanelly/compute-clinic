@@ -14,6 +14,32 @@ from apps.comptabilite.models import (
     ExerciceComptable, BudgetPrevisionnel, PrestationDeService,
 )
 from apps.sorties.models import CategorieSortie
+from config.tenant_routing.context import reset_tenant_context, set_tenant_context
+
+_tenant_context_token = None
+
+
+def setUpModule():
+    """
+    Établit un Tenant Context "pool non assigné" (tenant_id=None) pour
+    toute la durée de ce module de tests.
+
+    Nécessaire depuis l'introduction du routage multi-tenant
+    (DATABASE_ROUTERS, voir config/tenant_routing/) : le router refuse
+    désormais toute requête ORM faite sans qu'un Tenant Context ait
+    jamais été établi (TenantContextMissingError). Ce module crée des
+    objets directement en base (setUp/helpers), hors du cycle
+    requête/réponse qui établirait normalement ce contexte via
+    GatewayHeaderAuthentication — on le simule donc ici explicitement,
+    avec tenant_id=None (pool non assigné), qui route vers 'default',
+    exactement la base déjà utilisée par ces tests avant le multi-tenant.
+    """
+    global _tenant_context_token
+    _tenant_context_token = set_tenant_context(None)
+
+
+def tearDownModule():
+    reset_tenant_context(_tenant_context_token)
 
 
 def creer_compte(numero='571', libelle='Caisse', classe='5', type_c='tresorerie'):

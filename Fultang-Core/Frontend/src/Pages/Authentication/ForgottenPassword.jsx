@@ -5,6 +5,7 @@ import { Link } from 'react-router-dom';
 import axiosInstance from "../../Utils/axiosInstance.js";
 import loginBackground from "../../assets/logIn.png";
 import axios from "axios";
+import { getGatewayBaseUrl } from "../../Utils/gatewayUrls";
 
 export function ForgottenPassword() {
     const [email, setEmail] = useState("");
@@ -34,7 +35,11 @@ export function ForgottenPassword() {
         setLoading(true);
         setError("");
         try {
-            const gatewayURL = import.meta.env.VITE_API_GATEWAY_URL || "http://localhost:8080";
+            // getGatewayBaseUrl() cible le hostname courant (résolution de
+            // tenant par sous-domaine) — un env var statique enverrait cet
+            // appel vers un hostname fixe au lieu du tenant réellement
+            // ouvert dans le navigateur.
+            const gatewayURL = getGatewayBaseUrl();
             const response = await axios.post(
                 `${gatewayURL}/personnel/personnel/reset-password/`,
                 {

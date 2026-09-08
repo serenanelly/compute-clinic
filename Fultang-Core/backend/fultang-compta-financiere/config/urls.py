@@ -8,6 +8,8 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
+from config.views import ProvisionDatabaseView
+
 
 @api_view(['GET'])
 def health_check(request):
@@ -25,6 +27,12 @@ urlpatterns = [
     # JWT
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    # Provisioning interne (tenant-service → compta-financiere)
+    path(
+        'api/internal/provision-database/',
+        ProvisionDatabaseView.as_view(),
+        name='internal-provision-database',
+    ),
     # Apps
     path('api/', include('apps.comptabilite.urls')),
     path('api/', include('apps.caisse.urls')),

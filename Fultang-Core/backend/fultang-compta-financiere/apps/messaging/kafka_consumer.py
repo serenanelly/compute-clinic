@@ -14,6 +14,7 @@ from apps.messaging.patient_cache import (
     mark_event_processed,
     upsert_patient,
 )
+from config.tenant_routing.context import reset_tenant_context, set_tenant_context
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,21 @@ _handlers: dict[str, callable] = {}
 
 
 def handle_patient_cree(event: dict) -> None:
+    # `patient.cree` n'a aujourd'hui AUCUN producteur dans tout le dépôt
+    # FullTang (vérifié) : cet événement ne portera donc jamais de
+    # tenant_id réel tant qu'un service ne le produit pas correctement.
+    # Écrire quand même dans PatientCache reviendrait à deviner un
+    # rattachement tenant (ou à écrire silencieusement dans le pool non
+    # assigné) — on refuse explicitement l'écriture plutôt que de
+    # deviner, même pattern défensif que medical_workflow/signals.py
+    # côté Medical-Monitoring.
+    if not event.get('tenant_id'):
+        logger.warning(
+            "[Kafka] patient.cree reçu sans tenant_id (aucun producteur "
+            "de cet événement ne le transmet encore) — écriture "
+            "PatientCache ignorée: %s", event.get('patient_id'),
+        )
+        return
     upsert_patient(event)
     logger.info('[Kafka] PatientCache mis à jour: %s', event.get('patient_id'))
 
@@ -49,15 +65,38 @@ def handle_audit_from_event(event: dict) -> None:
 
 
 def _dispatch(topic: str, payload: dict) -> None:
+    """
+    Point d'entrée UNIQUE avant toute écriture (ou lecture) ORM
+    déclenchée par un message Kafka consommé — `is_event_processed`/
+    `mark_event_processed` (app `messaging`, tenant-scopée) ET le
+    handler métier sont tous les deux concernés.
+
+    Le consumer tourne dans un thread daemon séparé (voir
+    `_consumer_loop`) : ce thread n'a JAMAIS hérité du Tenant Context du
+    thread qui a publié l'événement (un `threading.Thread` n'hérite pas
+    des contextvars du thread appelant — vérifié empiriquement lors des
+    chantiers service-personnel/Medical-Monitoring, voir
+    medical_workflow/signals.py côté Medical-Monitoring pour le même
+    problème). Le tenant est donc rétabli explicitement ICI, à partir du
+    `tenant_id` transporté dans le payload lui-même (voir events.py),
+    AVANT le premier accès ORM, puis nettoyé dans un `finally` — jamais
+    de fuite d'un message au suivant, même mécanisme que
+    TenantContextCleanupMiddleware pour les requêtes HTTP.
+    """
     event_id = payload.get('event_id')
     if not event_id:
         return
-    if is_event_processed(str(event_id)):
-        return
-    handler = _handlers.get(topic)
-    if handler:
-        handler(payload)
-    mark_event_processed(str(event_id), topic)
+
+    token = set_tenant_context(payload.get('tenant_id'))
+    try:
+        if is_event_processed(str(event_id)):
+            return
+        handler = _handlers.get(topic)
+        if handler:
+            handler(payload)
+        mark_event_processed(str(event_id), topic)
+    finally:
+        reset_tenant_context(token)
 
 
 def register_handlers() -> None:

@@ -5,6 +5,8 @@ Usage : python manage.py seed_initial
 from django.core.management.base import BaseCommand
 from django.db import transaction
 
+from config.tenant_routing.context import set_tenant_context
+
 
 COMPTES = [
     # Classe 1 — Capitaux
@@ -121,6 +123,14 @@ class Command(BaseCommand):
         from apps.sorties.models import CategorieSortie
         from apps.comptabilite.models import PrestationDeService
         from datetime import date
+
+        # Phase 8 (tenant_routing) : cette commande seed le pool NON ASSIGNÉ
+        # ('default'), pas un tenant réel — exactement comme seed_data.py côté
+        # service-personnel. Sans ce contexte explicite, le TenantDatabaseRouter
+        # lève TenantContextMissingError (aucune requête HTTP en cours ici).
+        # Process à usage unique (le conteneur enchaîne migrate/seed_initial/
+        # runserver comme 3 process séparés) : pas besoin de reset après coup.
+        set_tenant_context(None)
 
         with transaction.atomic():
             self.stdout.write('📊 Création du plan comptable OHADA...')

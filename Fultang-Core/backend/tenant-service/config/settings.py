@@ -117,6 +117,19 @@ PROVISIONING_SERVICE_PERSONNEL_URL = os.environ.get(
 PROVISIONING_SERVICE_MEDICAL_URL = os.environ.get(
     'PROVISIONING_SERVICE_MEDICAL_URL', 'http://fultang-medical-backend:8000',
 )
+# Phase 8 (finalisation multi-tenance) : fultang-compta-financiere,
+# ComptaMatiere et Gestion-Infrastructures reçoivent à leur tour un
+# tenant_routing/ symétrique à celui de service-personnel/Medical-Monitoring
+# — voir tenants/provisioning.py (PROVISIONING_CAPABLE_SERVICES).
+PROVISIONING_SERVICE_COMPTA_URL = os.environ.get(
+    'PROVISIONING_SERVICE_COMPTA_URL', 'http://fultang-compta-financiere-backend:8000',
+)
+PROVISIONING_SERVICE_COMPTA_MATIERE_URL = os.environ.get(
+    'PROVISIONING_SERVICE_COMPTA_MATIERE_URL', 'http://fultang-compta-matiere-backend:8000',
+)
+PROVISIONING_SERVICE_INFRASTRUCTURE_URL = os.environ.get(
+    'PROVISIONING_SERVICE_INFRASTRUCTURE_URL', 'http://fultang-infrastructure-web:8000',
+)
 PROVISIONING_TIMEOUT_SECONDS = int(os.environ.get('PROVISIONING_TIMEOUT_SECONDS', '30'))
 
 

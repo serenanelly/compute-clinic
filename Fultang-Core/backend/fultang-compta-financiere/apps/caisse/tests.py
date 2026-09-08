@@ -9,6 +9,19 @@ from rest_framework import status
 from apps.comptabilite.models import CompteComptable, Journal, ExerciceComptable
 from apps.caisse.models import Quittance, CaisseJournaliere
 from config.authentication import GatewayHeaderAuthentication
+from config.tenant_routing.context import reset_tenant_context, set_tenant_context
+
+_tenant_context_token = None
+
+
+def setUpModule():
+    """Voir apps/comptabilite/tests.py::setUpModule pour l'explication complète."""
+    global _tenant_context_token
+    _tenant_context_token = set_tenant_context(None)
+
+
+def tearDownModule():
+    reset_tenant_context(_tenant_context_token)
 
 
 def setup_base():
@@ -115,6 +128,15 @@ class GatewayHeaderAuthenticationTenantTests(TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.auth = GatewayHeaderAuthentication()
+        # authenticate() est appelé ici directement (hors cycle de
+        # requête HTTP réel), donc sans TenantContextCleanupMiddleware
+        # pour nettoyer le Tenant Context qu'il établit désormais —
+        # on le fait nous-mêmes pour ne jamais laisser fuir un tenant_id
+        # de test vers les classes de test suivantes du même module
+        # (ex: CaisseJournaliereTests/QuittanceTests, qui créent des
+        # objets en base hors requête et attendent le contexte neutre
+        # de setUpModule).
+        self.addCleanup(lambda: set_tenant_context(None))
 
     def test_authenticate_exposes_tenant_id_from_header(self):
         request = self.factory.get(

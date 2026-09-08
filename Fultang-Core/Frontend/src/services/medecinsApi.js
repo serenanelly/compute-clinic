@@ -1,4 +1,5 @@
 import axiosInstance from '../Utils/axiosInstance';
+import { getGatewayBaseUrl } from '../Utils/gatewayUrls';
 
 /**
  * Service API pour les fonctionnalités médecin
@@ -15,14 +16,16 @@ export const getPatientsEnAttente = async (serviceName) => {
     return response.data;
 };
 
-const gatewayUrl = (import.meta.env.VITE_BACKEND_FULTANG_API_BASE_MEDICALSTAFF_URL || "http://localhost:8080/medical").replace(/\/medical\/?$/, '');
-const PERSONNEL_BASE_URL = `${gatewayUrl}/personnel/personnel`;
+// getGatewayBaseUrl() cible le hostname courant (résolution de tenant par
+// sous-domaine) — un env var statique enverrait ces deux appels vers un
+// hostname fixe au lieu du tenant réellement ouvert dans le navigateur.
+const PERSONNEL_BASE_URL = () => `${getGatewayBaseUrl()}/personnel/personnel`;
 
 /**
  * Récupère la liste de tous les médecins
  */
 export const getAllMedecins = async () => {
-    const response = await axiosInstance.get(`${PERSONNEL_BASE_URL}/`, {
+    const response = await axiosInstance.get(`${PERSONNEL_BASE_URL()}/`, {
         params: { poste: 'medecin' }
     });
     return response.data;
@@ -33,7 +36,7 @@ export const getAllMedecins = async () => {
  * @param {Object} data - Données du médecin (nom, prenom, email, specialite, etc.)
  */
 export const createMedecin = async (data) => {
-    const response = await axiosInstance.post(`${PERSONNEL_BASE_URL}/`, data);
+    const response = await axiosInstance.post(`${PERSONNEL_BASE_URL()}/`, data);
     return response.data;
 };
 

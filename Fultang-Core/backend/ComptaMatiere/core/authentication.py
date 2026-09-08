@@ -17,6 +17,8 @@ from rest_framework import authentication
 from rest_framework import exceptions
 from django.contrib.auth.models import AnonymousUser
 
+from .tenant_routing.context import set_tenant_context
+
 class GatewayUser:
     """
     Objet utilisateur abstrait représentant l'identité transmise par la Gateway.
@@ -50,6 +52,11 @@ class GatewayHeaderAuthentication(authentication.BaseAuthentication):
         roles = user_roles_str.split(',') if user_roles_str else []
 
         user = GatewayUser(user_id=user_id, roles=roles, tenant_id=tenant_id)
+
+        # Établit le Tenant Context pour le Database Router. Le token
+        # n'a pas besoin d'être conservé ici : le nettoyage en fin de
+        # requête est garanti par TenantContextCleanupMiddleware.
+        set_tenant_context(tenant_id)
 
         # Retourne (user, auth_info)
         return (user, None)

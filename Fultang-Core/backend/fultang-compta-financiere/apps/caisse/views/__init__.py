@@ -315,6 +315,7 @@ class QuittanceViewSet(viewsets.ModelViewSet):
         from apps.comptabilite.audit_helper import audit_action
         from apps.messaging.events import QuittanceValideeEvent, build_event, TOPIC_QUITTANCE_VALIDEE
         from apps.messaging.kafka_producer import publish_event
+        from config.tenant_routing.context import get_current_tenant_context
 
         logger = logging.getLogger(__name__)
         try:
@@ -326,11 +327,13 @@ class QuittanceViewSet(viewsets.ModelViewSet):
         except Exception as exc:
             logger.warning('[Quittance] audit validation ignoré: %s', exc)
         try:
+            tenant_ctx = get_current_tenant_context()
             event = QuittanceValideeEvent(
                 quittance_id=quittance.id,
                 patient_id=str(quittance.patient_id) if quittance.patient_id else None,
                 montant=str(quittance.montant),
                 session_id=quittance.session_id,
+                tenant_id=tenant_ctx.tenant_id if tenant_ctx else None,
             )
             publish_event(TOPIC_QUITTANCE_VALIDEE, build_event(event), key=str(quittance.id))
         except Exception as exc:
@@ -728,18 +731,21 @@ class CaisseJournaliereViewSet(viewsets.ModelViewSet):
         from apps.comptabilite.audit_helper import audit_action
         from apps.messaging.events import CaisseFermeeEvent, build_event, TOPIC_CAISSE_FERMEE
         from apps.messaging.kafka_producer import publish_event
+        from config.tenant_routing.context import get_current_tenant_context
 
         audit_action(
             request, 'cloture', 'caisse',
             f'Fermeture caisse {caisse.date}',
             objet_id=caisse.id,
         )
+        tenant_ctx = get_current_tenant_context()
         event = CaisseFermeeEvent(
             caisse_id=caisse.id,
             montant_total=str(caisse.solde_physique or 0),
             ecart=str(caisse.ecart or 0),
             date=str(caisse.date),
             caissier_id=caisse.caissier_id,
+            tenant_id=tenant_ctx.tenant_id if tenant_ctx else None,
         )
         publish_event(TOPIC_CAISSE_FERMEE, build_event(event), key=str(caisse.id))
         return Response(CaisseJournaliereSerializer(caisse).data)

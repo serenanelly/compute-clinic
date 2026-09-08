@@ -245,9 +245,14 @@ function useLogin() {
     const token = localStorage.getItem("token_key_fultang");
     if (token) {
       try {
-        const baseURL = import.meta.env.VITE_BACKEND_FULTANG_API_BASE_MEDICALSTAFF_URL || "http://127.0.0.1:8000/api/";
+        // Remarque : aucun endpoint /me/ n'existe côté backend (aucune
+        // route ne le sert dans aucun service) et cette fonction n'est
+        // appelée nulle part dans le frontend — code mort, non exécuté en
+        // pratique. On corrige tout de même sa résolution d'URL pour
+        // rester cohérent avec les autres appels (getGatewayBaseUrl()
+        // cible le hostname courant / tenant réellement ouvert).
         const response = await axios.get(
-          `${baseURL}/me/`,
+          `${getGatewayBaseUrl()}/medical/me/`,
           { headers: { Authorization: `Bearer ${token}` } }
         );
         if (response.status === 200) {

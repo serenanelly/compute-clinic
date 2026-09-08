@@ -2,8 +2,14 @@ from django.db import migrations, models
 
 
 def set_existing_quittances_validated(apps, schema_editor):
+    # Phase 8 (tenant_routing) : cible explicitement l'alias de CETTE
+    # migration (schema_editor.connection.alias) — sans ça, la requête ORM
+    # passe par TenantDatabaseRouter, qui exige un Tenant Context déjà
+    # établi (absent lors d'un `migrate` hors requête HTTP, y compris pour
+    # 'default' et pour toute nouvelle base tenant fraîchement provisionnée).
     Quittance = apps.get_model('caisse', 'Quittance')
-    Quittance.objects.all().update(est_validee=True)
+    db_alias = schema_editor.connection.alias
+    Quittance.objects.using(db_alias).all().update(est_validee=True)
 
 
 class Migration(migrations.Migration):

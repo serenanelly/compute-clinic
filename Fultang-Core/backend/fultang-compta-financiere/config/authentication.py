@@ -16,6 +16,8 @@ import logging
 from django.conf import settings
 from rest_framework import authentication
 
+from .tenant_routing.context import set_tenant_context
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,10 +51,17 @@ class GatewayHeaderAuthentication(authentication.BaseAuthentication):
         if user_id:
             roles = user_roles_str.split(',') if user_roles_str else []
             roles = [r.strip() for r in roles if r.strip()]
+            tenant_id = request.META.get('HTTP_X_TENANT_ID') or None
+
+            # Établit le Tenant Context pour le Database Router. Le token
+            # n'a pas besoin d'être conservé ici : le nettoyage en fin de
+            # requête est garanti par TenantContextCleanupMiddleware.
+            set_tenant_context(tenant_id)
+
             return (GatewayUser(
                 user_id=user_id,
                 roles=roles,
-                tenant_id=request.META.get('HTTP_X_TENANT_ID') or None,
+                tenant_id=tenant_id,
                 email=request.META.get('HTTP_X_USER_EMAIL', ''),
                 nom=request.META.get('HTTP_X_USER_NOM', ''),
                 prenom=request.META.get('HTTP_X_USER_PRENOM', ''),
@@ -67,10 +76,17 @@ class GatewayHeaderAuthentication(authentication.BaseAuthentication):
                     roles = payload.get('roles') or []
                     if isinstance(roles, str):
                         roles = [roles]
+                    tenant_id = payload.get('tenant_id')
+
+                    # Même établissement du Tenant Context que le chemin
+                    # headers ci-dessus (voir TenantContextCleanupMiddleware
+                    # pour le nettoyage en fin de requête).
+                    set_tenant_context(tenant_id)
+
                     return (GatewayUser(
                         user_id=str(payload['sub']),
                         roles=roles,
-                        tenant_id=payload.get('tenant_id'),
+                        tenant_id=tenant_id,
                         email=payload.get('email') or '',
                         nom=payload.get('nom') or '',
                         prenom=payload.get('prenom') or '',

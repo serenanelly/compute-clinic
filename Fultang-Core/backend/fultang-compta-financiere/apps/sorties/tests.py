@@ -7,6 +7,19 @@ from rest_framework import status
 
 from apps.comptabilite.models import CompteComptable
 from apps.sorties.models import CategorieSortie, Fournisseur
+from config.tenant_routing.context import reset_tenant_context, set_tenant_context
+
+_tenant_context_token = None
+
+
+def setUpModule():
+    """Voir apps/comptabilite/tests.py::setUpModule pour l'explication complète."""
+    global _tenant_context_token
+    _tenant_context_token = set_tenant_context(None)
+
+
+def tearDownModule():
+    reset_tenant_context(_tenant_context_token)
 
 
 def creer_compte_charge():

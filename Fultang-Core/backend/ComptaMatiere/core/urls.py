@@ -11,10 +11,22 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 
+from core.views import ProvisionDatabaseView
+
 urlpatterns = [
     path('admin/', admin.site.urls),
+
+    # ------------------------------------------------------------
+    # PROVISIONING INTERNE (tenant-service → ComptaMatiere)
+    # ------------------------------------------------------------
+    path(
+        'api/compta_matiere/internal/provision-database/',
+        ProvisionDatabaseView.as_view(),
+        name='internal-provision-database',
+    ),
+
     path('api/compta_matiere/', include('apps.comptabilite_matiere.urls')),
-    
+
     # Authentification JWT
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),

@@ -36,6 +36,10 @@ services:
       KAFKA_BROKER_URL: fultang-kafka:9092
       SERVICE_MEDICAL_URL: http://fultang-medical-backend:8000
       MEDICAL_GATEWAY_URL: http://api-gateway:8080/medical
+      TENANT_SERVICE_URL: http://fultang-tenant-web:8000
+      TENANT_SERVICE_INTERNAL_TOKEN: ${TENANT_SERVICE_INTERNAL_TOKEN:-dev-local-only-shared-secret-change-me}
+      TENANT_DB_USER: fultang_user
+      TENANT_DB_PASSWORD: fultang2026
     depends_on:
       compta-financiere-db:
         condition: service_healthy

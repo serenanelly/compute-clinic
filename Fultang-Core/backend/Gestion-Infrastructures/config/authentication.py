@@ -18,6 +18,8 @@ ne reflètent jamais une valeur fournie librement par le client.
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
+from .tenant_routing.context import set_tenant_context
+
 
 class GatewayUser:
     """Représentation légère d'un utilisateur authentifié par la Gateway."""
@@ -65,6 +67,12 @@ class GatewayHeaderAuthentication(BaseAuthentication):
 
         roles = [r.strip() for r in user_roles_raw.split(",") if r.strip()]
         user = GatewayUser(user_id=user_id, roles=roles, tenant_id=tenant_id)
+
+        # Établit le Tenant Context pour le Database Router. Le token
+        # n'a pas besoin d'être conservé ici : le nettoyage en fin de
+        # requête est garanti par TenantContextCleanupMiddleware.
+        set_tenant_context(tenant_id)
+
         return (user, None)  # (user, auth_token)
 
     def authenticate_header(self, request):

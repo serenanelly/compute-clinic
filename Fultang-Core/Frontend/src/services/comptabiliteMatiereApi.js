@@ -3,13 +3,16 @@
  * Se connecte au backend Fultang pour les opérations de gestion de stock
  */
 import axios from "axios";
+import { getGatewayBaseUrl } from "../Utils/gatewayUrls";
 
-const API_BASE_URL = import.meta.env.VITE_BACKEND_COMPTABILITE_MATIERE_URL || "http://127.0.0.1:8080/compta-matiere";
-const GATEWAY_URL = import.meta.env.VITE_API_GATEWAY_URL || "http://127.0.0.1:8080";
+// getGatewayBaseUrl() cible le hostname courant (résolution de tenant par
+// sous-domaine) — une URL statique enverrait ces appels vers un hostname
+// fixe au lieu du tenant réellement ouvert dans le navigateur.
+const GATEWAY_URL = getGatewayBaseUrl();
 
 // Instance Axios pour la comptabilité matière
 const apiClient = axios.create({
-    baseURL: API_BASE_URL,
+    baseURL: `${GATEWAY_URL}/compta-matiere`,
     headers: {
         'Content-Type': 'application/json',
     }

@@ -504,11 +504,11 @@ Distinction stricte à faire, car ces notions sont **souvent confondues** :
 | **Authentification tenant-aware** (login scope par tenant, JWT porte `tenant_id`) | **Implémenté et testé** |
 | **Contexte tenant propagé** (`X-Tenant-ID` jusqu'au service, `GatewayUser.tenant_id`) | **Implémenté et testé** pour les 4 services métier classiques (voir [§8.4](#84-services-mis-à-jour-vs-non-mis-à-jour)) |
 | **Registre logique Tenant + Service → Database** (`TenantDatabase`, Phase 5) | **Implémenté et testé** — voir §9.1 ci-dessous |
-| **Isolation réelle des données métier** (un `Medecin` du Tenant A invisible au Tenant B dans les réponses API) | **Non implémenté** — `PersonnelViewSet`, `MedecinViewSet`, etc. ne filtrent pas par `tenant_id` |
-| **Routage dynamique des bases de données** (une requête HTTP effectivement dirigée vers la bonne base selon le tenant) | **Implémenté et testé pour `service-personnel`** — voir §9.2 ci-dessous. Les 3 autres services adaptés en Phase 4 (Gestion-Infrastructures, ComptaMatiere, fultang-compta-financiere) n'ont PAS de router — décision de périmètre, voir §9.2 |
-| **Création physique des bases PostgreSQL par tenant** | **Partiellement implémenté** — 2 bases pilotes créées manuellement pour la démonstration (§9.2), pas de provisioning automatisé (Phase 7) |
+| **Isolation réelle des données métier** (un `Medecin` du Tenant A invisible au Tenant B dans les réponses API) | **Implémenté et vérifié** pour les 5 services métier persistants (service-personnel, Medical-Monitoring, fultang-compta-financiere, ComptaMatiere, Gestion-Infrastructures) — isolation par base physique séparée, pas par filtre applicatif |
+| **Routage dynamique des bases de données** (une requête HTTP effectivement dirigée vers la bonne base selon le tenant) | **Implémenté et testé pour les 5 services métier persistants** — voir §9.2 (service-personnel) et §13.7 (Phase 8 finalisation : fultang-compta-financiere, ComptaMatiere, Gestion-Infrastructures) |
+| **Création physique des bases PostgreSQL par tenant** | **Implémenté** pour service-personnel, Medical-Monitoring, fultang-compta-financiere, ComptaMatiere, Gestion-Infrastructures (provisioning automatisé, Phase 7 étendu en Phase 8) |
 
-**Le database routing est maintenant implémenté pour `service-personnel`.** Une requête authentifiée pour le Tenant A utilise exclusivement la base PostgreSQL du Tenant A pour ce service ; le Tenant B, exclusivement la sienne. Les 3 autres services adaptés en Phase 4 n'ont volontairement pas reçu de router dans cette phase (voir §9.2.7) — leurs données métier restent, comme avant, dans une base unique par service.
+**Le database routing est maintenant implémenté pour les 5 services métier persistants de FullTang.** Une requête authentifiée pour le Tenant A utilise exclusivement la base PostgreSQL du Tenant A pour chacun de ces services ; le Tenant B, exclusivement la sienne. Seuls Clinical Agent (exception architecturale volontaire, voir §13.3) et l'intégration Kafka `patient.cree` (aucun producteur dans le dépôt, hors périmètre) dérogent à ce principe, pour des raisons documentées.
 
 ### 9.1 Phase 5 — Tenant Database Management (registre logique)
 
@@ -1024,26 +1024,82 @@ En rendant Clinical Agent réellement démarrable pour la première fois pendant
 
 Ces trois défauts sont documentés ici car ils bloquaient totalement la validation pilote — mais ils sont **indépendants** du travail de tenant-isolation lui-même (vérifié explicitement : mêmes échecs constatés en testant le code non modifié, avant toute intervention de cette phase).
 
-### 13.6 Impact sur `fultang-compta-financiere`, `ComptaMatiere`, `Gestion-Infrastructures`
+### 13.6 Impact sur `fultang-compta-financiere`, `ComptaMatiere`, `Gestion-Infrastructures` (état avant Phase 8 finalisation)
+
+Cette sous-section documente l'état constaté **au moment du chantier Medical-Monitoring/Clinical Agent** (avant la finalisation ci-dessous, §13.7) — conservée pour l'historique. **Ces trois services sont devenus tenant-aware en Phase 8 (finalisation)**, voir §13.7.
 
 **`fultang-compta-financiere`** (`apps/integration/medical_client.py`) appelle Medical-Monitoring pour construire les profils de facturation caissier (`_fetch_medical_snapshot`) :
-- **Chemin primaire (Gateway)** : forward du JWT du caissier vers `http://api-gateway:8080/medical/**`. Puisque ce JWT porte déjà `tenant_id` (Phase 3) et que la Gateway injecte `X-Tenant-ID` pour TOUTE route authentifiée (pas seulement `/personnel/**`), Medical-Monitoring devenu tenant-aware route AUTOMATIQUEMENT ce chemin vers la bonne base — **aucune modification de `medical_client.py` n'a été nécessaire**. Vérifié en conditions réelles : `GET /compta-financiere/caissier/patients-en-attente/` avec un JWT valide → `200 OK`, données correctement renvoyées.
-- **Chemin de repli (accès direct, hors Gateway)** : `_base_url()` (`SERVICE_MEDICAL_URL`) sans jamais transmettre `X-User-ID`/`X-Tenant-ID` (ces headers ne sont construits QUE par la Gateway). Ce chemin échouait **déjà** avant cette phase (`GatewayHeaderAuthentication` exige `X-User-ID`, absent ici → 401) — **inchangé par ce chantier**, toujours un échec explicite (401), jamais un accès à une base incorrecte. Conforme à la règle §12.4 de la tâche ("si le fallback ne peut pas être sécurisé, préférer son échec explicite").
-- **Base propre de `fultang-compta-financiere`** : reste **unique, non tenant-isolée** — `Quittance`, `CaisseJournaliere`, `Facture`, etc. ne portent aucun `tenant_id` et vivent dans une seule base partagée. **Ne pas présenter cette partie comme tenant-isolée : elle ne l'est pas.**
+- **Chemin primaire (Gateway)** : forward du JWT du caissier vers `http://api-gateway:8080/medical/**`. Puisque ce JWT porte déjà `tenant_id` (Phase 3) et que la Gateway injecte `X-Tenant-ID` pour TOUTE route authentifiée (pas seulement `/personnel/**`), Medical-Monitoring devenu tenant-aware route AUTOMATIQUEMENT ce chemin vers la bonne base — **aucune modification de `medical_client.py` n'a été nécessaire** à ce stade. Vérifié en conditions réelles : `GET /compta-financiere/caissier/patients-en-attente/` avec un JWT valide → `200 OK`, données correctement renvoyées.
+- **Chemin de repli (accès direct, hors Gateway)** : `_base_url()` (`SERVICE_MEDICAL_URL`) sans jamais transmettre `X-User-ID`/`X-Tenant-ID` (ces headers ne sont construits QUE par la Gateway). Ce chemin échouait **déjà** avant cette phase (`GatewayHeaderAuthentication` exige `X-User-ID`, absent ici → 401). **Corrigé en Phase 8 (finalisation)** — voir §13.7.3 : même s'il continue d'échouer la plupart du temps, il ne doit plus jamais perdre le tenant_id silencieusement s'il réussissait un jour.
+- **Base propre de `fultang-compta-financiere`** : à ce stade, restait unique, non tenant-isolée. **Isolée en Phase 8 (finalisation)**, voir §13.7.
 
-**`ComptaMatiere` et `Gestion-Infrastructures`** : **non tenant-aware**, chacun avec sa base PostgreSQL unique (`infrastructure-db`, `compta-matiere-db`), inchangés par cette phase. Ni l'un ni l'autre n'est appelé par le parcours patient/consultation/examen/prescription (le cœur du périmètre demandé) — leur non-isolation n'affecte donc PAS la démonstration d'isolation clinique demandée (§16/§17 de la tâche), mais elle affecte réellement toute démonstration de gestion des stocks/infrastructures par tenant, qui resterait partagée entre A et B.
+**`ComptaMatiere` et `Gestion-Infrastructures`** : à ce stade, non tenant-aware. **Devenus tenant-aware en Phase 8 (finalisation)**, voir §13.7.
 
-**Classification explicite demandée par la tâche (§13, §27)** :
+### 13.7 Phase 8 (finalisation) — `fultang-compta-financiere`, `ComptaMatiere`, `Gestion-Infrastructures` deviennent tenant-aware
+
+**Mandat** : la Phase 8 initiale (§13.1-§13.6) avait explicitement laissé ces trois services hors périmètre ("pas de refonte non nécessaire pour ce chantier"). Une mission de suivi a demandé de finaliser la fondation multi-tenant sur l'**ensemble** du périmètre fonctionnel de FullTang — ces trois services étant les derniers services métier persistants encore sur une base unique partagée, ils sont désormais alignés sur le même patron **Database-per-Tenant** que service-personnel et Medical-Monitoring.
+
+#### 13.7.1 Mécanisme — identique au patron déjà validé
+
+Pour chacun des 3 services, portage à l'identique du paquet `tenant_routing/` (`context.py`, `middleware.py`, `cache.py`, `registry_client.py`, `pool_registry.py`, `router.py`), de `permissions.py::IsInternalService` et de `views.py::ProvisionDatabaseView`, exactement comme Medical-Monitoring (§13.1). Aucune divergence de conception — seules les valeurs suivantes changent par service :
+
+| Service | `SERVICE_CODE` | Alias DB | `TENANT_SCOPED_APPS` | Provisioning migré sans app_label |
+|---|---|---|---|---|
+| fultang-compta-financiere | `COMPTA` | `tenant_<hex>_compta` | `comptabilite`, `caisse`, `sorties`, `messaging` (4 apps) | Oui |
+| ComptaMatiere | `COMPTA_MATIERE` | `tenant_<hex>_compta_matiere` | `comptabilite_matiere` (1 app) | Oui |
+| Gestion-Infrastructures | `INFRASTRUCTURE` | `tenant_<hex>_infrastructure` | `infrastructures` (1 app) | Oui |
+
+`GatewayHeaderAuthentication.authenticate()` de chacun des 3 services appelle désormais `set_tenant_context(tenant_id)` — jusque-là, `tenant_id` était lu et exposé sur `GatewayUser` mais n'avait strictement aucun effet (constaté explicitement à l'audit, §Phase 1 de cette mission). `TenantContextCleanupMiddleware` ajouté en dernière position dans `MIDDLEWARE`, comme les 2 services de référence.
+
+**Bases existantes préservées** : conformément à la stratégie déjà validée pour service-personnel/Medical-Monitoring ("pool non assigné"), les 3 bases historiques (`fultang_compta_financiere`, `comptamatiere`, `infrastructure_db`) restent inchangées et continuent de servir tout contexte `tenant_id=None` (aucun `X-Tenant-ID` reçu). **Aucune donnée existante n'a été supprimée, migrée ou réattribuée.** Les nouvelles bases tenant sont des bases PostgreSQL physiquement distinctes, créées vides sur le même serveur, exactement comme pour service-personnel/Medical-Monitoring. Vérifié explicitement après chaque provisioning réel (comptage de lignes avant/après identique sur les 3 bases historiques).
+
+`tenant-service/tenants/provisioning.py::PROVISIONING_CAPABLE_SERVICES` étend la liste déjà utilisée pour PERSONNEL/MEDICAL avec `COMPTA`, `COMPTA_MATIERE`, `INFRASTRUCTURE`, chacun avec son propre préfixe d'URL interne (`COMPTA_MATIERE` sous `/api/compta_matiere/`, les deux autres sous `/api/` — même vigilance que le bug déjà corrigé pour MEDICAL, voir historique Phase 7).
+
+#### 13.7.2 Bugs de migration découverts et corrigés (spécifiques à chaque service)
+
+Rejouer les migrations existantes sur une base tenant **fraîche** (jamais testé avant cette phase — `manage.py test` migre toujours contre `default`, qui a déjà les tables système) a révélé 3 défauts préexistants, indépendants les uns des autres, tous corrigés :
+
+1. **`Gestion-Infrastructures/infrastructures/migrations/0004_seed_types_salle.py`** — un `RunPython` appelait `TypeSalle.objects.get_or_create(...)` sans `.using(db_alias)` : la requête passait par le nouveau `TenantDatabaseRouter`, qui exige un Tenant Context déjà établi — absent lors d'un `migrate` hors requête HTTP. **Corrigé** : `.using(schema_editor.connection.alias)`.
+2. **`fultang-compta-financiere/apps/caisse/migrations/0002_quittance_est_validee_patient_id.py`** — même défaut, sur `Quittance.objects.all().update(...)`. **Corrigé** de la même manière.
+3. **`fultang-compta-financiere/apps/comptabilite/management/commands/seed_initial.py`** — exécuté automatiquement au démarrage du conteneur (`CMD` du `Dockerfile` : `migrate && seed_initial && runserver`), cette commande crée le plan comptable OHADA initial via des `get_or_create` directs, hors de tout cycle de requête HTTP. **Corrigé** en appelant `set_tenant_context(None)` explicitement en début de commande — sémantiquement correct : ce seed peuple le pool non assigné (`default`), jamais un tenant réel.
+4. **`ComptaMatiere` — ForeignKey historique vers `settings.AUTH_USER_MODEL`** (le plus significatif) : les migrations `0001_initial.py`, `0003_livraison_sortie.py`, `0005_rapport_id_personnel.py` et `0006_rapport_code_rapport_rapport_date_envoi_and_more.py` déclaraient à l'origine plusieurs champs (`Besoin.idPersonnel_emetteur`, `Sortie.idPersonnel`, `Rapport.id_personnel`/`destinataire`/`expediteur`, `ArchiveInventaire.responsable`) comme de VRAIES `ForeignKey` vers `auth.User`, avec contrainte `REFERENCES auth_user(id)` au niveau base. Ces contraintes ont ensuite été retirées par une migration ultérieure déjà appliquée sur `default` (`0011_remove_archiveinventaire_responsable_and_more.py`, qui convertit tout en `IntegerField` puis `0012_personnel_uuid_ids.py` en `CharField(36)` — le modèle actuel, `apps/comptabilite_matiere/models/*.py`, n'a **jamais** eu de FK vers `auth.User`). Sur `default`, aucun problème : ces migrations historiques ont déjà été rejouées il y a longtemps et `auth_user` y existe. Sur une base tenant **fraîche**, en revanche, `auth`/`admin`/`sessions`/`contenttypes` n'existent délibérément jamais (voir `allow_migrate`, §9.2/§13.1) — la création de la table échouait avec `ProgrammingError: relation "auth_user" does not exist`, bloquant tout provisioning réel pour ce service.
+   **Corrigé** en réécrivant directement les 4 migrations historiques concernées pour déclarer ces champs comme `CharField(max_length=36)` dès leur création, sans `ForeignKey` ni `swappable_dependency(AUTH_USER_MODEL)` — **strictement sans effet sur `default`** (une migration déjà appliquée n'est jamais rejouée ; seul son contenu futur, pour une base qui ne l'a pas encore exécutée, change). Les migrations `AlterField` déjà existantes (0011/0012) s'appliquent ensuite normalement par-dessus, aboutissant au même état final que sur `default`. Vérifié : `makemigrations --check` → "No changes detected" après correction, `migrate` sur `default` → "No migrations to apply" (aucune régression), et un provisioning réel d'un tenant fraîchement créé aboutit désormais à un `200 OK` avec les 14 tables métier attendues.
+
+Ce dernier point illustre une classe d'anomalie qui ne peut être détectée QUE par un vrai test de provisioning bout-en-bout contre une base neuve — ni les tests unitaires existants, ni `makemigrations --check`, ni un `migrate` classique contre `default` ne l'auraient révélée. Documenté explicitement plutôt que masqué.
+
+#### 13.7.3 `medical_client.py` — propagation de `X-Tenant-ID` sur les deux chemins
+
+`fultang-compta-financiere/apps/integration/medical_client.py::_get()` construisait ses headers (`Accept`, `Authorization`) sans jamais inclure `X-Tenant-ID`, sur le chemin Gateway **et** sur le chemin de repli direct (`SERVICE_MEDICAL_URL`, hors Gateway). Le chemin Gateway fonctionnait déjà correctement par héritage (la Gateway injecte `X-Tenant-ID` elle-même pour toute route proxyée, indépendamment de ce que le service appelant envoie) — mais le chemin de repli, s'il réussissait un jour (aujourd'hui il échoue le plus souvent en 401, comportement inchangé et non corrigé par choix — voir §13.6), n'aurait jamais transmis le tenant courant. **Corrigé** : `_get()` lit désormais le Tenant Context courant (`get_current_tenant_context()`) et ajoute `X-Tenant-ID` sur les deux chemins, uniquement si un tenant réel est établi (jamais la chaîne littérale `"None"`). Le chemin de repli reste volontairement conservé tel quel (fonctionnalité existante, pas supprimée sans justification) — seule la fuite de contexte potentielle est corrigée.
+
+#### 13.7.4 Kafka — `tenant_id` ajouté aux événements et au consommateur
+
+`fultang-compta-financiere/apps/messaging/` (producteur ET consommateur Kafka du même service, `USE_KAFKA` optionnel, **non démarré dans cet environnement de développement** — aucun conteneur `kafka`/`zookeeper` actif) présentait la même classe de bug que le signal `Visite` déjà corrigé pour Medical-Monitoring (§13.2) : `kafka_consumer._consumer_loop` tourne dans un thread daemon séparé qui n'hérite jamais du Tenant Context du thread ayant publié l'événement.
+- `QuittanceValideeEvent`/`CaisseFermeeEvent`/`OrdrePaiementExecuteEvent` (`apps/messaging/events.py`) reçoivent un champ `tenant_id: str | None`, peuplé au moment de la publication (`apps/caisse/views/__init__.py`, `apps/sorties/views/__init__.py`) depuis le Tenant Context établi par la vue DRF appelante.
+- `kafka_consumer._dispatch()` rétablit explicitement `set_tenant_context(payload.get('tenant_id'))` AVANT tout accès ORM (y compris `is_event_processed`/`mark_event_processed`, dans l'app `messaging`, elle aussi tenant-scopée), puis nettoie dans un `finally` — même idiome que la correction Medical-Monitoring.
+- `TOPIC_PATIENT_CREE` ('patient.cree') est consommé mais **n'a aucun producteur nulle part dans le dépôt** (vérifié par recherche exhaustive) — intégration pré-existante inachevée. **Aucun producteur n'a été inventé** (règle explicite de la mission). Le handler `handle_patient_cree` reste défensif : sans `tenant_id` dans le payload, il journalise un avertissement et refuse l'écriture plutôt que de deviner un rattachement ou d'écrire silencieusement dans le pool non assigné.
+- **Limite assumée et documentée explicitement** : Kafka n'étant pas démarré dans cet environnement, ce correctif est vérifié par des tests unitaires appelant `_dispatch()` directement avec un payload fabriqué (contournement complet du client Kafka réel) — **jamais par un test de bout en bout contre un vrai broker**. Aucune preuve n'est prétendue au-delà de ce qui a été réellement testé.
+
+#### 13.7.5 Frontend — 6 points de résolution d'URL statique corrigés
+
+Un audit complet de tous les clients HTTP du frontend (au-delà des 3 déjà corrigés lors d'un chantier précédent) a trouvé 6 points supplémentaires où une URL statique (variable d'environnement ou `localhost` en dur) contournait la résolution dynamique par sous-domaine (`getGatewayBaseUrl()`) : `src/services/medecinsApi.js`, `src/services/chambresApi.js`, `src/services/comptabiliteMatiereApi.js` (ses deux clients axios), `src/Pages/Authentication/ForgottenPassword.jsx`, `src/Pages/Receptionist/ViewPatientDetailsModal.jsx` (construction d'URL de photo patient), et `src/Utils/Provider.jsx::getCurrentUserInfos()` (fonction non appelée nulle part dans le code — corrigée par cohérence, sans impact fonctionnel réel). Tous corrigés pour utiliser `getGatewayBaseUrl()`. Aucun autre point statique trouvé après re-balayage complet (`grep` sur `VITE_BACKEND`/`localhost:8080`/`VITE_API_GATEWAY_URL` dans tout `src/`) — seuls `gatewayUrls.js` lui-même et les 2 instances déjà correctes (`axiosInstance.js`, `axiosInstanceCompta.js`, qui l'utilisent en repli) subsistent. `npm run build` et `eslint` vérifiés propres (aucune régression par rapport à l'état préexistant, confirmé par `git stash`).
+
+**Audit de sécurité frontend (§2 de la mission de suivi)** : recherche exhaustive (`grep -rni "tenant"` sur tout `src/`) confirmant qu'aucun contrôle UI, paramètre d'URL, ou état côté client ne permet à un utilisateur ou au code applicatif de choisir arbitrairement le tenant interrogé — le seul déterminant est `window.location.hostname`, jamais une valeur manipulable à l'exécution.
+
+#### 13.7.6 Classification finale mise à jour
 
 | Composant | État |
 |---|---|
 | service-personnel (personnel, comptes) | **ISOLÉ PAR TENANT** |
-| Medical-Monitoring (patients, visites, consultations, examens, prescriptions) | **ISOLÉ PAR TENANT** (cette phase) |
-| Clinical Agent (moteur de lecture par tenant) | **ISOLÉ PAR TENANT** (cette phase) — buffer d'export partagé mais scopé par `tenant_id` + autorisation |
-| fultang-compta-financiere — appel à Medical-Monitoring (Gateway) | **ISOLÉ PAR TENANT** (hérité automatiquement) |
-| fultang-compta-financiere — base propre (caisse, comptabilité, facturation) | **NON ENCORE ISOLÉ** |
-| ComptaMatiere | **HORS PÉRIMÈTRE** de cette phase (non appelé par le parcours clinique) |
-| Gestion-Infrastructures | **HORS PÉRIMÈTRE** de cette phase (non appelé par le parcours clinique) |
+| Medical-Monitoring (patients, visites, consultations, examens, prescriptions) | **ISOLÉ PAR TENANT** |
+| Clinical Agent (moteur de lecture par tenant) | **ISOLÉ PAR TENANT** — exception architecturale assumée (multi-tenant dans le même processus), buffer scopé par `tenant_id` + autorisation |
+| fultang-compta-financiere — appel à Medical-Monitoring (Gateway) | **ISOLÉ PAR TENANT** (hérité) |
+| fultang-compta-financiere — appel à Medical-Monitoring (repli direct) | Toujours en échec la plupart du temps (401, préexistant, non corrigé par choix) — **ne perd plus le tenant s'il réussit** |
+| fultang-compta-financiere — base propre (caisse, comptabilité, facturation, messaging Kafka) | **ISOLÉ PAR TENANT** (Phase 8 finalisation) |
+| ComptaMatiere | **ISOLÉ PAR TENANT** (Phase 8 finalisation) |
+| Gestion-Infrastructures | **ISOLÉ PAR TENANT** (Phase 8 finalisation) |
+| Frontend — résolution de l'URL Gateway | **100 % dynamique par sous-domaine** — 0 point statique restant, vérifié par balayage exhaustif |
+| Intégration Kafka `patient.cree` | **HORS PÉRIMÈTRE** — aucun producteur dans le dépôt, non inventé |
+| ComptaMatiere / Gestion-Infrastructures — provisioning automatisé pour de vrais volumes (au-delà des tenants pilotes) | Mécanisme identique à service-personnel/Medical-Monitoring, mêmes limites déjà documentées (§10, pas de reprise auto sur crash mi-provisioning, pas de verrou distribué) |
 
 ---
 
@@ -1143,11 +1199,21 @@ Décisions prises et vérifiées :
 | **(Medical-Monitoring tenant-aware)** `allow_clinical_agent_export` — champ, migration, API création/modification/résolution | `tenant-service/tenants/tests.py` (18 tests supplémentaires : export, `resolve` par id, `resolve-active`) | ✅ | Implémenté et testé |
 | **(Clinical Agent tenant-aware)** `registry_client`/`engine_registry` — résolution, cache d'engine par tenant, erreurs Registry | `clinical-agent/test_tenant_routing.py` (12 tests, `unittest`) | ✅ | Implémenté et testé |
 | **(Clinical Agent tenant-aware)** Isolation bout-en-bout réelle — signal→sync, export autorisé/refusé/inversé, buffer scopé par tenant, `/sync/all` mono-tenant | Validation pilote Docker (voir §13, rapport final) — pas de test automatisé dédié (pas de harnais pytest préexistant dans ce service) | ✅ (2 tenants réels, PostgreSQL réel, inversion testée dans les deux sens) | Implémenté et vérifié |
-| fultang-compta-financiere — base propre (caisse/comptabilité) | — | — | **Non isolé** (voir §13.6, décision documentée) |
+| **(Phase 8 finalisation)** `tenant_routing` complet — Context/Cache/PoolRegistry/Router/Auth/Provisioning — fultang-compta-financiere | `apps/comptabilite/tests_tenant_routing.py` (~55 tests, dont Kafka/medical_client) | ✅ (Docker + Postgres réel + provisioning live réel) | Implémenté et testé |
+| **(Phase 8 finalisation)** `tenant_routing` complet — ComptaMatiere | `apps/comptabilite_matiere/tests/tests_tenant_routing.py` (42 tests) | ✅ (Docker + Postgres réel + provisioning live réel, après correctif ForeignKey historique §13.7.2) | Implémenté et testé |
+| **(Phase 8 finalisation)** `tenant_routing` complet — Gestion-Infrastructures | `infrastructures/tests_tenant_routing.py` (42 tests) | ✅ (Docker + Postgres réel + provisioning live réel, après correctif migration §13.7.2) | Implémenté et testé |
+| **(Phase 8 finalisation)** Isolation réelle bout-en-bout — Tenant A/B, 2 vrais tenants pilotes (`hopital-central`/`clinique-paix`), provisioning réel via `ProvisioningOrchestrator`, données seedées, requêtes HTTP réelles (headers Gateway simulés) | Vérification manuelle en conditions réelles — voir §13.7, pas de test automatisé dédié | ✅ (compta-financiere, ComptaMatiere, Gestion-Infrastructures — chaque tenant ne voit jamais l'enregistrement de l'autre, PK identiques dans des bases physiques distinctes) | Implémenté et vérifié |
+| **(Phase 8 finalisation)** `medical_client.py` — `X-Tenant-ID` sur chemin Gateway et chemin de repli | `apps/integration/tests.py` (3 tests) | ✅ | Implémenté et testé |
+| **(Phase 8 finalisation)** Kafka — `tenant_id` sur événements + `_dispatch` rétablit/nettoie le contexte | `apps/messaging/tests.py` (8 tests, sans broker réel — voir limite §13.7.4) | ✅ (unitaire, pas de preuve broker réel) | Implémenté et testé (limite documentée) |
+| **(Phase 8 finalisation)** Frontend — 6 points de résolution d'URL statique corrigés | `npm run build` + `eslint` (aucun test automatisé dédié à la résolution d'URL) | ✅ (build propre, lint inchangé par rapport à l'état préexistant) | Implémenté et vérifié |
 
-**Total tests automatisés multitenant actuels** : 96 (tenant-service) + 33 (api-gateway) + 50 (service-personnel) + 125 (Medical-Monitoring, dont 42 tenant-aware + 83 préexistants) + 12 (clinical-agent, nouveau) + 3 (Gestion-Infrastructures) + 3 (ComptaMatiere) + 4 (fultang-compta-financiere) = **326 tests**, tous verts (les 6 échecs préexistants de Medical-Monitoring, non liés au multitenant, sont documentés en §13/rapport final — confirmés inchangés avant/après ce chantier), exécutés en conditions réelles partout où c'est pertinent (Docker + PostgreSQL pour tenant-service/service-personnel/Medical-Monitoring, validation pilote réelle à 2 tenants pour Clinical Agent — création physique, signal temps réel, rattrapage périodique, inversion de l'autorisation d'export dans les deux sens).
+**Total tests automatisés multitenant actuels** : 96 (tenant-service) + 33 (api-gateway) + 50 (service-personnel) + 125 (Medical-Monitoring, dont 42 tenant-aware + 83 préexistants) + 12 (clinical-agent) + 104 (fultang-compta-financiere, dont ~55 tenant-aware + 49 préexistants) + 62 (ComptaMatiere, dont 42 tenant-aware + 20 préexistants) + 52 (Gestion-Infrastructures, dont 42 tenant-aware + 10 préexistants) = **534 tests**, tous verts à l'exception des échecs préexistants documentés ci-dessous (confirmés inchangés avant/après ce chantier par comparaison `git stash`), exécutés en conditions réelles partout où c'est pertinent (Docker + PostgreSQL pour les 5 services métier, provisioning réel de bout en bout pour service-personnel/Medical-Monitoring/fultang-compta-financiere/ComptaMatiere/Gestion-Infrastructures).
 
-> **Anomalie non liée à cette phase** : les tests métier préexistants de `Gestion-Infrastructures` (7) et `fultang-compta-financiere` (10) échouent (401/403) car ils n'envoient aucun header d'authentification — confirmé pré-existant (`git diff` ne montre aucune ligne modifiée sur ces tests), même symptôme que `service-personnel` en Phase 1. Non corrigé, hors périmètre.
+> **Anomalies préexistantes non liées à cette mission** (confirmées par `git stash` — mêmes échecs avant et après toute modification) :
+> - Medical-Monitoring : 6 échecs (documentés Phase 8 initiale, §13).
+> - `Gestion-Infrastructures` : 7 échecs (401/403, tests n'envoyant aucun header d'authentification).
+> - `fultang-compta-financiere` : 38 échecs + 7 erreurs (mêmes causes : tests métier préexistants n'envoyant pas les headers `X-User-ID`/`X-User-Roles` attendus par `GatewayHeaderAuthentication`, indépendant de tout travail multitenant — vérifié par `git stash` sur l'intégralité du service : compte de tests et d'échecs strictement identiques avant/après).
+> Non corrigés — hors périmètre de cette mission (ne pas réécrire des tests métier préexistants sans lien avec la tâche demandée).
 
 ---
 
@@ -1381,6 +1447,42 @@ Côté Medical-Monitoring : aucune migration de schéma Django nécessaire (le r
 - `fultang-compta-financiere/apps/integration/medical_client.py` — aucune modification nécessaire : le chemin Gateway hérite automatiquement du tenant-awareness de Medical-Monitoring, le chemin de repli direct échouait déjà avant cette phase et continue d'échouer explicitement (voir §13.6).
 - La base propre de `fultang-compta-financiere` (caisse, comptabilité) — **non isolée**, décision de ne pas élargir le périmètre à une refonte complète de ce service (voir §13.6, §19).
 
+### Phase 8 (finalisation) — fultang-compta-financiere / ComptaMatiere / Gestion-Infrastructures tenant-aware (cette mission, non commitée)
+
+**Mandat** : finaliser la fondation multi-tenant sur l'ensemble du périmètre fonctionnel de FullTang (pas seulement les services déjà traités), avant de commencer la couche de configuration des établissements (Phase 9, non commencée). Audit global préalable (aucune modification pendant l'audit), puis implémentation, tests d'isolation réels, documentation — voir §13.7 pour le détail technique complet.
+
+| Fichier | Modification | Raison | Impact |
+|---|---|---|---|
+| `tenant-service/config/settings.py` | + `PROVISIONING_SERVICE_COMPTA_URL`/`_COMPTA_MATIERE_URL`/`_INFRASTRUCTURE_URL` | Symétrique de `PROVISIONING_SERVICE_PERSONNEL_URL`/`_MEDICAL_URL` | Additif |
+| `tenant-service/tenants/provisioning.py` | `PROVISIONING_CAPABLE_SERVICES` étendu à `COMPTA`/`COMPTA_MATIERE`/`INFRASTRUCTURE`, chacun avec son propre préfixe d'URL interne | Étendre le mécanisme Phase 7 aux 3 derniers services métier persistants | Additif — `PERSONNEL`/`MEDICAL` inchangés |
+| `tenant-service/tenants/tests.py` | 2 tests adaptés (`test_non_capable_service_is_skipped_and_creates_no_row`, `test_multiple_services_are_independent` utilisent désormais un code de service synthétique pour exercer le chemin `SKIPPED`, tous les codes réels étant désormais capables) + 3 nouvelles assertions de préfixe d'URL | Les 5 services du catalogue sont maintenant TOUS provisioning-capable — plus aucun code réel disponible pour tester le chemin `SKIPPED` | Aucune régression, 96/96 tests toujours verts |
+| `fultang-compta-financiere/config/tenant_routing/**` (nouveau, 7 fichiers), `permissions.py`, `views.py` | Portage à l'identique de service-personnel/Medical-Monitoring, `SERVICE_CODE="COMPTA"` | Voir §13.7.1 | Additif |
+| `fultang-compta-financiere/config/{authentication,settings,urls}.py` | `set_tenant_context()`, `DATABASE_ROUTERS`, middleware, variables `TENANT_SERVICE_*`/`TENANT_DB_*`, route de provisioning interne | Activer le routage tenant-aware | Additif — `DATABASES['default']` inchangé |
+| `fultang-compta-financiere/apps/caisse/migrations/0002_quittance_est_validee_patient_id.py` | `.using(schema_editor.connection.alias)` sur la requête `RunPython` | Corriger un bug de migration révélé par le rejeu sur base tenant fraîche (§13.7.2) | Comportement identique sur `default` (déjà appliquée) |
+| `fultang-compta-financiere/apps/comptabilite/management/commands/seed_initial.py` | `set_tenant_context(None)` explicite en début de commande | Idem — commande exécutée au démarrage du conteneur, hors cycle de requête HTTP | Comportement de seed inchangé (pool non assigné) |
+| `fultang-compta-financiere/apps/integration/medical_client.py` | `_get()` transmet `X-Tenant-ID` sur les deux chemins (Gateway + repli direct) | §13.7.3 — ne jamais perdre le tenant silencieusement | Chemin Gateway déjà correct par héritage ; chemin de repli continue d'échouer (401, préexistant) mais ne perdrait plus le contexte s'il réussissait |
+| `fultang-compta-financiere/apps/messaging/events.py`, `kafka_consumer.py`, vues `caisse`/`sorties` publiant des événements | `tenant_id` ajouté aux 3 dataclasses d'événements, peuplé à la publication, rétabli/nettoyé dans `_dispatch()` | §13.7.4 — même correctif que le signal `Visite` (Phase 8 initiale), appliqué à Kafka | Kafka non démarré dans cet environnement — vérifié uniquement en appelant `_dispatch()` directement (limite documentée) |
+| `fultang-compta-financiere/apps/{caisse,comptabilite,sorties,messaging,integration}/tests*.py` | Nouveaux tests tenant-routing + `medical_client`/Kafka + `setUpModule`/`tearDownModule` (`set_tenant_context(None)`) dans `apps/comptabilite/tests.py`/`tests_scenarios.py`/`apps/sorties/tests.py` | Les tests métier préexistants créent des objets ORM directement en `setUp()`, hors cycle de requête — nécessitent un Tenant Context explicite pour ne pas lever `TenantContextMissingError` une fois le router actif | Additif, aucune régression (104 tests, 38 échecs + 7 erreurs = strictement identique au preexistant, confirmé par `git stash`) |
+| `fultang-compta-financiere/docker-compose.yml` | + `TENANT_SERVICE_URL`/`TENANT_SERVICE_INTERNAL_TOKEN`/`TENANT_DB_USER`/`TENANT_DB_PASSWORD` | Nécessaire au fonctionnement | Additif |
+| `ComptaMatiere/core/tenant_routing/**` (nouveau), `permissions.py`, `views.py`, `test_runner.py` (nouveau) | Portage identique, `SERVICE_CODE="COMPTA_MATIERE"` ; `TenantAwareTestRunner` (`set_tenant_context(None)` avant `setup_databases()`, car une migration de données préexistante s'exécute aussi lors de la création de la base de test) | Voir §13.7.1 | Additif |
+| `ComptaMatiere/core/{authentication,settings,urls}.py` | Idem fultang-compta-financiere | Idem | Additif |
+| `ComptaMatiere/apps/comptabilite_matiere/migrations/0001_initial.py`, `0003_livraison_sortie.py`, `0005_rapport_id_personnel.py`, `0006_rapport_code_rapport_rapport_date_envoi_and_more.py` | `ForeignKey(to=settings.AUTH_USER_MODEL)` remplacée par `CharField(max_length=36)` sur 6 champs historiques (`idPersonnel_emetteur`, `idPersonnel`, `id_personnel`, `destinataire`, `expediteur`, `responsable`) ; `swappable_dependency(AUTH_USER_MODEL)` retirée | **Bug bloquant découvert en testant un provisioning réel** (§13.7.2) — le modèle actuel n'a jamais eu ces FK (déjà retirées par une migration ultérieure, `0011`), mais les migrations historiques les recréaient à chaque rejeu, échouant sur une base tenant fraîche où `auth_user` n'existe jamais | **Aucun impact sur `default`** (migrations déjà appliquées, jamais rejouées) ; `makemigrations --check` → "No changes detected" après correction |
+| `ComptaMatiere/apps/comptabilite_matiere/management/commands/seed_tenant_demo.py` (nouveau) | Commande de seed démo tenant-scopée (`Materiel`) | Reproductibilité pour les tests d'isolation | Additif |
+| `ComptaMatiere/docker-compose.yml` | + variables `TENANT_*` | Nécessaire au fonctionnement | Additif |
+| `Gestion-Infrastructures/config/tenant_routing/**` (nouveau), `permissions.py`, `views.py` | Portage identique, `SERVICE_CODE="INFRASTRUCTURE"` | Voir §13.7.1 | Additif |
+| `Gestion-Infrastructures/config/{authentication,settings,urls}.py` | Idem | Idem | Additif |
+| `Gestion-Infrastructures/infrastructures/migrations/0004_seed_types_salle.py` | `.using(schema_editor.connection.alias)` sur la requête `RunPython` | Même classe de bug que fultang-compta-financiere (§13.7.2) | Aucun impact sur `default` |
+| `Gestion-Infrastructures/infrastructures/management/commands/seed_tenant_demo.py` (nouveau) | Commande de seed démo tenant-scopée (Bâtiment/Étage/Salle) | Reproductibilité pour les tests d'isolation | Additif |
+| `Gestion-Infrastructures/docker-compose.yml` | + variables `TENANT_*` (style liste, cohérent avec le fichier existant) | Nécessaire au fonctionnement | Additif |
+| Frontend : `medecinsApi.js`, `chambresApi.js`, `comptabiliteMatiereApi.js`, `ForgottenPassword.jsx`, `ViewPatientDetailsModal.jsx`, `Provider.jsx` | `baseURL`/URL résolue via `getGatewayBaseUrl()` au lieu d'un env var statique/`localhost` en dur | §13.7.5 — 6 points supplémentaires trouvés par audit exhaustif, au-delà des 3 déjà corrigés précédemment | Correction directe de bugs préexistants ; `Provider.jsx::getCurrentUserInfos` est du code mort (jamais appelé), corrigé par cohérence sans impact fonctionnel |
+
+**Fichiers volontairement NON modifiés (Phase 8 finalisation)** :
+- Tout modèle métier des 3 services (`Fournisseur`, `Materiel`, `Salle`, etc.) — aucun `tenant_id` ajouté, l'isolation vient de la base physique.
+- `api-gateway` — déjà correct (garde anti-mismatch hostname/JWT testée, `X-Tenant-ID` toujours dérivé serveur-side, jamais du client) ; ComptaMatiere/Gestion-Infrastructures/compta-financiere étaient déjà routés. Aucune modification nécessaire.
+- Clinical Agent — exception architecturale déjà correcte (Phase 8 initiale), non retouché.
+- Le producteur Kafka `patient.cree` — non inventé, aucun service ne le produit dans le dépôt actuel.
+- `seed_data.py`/`seed_admin_only.py`/`apply_seed.sh`/`flush_and_seed_admin.sh`/`reset_and_seed.sh`/`start_all.sh` — scripts de développement historiques opérant sur le pool non assigné (`default`), laissés tels quels ; les nouvelles commandes `seed_tenant_demo` (par service) sont le mécanisme dédié aux tenants réels.
+
 ---
 
 ## 18. Ce qui a été conservé
@@ -1393,7 +1495,7 @@ Explicitement, sans modification de mécanisme :
 - **`GatewayHeaderAuthentication`** — le principe (headers non signés, confiance en la Gateway) est conservé ; seule son extension à `tenant_id` a été ajoutée, service par service.
 - **Architecture des services** — aucun microservice fusionné, séparé ou renommé.
 - **Communication service-to-service directe** — décision explicitement maintenue (voir [§12](#12-service-to-service)).
-- **Routage des bases des 3 autres services adaptés en Phase 4** (Gestion-Infrastructures, ComptaMatiere, fultang-compta-financiere) — une base PostgreSQL par service, non touché ; seul `service-personnel` a reçu le Dynamic Database Router en Phase 6.
+- **Routage des bases des 3 autres services adaptés en Phase 4** (Gestion-Infrastructures, ComptaMatiere, fultang-compta-financiere) — **mis à jour en Phase 8 (finalisation)** : ces 3 services ont désormais le Dynamic Database Router, comme service-personnel (Phase 6) et Medical-Monitoring (Phase 8 initiale). Voir §13.7.
 - **`Medical-Monitoring` et `clinical-agent`** — code, flux de synchronisation (signal Django → HTTP direct → base tampon → export), et mécanisme d'autorisation (`X-API-Key` unique) laissés tels quels ; seule une analyse a été produite ([§13](#13-medical-monitoring--clinical-agent)), aucune ligne de code modifiée.
 - **Modèles métier, migrations métier, querysets, ViewSets** des 4 services adaptés — aucun filtrage ni champ ajouté au-delà de la classe d'authentification (Phase 4) / du Database Router (Phase 6, `service-personnel` uniquement).
 - **`TenantDatabase`/`PlatformService`** (Phase 5) — consommés tels quels par le Dynamic Database Router (Phase 6), aucun champ ajouté.
@@ -1426,44 +1528,57 @@ FAIT
 │                                                         Database), contraintes d'unicité, permissions
 │                                                         PLATFORM_ADMIN, 26 tests. Purement déclaratif —
 │                                                         aucune base physique créée, aucun routage.
-├── Dynamic Database Routing (Phase 6) ................. CLÔTURÉE pour service-personnel : Tenant Context
+├── Dynamic Database Routing (Phase 6) ................. CLÔTURÉE pour les 5 services métier persistants :
+│                                                         service-personnel (Phase 6), Medical-Monitoring
+│                                                         (Phase 8 initiale), fultang-compta-financiere/
+│                                                         ComptaMatiere/Gestion-Infrastructures (Phase 8
+│                                                         finalisation, voir §13.7). Tenant Context
 │                                                         (contextvars), cache TTL, verrouillage de création
-│                                                         de pool, Database Router, isolation vérifiée avec
-│                                                         2 vraies bases PostgreSQL séparées. Les 3 autres
-│                                                         services adaptés en Phase 4 n'ont pas de router
-│                                                         (décision de périmètre, pas un manque).
-├── Tenant Provisioning (Phase 7) ...................... CLÔTURÉE pour service-personnel ET Medical-Monitoring :
+│                                                         de pool, Database Router — isolation vérifiée avec
+│                                                         de vraies bases PostgreSQL séparées pour chacun.
+├── Tenant Provisioning (Phase 7) ...................... CLÔTURÉE pour les 5 services métier persistants :
 │                                                          création physique réelle de base (psycopg2,
 │                                                          idempotente) + migration automatisées via
 │                                                          POST /tenants/{id}/provision/, concurrence par CAS
 │                                                          PostgreSQL (pas de verrou applicatif), échec →
 │                                                          FAILED + retry (pas de rollback destructif).
-│                                                          Déclaratif seul (SKIPPED) pour INFRASTRUCTURE/
-│                                                          COMPTA/COMPTA_MATIERE (pas de router équivalent
-│                                                          Phase 6 pour eux — décision de périmètre, pas un
-│                                                          manque). Provisioning de comptes utilisateurs
-│                                                          toujours hors périmètre (§10.1).
-└── Medical Monitoring / Clinical Agent tenant-aware ... CLÔTURÉE : Medical-Monitoring adopte le patron
-                                                          Database-per-Tenant (3 apps métier, migration
-                                                          multi-app sans app_label en dur) ; signal Visite
-                                                          corrigé (capture tenant AVANT thread, transmission
-                                                          explicite) ; Clinical Agent résout un moteur
-                                                          SQLAlchemy par tenant, exige authentification interne
-                                                          + tenant sur /sync/*, applique
-                                                          allow_clinical_agent_export AVANT toute lecture ;
-                                                          buffer d'export scopé par tenant_id (raison technique
-                                                          démontrée, seule exception à "pas de tenant_id
-                                                          partout"). Isolation vérifiée en conditions réelles :
-                                                          2 tenants, patients/visites distincts, export
-                                                          autorisé/refusé/inversé dans les deux sens, buffer
-                                                          jamais mélangé.
+│                                                          INFRASTRUCTURE/COMPTA/COMPTA_MATIERE rejoignent
+│                                                          PERSONNEL/MEDICAL dans PROVISIONING_CAPABLE_SERVICES
+│                                                          en Phase 8 finalisation. Provisioning de comptes
+│                                                          utilisateurs toujours hors périmètre (§10.1).
+├── Medical Monitoring / Clinical Agent tenant-aware ... CLÔTURÉE : Medical-Monitoring adopte le patron
+│                                                         Database-per-Tenant (3 apps métier, migration
+│                                                         multi-app sans app_label en dur) ; signal Visite
+│                                                         corrigé (capture tenant AVANT thread, transmission
+│                                                         explicite) ; Clinical Agent résout un moteur
+│                                                         SQLAlchemy par tenant, exige authentification interne
+│                                                         + tenant sur /sync/*, applique
+│                                                         allow_clinical_agent_export AVANT toute lecture ;
+│                                                         buffer d'export scopé par tenant_id (raison technique
+│                                                         démontrée, seule exception à "pas de tenant_id
+│                                                         partout"). Isolation vérifiée en conditions réelles :
+│                                                         2 tenants, patients/visites distincts, export
+│                                                         autorisé/refusé/inversé dans les deux sens, buffer
+│                                                         jamais mélangé.
+└── Phase 8 (finalisation) — fultang-compta-financiere / ComptaMatiere / Gestion-Infrastructures
+                                                          tenant-aware ... CLÔTURÉE : les 3 derniers services
+                                                          métier persistants adoptent le même patron
+                                                          Database-per-Tenant. 3 bugs de migration préexistants
+                                                          révélés par le rejeu sur base fraîche, corrigés
+                                                          (dont une ForeignKey historique vers auth_user dans
+                                                          ComptaMatiere, la plus significative). medical_client.py
+                                                          transmet désormais X-Tenant-ID sur son chemin de repli ;
+                                                          Kafka (non démarré ici) propage tenant_id de bout en
+                                                          bout dans son producteur/consommateur. 6 points d'URL
+                                                          statique corrigés côté frontend (au-delà des 3 déjà
+                                                          traités). Isolation vérifiée en conditions réelles :
+                                                          2 tenants pilotes, provisioning réel via
+                                                          ProvisioningOrchestrator, requêtes HTTP réelles —
+                                                          chaque tenant ne voit jamais l'enregistrement de
+                                                          l'autre, y compris avec des PK identiques dans des
+                                                          bases physiques distinctes.
 
 À FAIRE
-├── Extension du Dynamic Database Router + du provisioning physique à INFRASTRUCTURE/COMPTA/COMPTA_MATIERE
-├── Isolation de la base propre de fultang-compta-financiere (caisse, comptabilité, facturation) — le
-│    chemin Gateway vers Medical-Monitoring hérite déjà du tenant-awareness, mais Quittance/CaisseJournaliere/
-│    Facture/etc. restent dans une base unique partagée (voir §13.6) — nécessiterait de répéter le patron
-│    Phase 6/7 pour ce service, non fait ici (pas de refonte non nécessaire)
 ├── Verrou de création de pool distribué (si passage à plusieurs instances par service)
 ├── Reprise automatique d'un provisioning bloqué en PROVISIONING (processus crashé après création physique
 │    réussie mais avant confirmation) — voir §10.2.7, non résolu
@@ -1487,9 +1602,15 @@ FAIT
 │    processus court (`manage.py <commande>`) — le rattrapage périodique/`sync/all` manuel reprend
 │    correctement, mais la notification temps réel n'est garantie que dans un processus long (runserver/
 │    gunicorn) — voir §13.2
+├── Kafka (fultang-compta-financiere) — propagation de tenant_id vérifiée uniquement en appelant
+│    `_dispatch()` directement (pas de broker Kafka démarré dans cet environnement de développement) —
+│    aucune preuve de bout en bout contre un vrai broker (voir §13.7.4)
+├── Producteur pour le topic `patient.cree` — n'existe dans aucun service du dépôt ; le consommateur reste
+│    défensif (refuse l'écriture sans tenant_id) en attendant qu'un producteur réel soit implémenté
+│    (hors périmètre de cette mission — non inventé, voir §13.7.4)
 └── Opérations multitenant (backup/restore par tenant, etc.)
 ```
 
 ---
 
-*Document maintenu à jour à chaque phase du projet multitenant. Dernière mise à jour : Phase 8 — Medical Monitoring tenant-aware, Clinical Agent tenant-aware, autorisation d'export.*
+*Document maintenu à jour à chaque phase du projet multitenant. Dernière mise à jour : Phase 8 (finalisation) — fultang-compta-financiere, ComptaMatiere et Gestion-Infrastructures tenant-aware. Les 5 services métier persistants de FullTang (service-personnel, Medical-Monitoring, fultang-compta-financiere, ComptaMatiere, Gestion-Infrastructures) partagent désormais le même mécanisme Database-per-Tenant ; Clinical Agent reste l'exception architecturale volontaire. Prochaine étape : Phase 9 (couche de configuration des établissements), non commencée.*

@@ -11,6 +11,19 @@ from rest_framework import status
 from apps.comptabilite.models import CompteComptable, Journal, ExerciceComptable, EcritureComptable, LigneEcriture
 from apps.caisse.models import Quittance, CaisseJournaliere
 from apps.sorties.models import CategorieSortie, Fournisseur, DemandeAchat, BonCommande, OrdrePaiement
+from config.tenant_routing.context import reset_tenant_context, set_tenant_context
+
+_tenant_context_token = None
+
+
+def setUpModule():
+    """Voir apps/comptabilite/tests.py::setUpModule pour l'explication complète."""
+    global _tenant_context_token
+    _tenant_context_token = set_tenant_context(None)
+
+
+def tearDownModule():
+    reset_tenant_context(_tenant_context_token)
 
 
 def seed_base():

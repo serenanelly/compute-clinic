@@ -49,6 +49,12 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # DOIT rester en DERNIER : englobe tout le cycle de la requête, y
+    # compris l'authentification DRF (qui a lieu pendant get_response),
+    # pour garantir qu'un Tenant Context établi pendant une requête ne
+    # survit jamais jusqu'à la requête suivante traitée par le même
+    # thread (voir config/tenant_routing/middleware.py).
+    'config.tenant_routing.middleware.TenantContextCleanupMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -90,6 +96,24 @@ else:
             'NAME': BASE_DIR / 'db.sqlite3',
         }
     }
+
+# ====== TENANT ROUTING (Database per Tenant per Service) ======
+# `default` reste la base historique partagée — sert exclusivement le
+# "pool non assigné" (tenant_id=None, voir config/tenant_routing/context.py)
+# et les tables système de ce service (auth, admin, sessions,
+# contenttypes). Chaque tenant réel obtient une base PostgreSQL séparée,
+# créée à la demande sur CE MÊME serveur PostgreSQL (voir
+# config/tenant_routing/pool_registry.py). `default` n'est jamais
+# modifiée/réinitialisée par ce mécanisme.
+DATABASE_ROUTERS = ['config.tenant_routing.router.TenantDatabaseRouter']
+
+TENANT_SERVICE_URL = os.getenv('TENANT_SERVICE_URL', 'http://fultang-tenant-web:8000')
+TENANT_SERVICE_INTERNAL_TOKEN = os.getenv('TENANT_SERVICE_INTERNAL_TOKEN', '')
+TENANT_SERVICE_TIMEOUT_SECONDS = int(os.getenv('TENANT_SERVICE_TIMEOUT_SECONDS', '5'))
+TENANT_DB_CACHE_TTL_SECONDS = int(os.getenv('TENANT_DB_CACHE_TTL_SECONDS', '300'))
+TENANT_DB_CONN_MAX_AGE = int(os.getenv('TENANT_DB_CONN_MAX_AGE', '60'))
+TENANT_DB_USER = os.getenv('TENANT_DB_USER', os.getenv('DB_USER', 'fultang_user'))
+TENANT_DB_PASSWORD = os.getenv('TENANT_DB_PASSWORD', os.getenv('DB_PASSWORD', ''))
 
 # ====== VALIDATION MOT DE PASSE ======
 AUTH_PASSWORD_VALIDATORS = [

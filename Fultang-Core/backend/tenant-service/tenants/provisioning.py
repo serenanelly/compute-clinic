@@ -71,6 +71,13 @@ logger = logging.getLogger("tenants.provisioning")
 PROVISIONING_CAPABLE_SERVICES = {
     "PERSONNEL": f"{settings.PROVISIONING_SERVICE_PERSONNEL_URL.rstrip('/')}/api",
     "MEDICAL": f"{settings.PROVISIONING_SERVICE_MEDICAL_URL.rstrip('/')}/api/medical-monitoring",
+    # Phase 8 : fultang-compta-financiere et Gestion-Infrastructures exposent
+    # leur provisioning interne sous /api/ (comme PERSONNEL) ; ComptaMatiere
+    # sous /api/compta_matiere/ (voir son urls.py — même préfixe que son
+    # routage Gateway, /compta-matiere/** → /api/compta_matiere/<sub_path>).
+    "COMPTA": f"{settings.PROVISIONING_SERVICE_COMPTA_URL.rstrip('/')}/api",
+    "COMPTA_MATIERE": f"{settings.PROVISIONING_SERVICE_COMPTA_MATIERE_URL.rstrip('/')}/api/compta_matiere",
+    "INFRASTRUCTURE": f"{settings.PROVISIONING_SERVICE_INFRASTRUCTURE_URL.rstrip('/')}/api",
 }
 
 

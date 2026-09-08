@@ -47,6 +47,11 @@ class QuittanceValideeEvent(BaseEvent):
     montant: str = '0'
     date: str = field(default_factory=_now_iso)
     session_id: int | None = None
+    # Tenant courant au moment de la publication (voir
+    # config/tenant_routing/context.py) — permet au consumer de
+    # rétablir le même Tenant Context avant toute écriture ORM
+    # (un thread de consumer Kafka n'hérite d'aucun contextvar).
+    tenant_id: str | None = None
 
 
 @dataclass
@@ -57,6 +62,7 @@ class CaisseFermeeEvent(BaseEvent):
     ecart: str = '0'
     date: str = field(default_factory=lambda: datetime.now(timezone.utc).date().isoformat())
     caissier_id: int | None = None
+    tenant_id: str | None = None
 
 
 @dataclass
@@ -66,6 +72,7 @@ class OrdrePaiementExecuteEvent(BaseEvent):
     beneficiaire: str = ''
     montant: str = '0'
     date: str = field(default_factory=_now_iso)
+    tenant_id: str | None = None
 
 
 def build_event(event: BaseEvent) -> dict[str, Any]:

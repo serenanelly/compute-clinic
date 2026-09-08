@@ -465,16 +465,19 @@ class OrdrePaiementViewSet(viewsets.ModelViewSet):
         from apps.comptabilite.audit_helper import audit_action
         from apps.messaging.events import OrdrePaiementExecuteEvent, build_event, TOPIC_ORDRE_PAIEMENT_EXECUTE
         from apps.messaging.kafka_producer import publish_event
+        from config.tenant_routing.context import get_current_tenant_context
 
         audit_action(
             request, 'validation', 'ordre_paiement',
             f'Exécution ordre de paiement {op.numero}',
             objet_id=op.id, objet_reference=op.numero,
         )
+        tenant_ctx = get_current_tenant_context()
         event = OrdrePaiementExecuteEvent(
             ordre_id=op.id,
             beneficiaire=op.beneficiaire or '',
             montant=str(op.montant),
+            tenant_id=tenant_ctx.tenant_id if tenant_ctx else None,
         )
         publish_event(TOPIC_ORDRE_PAIEMENT_EXECUTE, build_event(event), key=str(op.id))
 

@@ -854,6 +854,12 @@ class ProvisioningOrchestratorTests(TestCase):
         """
         self.assertTrue(PROVISIONING_CAPABLE_SERVICES['PERSONNEL'].endswith('/api'))
         self.assertTrue(PROVISIONING_CAPABLE_SERVICES['MEDICAL'].endswith('/api/medical-monitoring'))
+        # Phase 8 : mêmes garanties pour les 3 services nouvellement rendus
+        # tenant-aware — COMPTA_MATIERE a le même besoin de préfixe dédié que
+        # MEDICAL (voir son urls.py : /api/compta_matiere/).
+        self.assertTrue(PROVISIONING_CAPABLE_SERVICES['COMPTA'].endswith('/api'))
+        self.assertTrue(PROVISIONING_CAPABLE_SERVICES['INFRASTRUCTURE'].endswith('/api'))
+        self.assertTrue(PROVISIONING_CAPABLE_SERVICES['COMPTA_MATIERE'].endswith('/api/compta_matiere'))
 
     def test_physical_provisioning_call_targets_the_correct_url(self):
         """Vérifie l'URL RÉELLEMENT appelée, pas seulement le résultat mocké — aurait détecté le bug de préfixe."""
@@ -876,20 +882,30 @@ class ProvisioningOrchestratorTests(TestCase):
         self.assertIn('/api/medical-monitoring/internal/provision-database/', captured['url'])
 
     def test_non_capable_service_is_skipped_and_creates_no_row(self):
-        """§4 de la tâche : ne pas fabriquer une TenantDatabase PENDING qui ne progressera jamais."""
-        results = self.orchestrator.provision(self.tenant.id, ['INFRASTRUCTURE'])
+        """§4 de la tâche : ne pas fabriquer une TenantDatabase PENDING qui ne progressera jamais.
+
+        Phase 8 : PERSONNEL/MEDICAL/COMPTA/COMPTA_MATIERE/INFRASTRUCTURE sont
+        désormais TOUS provisioning-capable — ce test utilise donc un code de
+        service synthétique, volontairement absent de
+        PROVISIONING_CAPABLE_SERVICES, pour continuer à exercer le chemin
+        SKIPPED (qui doit rester disponible pour tout futur service non
+        encore doté d'un tenant_routing/).
+        """
+        _make_service('LEGACY_SERVICE_NOT_MIGRATED', 'Service historique non migré')
+        results = self.orchestrator.provision(self.tenant.id, ['LEGACY_SERVICE_NOT_MIGRATED'])
 
         self.assertEqual(results[0].status, "SKIPPED")
-        self.assertEqual(TenantDatabase.objects.filter(tenant=self.tenant, service_id='INFRASTRUCTURE').count(), 0)
+        self.assertEqual(TenantDatabase.objects.filter(tenant=self.tenant, service_id='LEGACY_SERVICE_NOT_MIGRATED').count(), 0)
 
     def test_multiple_services_are_independent(self):
         """§4/§10 : plusieurs services demandés ensemble, chacun avec son propre résultat indépendant."""
+        _make_service('LEGACY_SERVICE_NOT_MIGRATED', 'Service historique non migré')
         with patch('tenants.provisioning._call_physical_provisioning', side_effect=self._physical_success):
-            results = self.orchestrator.provision(self.tenant.id, ['PERSONNEL', 'INFRASTRUCTURE'])
+            results = self.orchestrator.provision(self.tenant.id, ['PERSONNEL', 'LEGACY_SERVICE_NOT_MIGRATED'])
 
         by_service = {r.service_code: r.status for r in results}
         self.assertEqual(by_service['PERSONNEL'], TenantDatabaseStatus.ACTIVE)
-        self.assertEqual(by_service['INFRASTRUCTURE'], "SKIPPED")
+        self.assertEqual(by_service['LEGACY_SERVICE_NOT_MIGRATED'], "SKIPPED")
 
     def test_idempotent_reprovisioning_of_already_active_service_is_a_noop(self):
         with patch('tenants.provisioning._call_physical_provisioning', side_effect=self._physical_success) as mock_call:
