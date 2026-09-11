@@ -16,7 +16,9 @@ export function EditServiceModal({ isOpen, onClose, onSuccess, service }) {
     const [formData, setFormData] = useState({
         nom_service: '',
         desc_service: '',
-        chef_email: ''
+        chef_email: '',
+        date_decret: '',
+        reference_decret: '',
     });
 
     useEffect(() => {
@@ -24,7 +26,9 @@ export function EditServiceModal({ isOpen, onClose, onSuccess, service }) {
             setFormData({
                 nom_service: service.nom_service || '',
                 desc_service: service.desc_service || '',
-                chef_email: service.chef_service_details?.email || ''
+                chef_email: service.chef_service_details?.email || '',
+                date_decret: service.date_decret || '',
+                reference_decret: service.reference_decret || '',
             });
         }
     }, [service]);
@@ -120,6 +124,18 @@ export function EditServiceModal({ isOpen, onClose, onSuccess, service }) {
                     <p className="text-xs text-gray-500 mt-1">
                         {t('services.optional')} - Entrez l'email d'un personnel existant
                     </p>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Date du décret</label>
+                        <input type="date" name="date_decret" value={formData.date_decret} onChange={handleChange}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-end" />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Référence décret</label>
+                        <input type="text" name="reference_decret" value={formData.reference_decret} onChange={handleChange}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-end" />
+                    </div>
                 </div>
             </div>
         </Modal>

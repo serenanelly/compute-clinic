@@ -17,6 +17,7 @@ import {
 import PropTypes from "prop-types";
 import jsPDF from "jspdf";
 import { sortieApi, ligneSortieApi } from "../../services/comptabiliteMatiereApi";
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
 
 export function OutputList() {
     const [loading, setLoading] = useState(true);
@@ -223,7 +224,7 @@ export function OutputList() {
         doc.setFontSize(9);
         doc.setTextColor(100);
         doc.text(`Total: ${filteredOutputs.length} sortie(s)`, margin, pageHeight - 12);
-        doc.text("Fultang Clinic - Comptable Matière", pageWidth - margin, pageHeight - 12, { align: "right" });
+        doc.text(brandFooter('Comptable Matière'), pageWidth - margin, pageHeight - 12, { align: "right" });
 
         doc.save(`sorties_materiel_${new Date().toISOString().split('T')[0]}.pdf`);
     }

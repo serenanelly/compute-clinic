@@ -19,6 +19,7 @@ export function CreateVisitModal({ isOpen, onClose, patient, setSuccessMessage, 
     const [formData, setFormData] = useState({
         motif: '',
         id_medecin: '',
+        mode_urgence: false,
     });
     const [doctors, setDoctors] = useState([]);
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -27,7 +28,7 @@ export function CreateVisitModal({ isOpen, onClose, patient, setSuccessMessage, 
 
     useEffect(() => {
         if (!isOpen) {
-            setFormData({ motif: '', id_medecin: '' });
+            setFormData({ motif: '', id_medecin: '', mode_urgence: false });
             setError("");
             return;
         }
@@ -70,10 +71,15 @@ export function CreateVisitModal({ isOpen, onClose, patient, setSuccessMessage, 
         setError("");
 
         try {
-            const response = await axiosInstance.post("/visites/", {
+            const payload = {
                 patient: patient.id,
                 motif_visite: formData.motif.trim(),
-            });
+                mode_urgence: formData.mode_urgence,
+            };
+            if (formData.id_medecin) {
+                payload.medecin_oriente_id = formData.id_medecin;
+            }
+            const response = await axiosInstance.post("/visites/", payload);
 
             if (response.status === 201 || response.status === 200) {
                 const medLabel = formData.id_medecin
@@ -82,8 +88,11 @@ export function CreateVisitModal({ isOpen, onClose, patient, setSuccessMessage, 
                 const medecinNote = medLabel
                     ? ` — orienté Dr. ${medLabel.nom}`
                     : "";
+                const baseMsg = `Visite créée avec succès pour ${patient.nom}${medecinNote} !`;
                 setSuccessMessage(
-                    `Visite créée avec succès pour ${patient.nom}${medecinNote} !`
+                    formData.mode_urgence
+                        ? `${baseMsg}\n\nMode urgences : orientez le patient vers l'infirmier (paiement différé).`
+                        : `${baseMsg}\n\nProchaine étape : le patient doit se présenter à la caisse pour régler la consultation avant le passage infirmier et médical.`
                 );
                 setCanOpenSuccessModal(true);
                 onClose();
@@ -123,6 +132,16 @@ export function CreateVisitModal({ isOpen, onClose, patient, setSuccessMessage, 
 
                 <form onSubmit={handleSubmit} className="p-8 space-y-6">
                     {error && <Alert message={error} type="error" showIcon className="rounded-xl" />}
+                    <Alert
+                        type="info"
+                        showIcon
+                        className="rounded-xl"
+                        message={
+                            formData.mode_urgence
+                                ? "Mode urgences : dossier provisoire — le patient peut être pris en charge avant paiement (CORR-A3-001)."
+                                : "Après création de la visite, le patient doit régler la consultation à la caisse (RG-CF-001) avant d'être reçu par le médecin."
+                        }
+                    />
                     {doctorsError && (
                         <Alert
                             message={doctorsError}
@@ -171,6 +190,19 @@ export function CreateVisitModal({ isOpen, onClose, patient, setSuccessMessage, 
                             La sélection oriente le patient ; la visite est enregistrée même sans médecin.
                         </p>
                     </div>
+
+                    <label className="flex items-start gap-3 p-4 rounded-xl border border-orange-200 bg-orange-50 cursor-pointer">
+                        <input
+                            type="checkbox"
+                            checked={formData.mode_urgence}
+                            onChange={(e) => setFormData({ ...formData, mode_urgence: e.target.checked })}
+                            className="mt-1"
+                        />
+                        <span>
+                            <span className="font-semibold text-orange-800 block">Admission urgences / dossier provisoire</span>
+                            <span className="text-xs text-orange-700">Bypass paiement initial — prise en charge urgente (CORR-A3-001)</span>
+                        </span>
+                    </label>
 
                     <div className="flex gap-4 pt-4">
                         <button

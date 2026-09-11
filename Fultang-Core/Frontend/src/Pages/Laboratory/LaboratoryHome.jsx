@@ -5,6 +5,7 @@ import { LaboratoryNavLink } from "./LaboratoryNavLink.js";
 import { AlertTriangle, Search, LayoutDashboard } from "lucide-react";
 import { useLaboratoryData } from "../../hooks/useLaboratoryData";
 import './LaboratoryStyles.css';
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
 
 export const LaboratoryHome = () => {
   const [searchQuery, setSearchQuery] = useState("");
@@ -80,7 +81,7 @@ export const LaboratoryHome = () => {
           icon={LayoutDashboard}
           title="Tableau de Bord Laboratoire" 
           subtitle="Vue d'ensemble des examens du jour, alertes et statuts." 
-          tagText="Laboratoire Fultang Actif"
+          tagText={`Laboratoire ${APP_NAME} Actif`}
         />
 
         {isLoading && (

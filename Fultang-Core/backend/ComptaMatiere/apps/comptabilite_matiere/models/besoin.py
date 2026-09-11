@@ -69,6 +69,14 @@ class Besoin(models.Model):
         verbose_name="Commentaire du directeur",
         help_text="Commentaire du directeur sur le besoin"
     )
+
+    fournisseur_souhaite = models.CharField(
+        max_length=200,
+        blank=True,
+        default='',
+        verbose_name="Fournisseur souhaité",
+        help_text="Fournisseur préféré (catalogue comptabilité financière)",
+    )
     
     class Meta:
         verbose_name = "Besoin"

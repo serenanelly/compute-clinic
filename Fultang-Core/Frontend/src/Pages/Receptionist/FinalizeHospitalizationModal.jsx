@@ -37,9 +37,11 @@ export const FinalizeHospitalizationModal = ({ isOpen, onClose, hospitalization,
         try {
             const gatewayUrl = getGatewayBaseUrl();
             const response = await axiosInstance.get(`${gatewayUrl}/infrastructure/salles/`);
-            
+            const raw = response.data;
+            const allRooms = Array.isArray(raw) ? raw : (raw?.results || []);
+
             // Filter rooms that belong to this hospitalization's service and are DISPONIBLE
-            const filteredRooms = (response.data || []).filter(r => 
+            const filteredRooms = allRooms.filter(r =>
                 (!hospitalization?.service || r.service_nom === hospitalization.service) &&
                 r.statut === 'DISPONIBLE'
             );
@@ -63,9 +65,8 @@ export const FinalizeHospitalizationModal = ({ isOpen, onClose, hospitalization,
         setIsSubmitting(true);
         setError(null);
         try {
-            await axiosInstance.patch(`/hospitalisations/${hospitalization.id}/`, {
+            await axiosInstance.post(`/hospitalisations/${hospitalization.id}/assigner-chambre/`, {
                 room_id: selectedRoom,
-                statut: 'EN_COURS'
             });
             
             setShowSuccess(true);

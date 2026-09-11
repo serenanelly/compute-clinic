@@ -20,6 +20,7 @@ import {
 import PropTypes from "prop-types";
 import jsPDF from "jspdf";
 import { materielMedicalApi, materielDurableApi } from "../../services/comptabiliteMatiereApi";
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
 
 export function MaterialList() {
     const [loading, setLoading] = useState(true);
@@ -208,7 +209,7 @@ export function MaterialList() {
         doc.setFontSize(9);
         doc.setTextColor(100);
         doc.text(`Total: ${materielsAffiches.length} matériel(s)`, margin, yPos + 8);
-        doc.text("Fultang Clinic - Comptable Matière", pageWidth - margin, yPos + 8, { align: "right" });
+        doc.text(brandFooter('Comptable Matière'), pageWidth - margin, yPos + 8, { align: "right" });
 
         // Télécharger
         doc.save(`liste_materiel_${new Date().toISOString().split('T')[0]}.pdf`);

@@ -18,6 +18,7 @@ import {
 } from "react-icons/fa";
 import jsPDF from "jspdf";
 import { materielMedicalApi } from "../../services/comptabiliteMatiereApi";
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
 
 export function PharmacistMedicationList() {
     const [loading, setLoading] = useState(true);
@@ -196,7 +197,7 @@ export function PharmacistMedicationList() {
         doc.setFontSize(9);
         doc.setTextColor(100);
         doc.text(`Total: ${materielsAffiches.length} médicament(s) | Stock faible: ${lowStock} | Rupture: ${outOfStock}`, margin, yPos);
-        doc.text("Fultang Clinic - Pharmacie", pageWidth - margin, yPos, { align: "right" });
+        doc.text(brandFooter('Pharmacie'), pageWidth - margin, yPos, { align: "right" });
 
         // Télécharger
         doc.save(`liste_medicaments_${new Date().toISOString().split('T')[0]}.pdf`);

@@ -21,7 +21,13 @@ from apps.caisse.serializers import (
 from apps.comptabilite.exercice_scope import get_exercice_ouvert
 
 
-# ─────────────────────────────────────────────────────────────────────
+def _derniere_caisse_fermee():
+    """Dernière caisse clôturée avec solde physique — source du report à l'ouverture."""
+    return (
+        CaisseJournaliere.objects.filter(statut='fermee', solde_physique__isnull=False)
+        .order_by(F('date_fermeture').desc(nulls_last=True), '-date_creation', '-id')
+        .first()
+    )
 #  QUITTANCES  (13 endpoints)
 # ─────────────────────────────────────────────────────────────────────
 
@@ -597,11 +603,7 @@ class CaisseJournaliereViewSet(viewsets.ModelViewSet):
         le solde_physique de la dernière caisse fermée (même source que `ouvrir`).
         Le frontend doit afficher CETTE valeur, sans la recalculer côté client.
         """
-        last_fermee = (
-            CaisseJournaliere.objects.filter(statut='fermee', solde_physique__isnull=False)
-            .order_by(F('date_fermeture').desc(nulls_last=True), '-date_creation', '-id')
-            .first()
-        )
+        last_fermee = _derniere_caisse_fermee()
         if last_fermee is None:
             return Response({
                 'solde_ouverture': None,
@@ -633,14 +635,7 @@ class CaisseJournaliereViewSet(viewsets.ModelViewSet):
         today = now.date()
 
         # Anti-fraude : report automatique depuis la dernière clôture physique.
-        # nulls_last : les clôtures héritées/seedées sans date_fermeture ne doivent
-        # PAS passer devant une vraie clôture récente (PostgreSQL trie NULL en premier
-        # en DESC par défaut).
-        last_fermee = (
-            CaisseJournaliere.objects.filter(statut='fermee', solde_physique__isnull=False)
-            .order_by(F('date_fermeture').desc(nulls_last=True), '-date_creation', '-id')
-            .first()
-        )
+        last_fermee = _derniere_caisse_fermee()
         if last_fermee is not None:
             solde = last_fermee.solde_physique
             solde_source = 'report_cloture'

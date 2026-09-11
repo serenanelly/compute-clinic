@@ -15,7 +15,8 @@ from medical_workflow.views import (
     HospitalisationViewSet,
     MedicamentPrescritViewSet,
     AnomaliePrescriptionViewSet, DelivranceMedicamentViewSet,
-    ConciliationMedicamenteuseViewSet, PrelevementViewSet, ValeurCritiqueViewSet
+    ConciliationMedicamenteuseViewSet, PrelevementViewSet, ValeurCritiqueViewSet,
+    InterventionChirurgicaleViewSet,
 )
 
 # App: Patient Informations (Santé & Vie)
@@ -41,6 +42,7 @@ router.register(r'visites', VisiteViewSet, basename='visite')
 router.register(r'consultations', ConsultationViewSet, basename='consultation')
 router.register(r'examens', ExamenViewSet, basename='examen')
 router.register(r'hospitalisations', HospitalisationViewSet, basename='hospitalisation')
+router.register(r'interventions-chirurgicales', InterventionChirurgicaleViewSet, basename='intervention-chirurgicale')
 router.register(r'prescriptions', MedicamentPrescritViewSet, basename='prescription')
 
 # Pharmacy

@@ -5,6 +5,7 @@ import { LaboratoryNavLink } from "./LaboratoryNavLink.js";
 import { Filter, Inbox } from "lucide-react";
 import { useLaboratoryData } from "../../hooks/useLaboratoryData";
 import './LaboratoryStyles.css';
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
 
 export const LaboratoryReception = () => {
   const [selectedPatient, setSelectedPatient] = useState(null);
@@ -52,7 +53,7 @@ export const LaboratoryReception = () => {
           icon={Inbox}
           title="Réception & Préparation" 
           subtitle="Enregistrement des échantillons et validation avant analyse." 
-          tagText="Laboratoire Fultang Actif"
+          tagText={`Laboratoire ${APP_NAME} Actif`}
         />
 
         <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm flex flex-col">
@@ -310,7 +311,7 @@ export const LaboratoryReception = () => {
                                     conditions_transport: 'Température ambiante',
                                     conforme: true,
                                     commentaire: 'Prélèvement conforme, échantillon réceptionné.',
-                                    laborantin_id: 'Laborantin Fultang'
+                                    laborantin_id: `Laborantin ${APP_NAME}`
                                   });
                                 }
                               }}>Enregistrer prélèvement</button>
@@ -321,7 +322,7 @@ export const LaboratoryReception = () => {
                                     conditions_transport: 'Température ambiante',
                                     conforme: true,
                                     commentaire: 'Tous les échantillons réceptionnés.',
-                                    laborantin_id: 'Laborantin Fultang'
+                                    laborantin_id: `Laborantin ${APP_NAME}`
                                   });
                                 });
                               }}>Réceptionner tous ✓</button>

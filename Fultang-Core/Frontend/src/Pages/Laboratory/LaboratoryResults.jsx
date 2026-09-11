@@ -5,6 +5,7 @@ import { LaboratoryNavLink } from "./LaboratoryNavLink.js";
 import { Filter, FileText, X, Loader2, CheckCircle } from "lucide-react";
 import { useLaboratoryData } from "../../hooks/useLaboratoryData";
 import './LaboratoryStyles.css';
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
 
 export const LaboratoryResults = () => {
   const [selectedPatient, setSelectedPatient] = useState(null);
@@ -51,7 +52,7 @@ export const LaboratoryResults = () => {
           icon={FileText}
           title="Résultats" 
           subtitle="Consultation des résultats générés et validation finale." 
-          tagText="Laboratoire Fultang Actif"
+          tagText={`Laboratoire ${APP_NAME} Actif`}
         />
 
         <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm flex flex-col">
@@ -300,7 +301,7 @@ export const LaboratoryResults = () => {
                               date={exam.date}
                               isWarn={exam.isWarn}
                               estValide={exam.estValide}
-                              onValider={(id) => validerResultat(id, 'Biologiste Fultang')}
+                              onValider={(id) => validerResultat(id, `Biologiste ${APP_NAME}`)}
                               onCancel={() => setSelectedPatient(null)}
                             />
                           ))}
@@ -382,7 +383,7 @@ const ResultExamCard = ({ examId, examName, motif, anatomie, medecin, resultats,
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4 pt-4 border-t border-slate-100">
         <div>
           <p className="text-xs text-slate-500 mb-1">Validé par (biologiste)</p>
-          <p className="text-sm font-medium text-slate-800">{validateur || (estValide ? 'Biologiste Fultang' : 'Non validé')}</p>
+          <p className="text-sm font-medium text-slate-800">{validateur || (estValide ? `Biologiste ${APP_NAME}` : 'Non validé')}</p>
         </div>
         <div>
           <p className="text-xs text-slate-500 mb-1">Date de validation</p>

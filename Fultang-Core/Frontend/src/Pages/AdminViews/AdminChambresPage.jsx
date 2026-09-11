@@ -2,12 +2,14 @@ import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import { BedDouble, Plus, Search, Edit3, Trash2, Check, X } from 'lucide-react';
-import { Table, message, Modal as AntModal, Tag, Input, Progress } from 'antd';
+import { Table, message, Modal as AntModal, Tag, Input, Progress, Tabs } from 'antd';
 import { CustomDashboard } from '../../GlobalComponents/CustomDashboard.jsx';
 import { AdminNavBar } from './AdminNavBar.jsx';
 import { newAdminNavLink } from './newAdminNavLink.js';
 import { getAllChambres, createChambre, updateChambre, deleteChambre, getTypesSalle } from '../../services/chambresApi';
 import { getAllServices } from '../../services/servicesApi';
+import { getAllBatiments, createBatiment, getAllEtages, createEtage, getTypesBatiment } from '../../services/infrastructureApi.js';
+import { getServiceId } from '../../constants/personnelPostes.js';
 
 /**
  * Page de gestion des chambres hospitalières.
@@ -21,6 +23,10 @@ export function AdminChambresPage() {
     const [typesSalle, setTypesSalle] = useState([]);
     const [loading, setLoading] = useState(true);
     const [searchText, setSearchText] = useState('');
+    const [activeTab, setActiveTab] = useState('salles');
+    const [batiments, setBatiments] = useState([]);
+    const [etages, setEtages] = useState([]);
+    const [typesBatiment, setTypesBatiment] = useState([]);
 
     // Modal ajout/edit
     const [modalOpen, setModalOpen] = useState(false);
@@ -31,6 +37,7 @@ export function AdminChambresPage() {
         type: '',
         nb_places_total: 1,
         nb_places_disponibles: 1,
+        nb_lits: 1,
         tarif_journalier: '',
         service: ''
     });
@@ -40,6 +47,9 @@ export function AdminChambresPage() {
         fetchChambres();
         fetchServices();
         fetchTypesSalle();
+        fetchBatiments();
+        fetchEtages();
+        fetchTypesBatiment();
     }, []);
 
     useEffect(() => {
@@ -80,6 +90,75 @@ export function AdminChambresPage() {
         }
     };
 
+    const fetchTypesBatiment = async () => {
+        try {
+            const response = await getTypesBatiment();
+            const data = response.results || response.data || response || [];
+            setTypesBatiment(Array.isArray(data) ? data : []);
+        } catch (error) {
+            console.error('Error fetching types batiment:', error);
+        }
+    };
+
+    const fetchBatiments = async () => {
+        try {
+            const response = await getAllBatiments();
+            const data = response.results || response.data || response || [];
+            setBatiments(Array.isArray(data) ? data : []);
+        } catch (error) {
+            console.error('Error fetching batiments:', error);
+        }
+    };
+
+    const fetchEtages = async () => {
+        try {
+            const response = await getAllEtages();
+            const data = response.results || response.data || response || [];
+            setEtages(Array.isArray(data) ? data : []);
+        } catch (error) {
+            console.error('Error fetching etages:', error);
+        }
+    };
+
+    const handleQuickAddBatiment = async () => {
+        const nom = prompt('Nom du bâtiment :');
+        if (!nom?.trim()) return;
+        const typeId = typesBatiment[0]?.id;
+        if (!typeId) {
+            message.error('Aucun type de bâtiment disponible');
+            return;
+        }
+        try {
+            await createBatiment({
+                nom: nom.trim(),
+                type: typeId,
+                nb_etages: 1,
+                date_construction: new Date().toISOString().slice(0, 10),
+            });
+            message.success('Bâtiment créé');
+            fetchBatiments();
+        } catch {
+            message.error('Erreur création bâtiment');
+        }
+    };
+
+    const handleQuickAddEtage = async () => {
+        const batimentId = batiments[0]?.id;
+        if (!batimentId) {
+            message.error('Créez d\'abord un bâtiment');
+            return;
+        }
+        const numero = parseInt(prompt('Numéro d\'étage :', '1'), 10);
+        if (!numero) return;
+        try {
+            await createEtage({ numero, batiment: batimentId });
+            message.success('Étage créé');
+            fetchEtages();
+        } catch {
+            message.error('Erreur création étage');
+        }
+    };
+
     const fetchTypesSalle = async () => {
         try {
             const response = await getTypesSalle();
@@ -92,7 +171,7 @@ export function AdminChambresPage() {
 
     const openAddModal = () => {
         setEditingChambre(null);
-        setFormData({ numero: '', type: '', nb_places_total: 1, nb_places_disponibles: 1, tarif_journalier: '', service: '' });
+        setFormData({ numero: '', type: '', nb_places_total: 1, nb_places_disponibles: 1, nb_lits: 1, tarif_journalier: '', service: '' });
         setErrors({});
         setModalOpen(true);
     };
@@ -104,6 +183,7 @@ export function AdminChambresPage() {
             type: chambre.type || '',
             nb_places_total: chambre.nb_places_total || 1,
             nb_places_disponibles: chambre.nb_places_disponibles ?? chambre.nb_places_total ?? 1,
+            nb_lits: chambre.nb_lits ?? chambre.nb_places_total ?? 1,
             tarif_journalier: chambre.tarif_journalier || '',
             service: chambre.service || ''
         });
@@ -135,8 +215,12 @@ export function AdminChambresPage() {
                 numero: formData.numero,
                 type: parseInt(formData.type, 10),
                 nb_places_total: parseInt(formData.nb_places_total, 10),
-                nb_places_disponibles: parseInt(formData.nb_places_disponibles, 10)
+                nb_places_disponibles: parseInt(formData.nb_places_disponibles, 10),
+                nb_lits: parseInt(formData.nb_lits, 10),
             };
+            if (formData.tarif_journalier) {
+                dataToSend.tarif_journalier = parseFloat(formData.tarif_journalier);
+            }
             if (formData.service) {
                 dataToSend.service = parseInt(formData.service, 10);
             }
@@ -216,6 +300,13 @@ export function AdminChambresPage() {
             render: (text) => <span className="text-gray-600">{text || '—'}</span>
         },
         {
+            title: 'Lits',
+            dataIndex: 'nb_lits',
+            key: 'nb_lits',
+            width: 70,
+            render: (v, r) => <span className="text-gray-600">{v ?? r.nb_places_total ?? '—'}</span>,
+        },
+        {
             title: t('chambres.availability'),
             key: 'availability',
             width: 200,
@@ -287,9 +378,9 @@ export function AdminChambresPage() {
                         <div>
                             <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
                                 <BedDouble className="w-7 h-7 text-primary-end" />
-                                {t('chambres.title')}
+                                Infrastructures — Salles
                             </h1>
-                            <p className="text-gray-500 mt-1">{t('admin.manageHospitalRooms')}</p>
+                            <p className="text-gray-500 mt-1">Gestion des salles, bâtiments et étages</p>
                         </div>
                         <motion.button
                             whileHover={{ scale: 1.05 }}
@@ -303,7 +394,18 @@ export function AdminChambresPage() {
                     </div>
                 </motion.div>
 
-                {/* Table */}
+                <Tabs
+                    activeKey={activeTab}
+                    onChange={setActiveTab}
+                    className="mb-4"
+                    items={[
+                        { key: 'salles', label: 'Salles / Chambres' },
+                        { key: 'batiments', label: 'Bâtiments' },
+                        { key: 'etages', label: 'Étages' },
+                    ]}
+                />
+
+                {activeTab === 'salles' && (
                 <motion.div
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -339,6 +441,47 @@ export function AdminChambresPage() {
                         rowClassName="hover:bg-gray-50 transition-colors"
                     />
                 </motion.div>
+                )}
+
+                {activeTab === 'batiments' && (
+                    <div className="bg-white rounded-xl shadow-md p-6 border border-gray-100">
+                        <div className="flex justify-between mb-4">
+                            <h2 className="font-semibold text-gray-800">Bâtiments</h2>
+                            <button type="button" onClick={handleQuickAddBatiment}
+                                className="px-4 py-2 bg-primary-end text-white rounded-lg text-sm">+ Bâtiment</button>
+                        </div>
+                        <Table
+                            dataSource={batiments}
+                            rowKey="id"
+                            pagination={false}
+                            columns={[
+                                { title: 'Nom', dataIndex: 'nom', key: 'nom' },
+                                { title: 'Type', dataIndex: 'type_nom', key: 'type_nom', render: (_, r) => r.type_nom || r.type },
+                                { title: 'Étages', dataIndex: 'nb_etages', key: 'nb_etages' },
+                                { title: 'Construction', dataIndex: 'date_construction', key: 'date_construction' },
+                            ]}
+                        />
+                    </div>
+                )}
+
+                {activeTab === 'etages' && (
+                    <div className="bg-white rounded-xl shadow-md p-6 border border-gray-100">
+                        <div className="flex justify-between mb-4">
+                            <h2 className="font-semibold text-gray-800">Étages</h2>
+                            <button type="button" onClick={handleQuickAddEtage}
+                                className="px-4 py-2 bg-primary-end text-white rounded-lg text-sm">+ Étage</button>
+                        </div>
+                        <Table
+                            dataSource={etages}
+                            rowKey="id"
+                            pagination={false}
+                            columns={[
+                                { title: 'Numéro', dataIndex: 'numero', key: 'numero' },
+                                { title: 'Bâtiment', dataIndex: 'batiment_nom', key: 'batiment_nom', render: (_, r) => r.batiment_nom || r.batiment },
+                            ]}
+                        />
+                    </div>
+                )}
             </div>
 
             {/* Add / Edit Modal */}
@@ -391,9 +534,7 @@ export function AdminChambresPage() {
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                Service
-                            </label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Service</label>
                             <select
                                 name="service"
                                 value={formData.service}
@@ -401,11 +542,23 @@ export function AdminChambresPage() {
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-end"
                             >
                                 <option value="">— Aucun —</option>
-                                {services.map(s => <option key={s.id} value={s.id}>{s.nom_service}</option>)}
+                                {services.map(s => <option key={getServiceId(s)} value={getServiceId(s)}>{s.nom_service}</option>)}
                             </select>
                         </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">{t('chambres.dailyRate')}</label>
+                            <input
+                                type="number"
+                                name="tarif_journalier"
+                                value={formData.tarif_journalier}
+                                onChange={handleFormChange}
+                                min="0"
+                                placeholder="FCFA / jour"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-end"
+                            />
+                        </div>
                     </div>
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-3 gap-4">
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">
                                 {t('chambres.totalPlaces')} <span className="text-red-500">*</span>
@@ -419,6 +572,18 @@ export function AdminChambresPage() {
                                 className={`w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-primary-end ${errors.nb_places_total ? 'border-red-500' : 'border-gray-300'}`}
                             />
                             {errors.nb_places_total && <p className="text-red-500 text-xs mt-1">{errors.nb_places_total}</p>}
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Nombre de lits</label>
+                            <input
+                                type="number"
+                                name="nb_lits"
+                                value={formData.nb_lits}
+                                onChange={handleFormChange}
+                                min="1"
+                                max={formData.nb_places_total}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-end"
+                            />
                         </div>
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">

@@ -61,7 +61,8 @@ class PatientListSerializer(serializers.ModelSerializer):
             'id', 'matricule', 'nom', 'prenom', 'sexe',
             'date_naissance', 'lieu_naissance', 'profession',
             'statut_matrimonial', 'courriel', 'numero_securite_sociale',
-            'nombre_enfants', 'photo', 'created_at', 'updated_at',
+            'nombre_enfants', 'code_identifiant', 'est_anonyme', 'dossier_incomplet',
+            'created_at', 'updated_at',
             'contact_principal', 'ville',
         ]
         read_only_fields = ('id', 'matricule', 'created_at', 'updated_at')
@@ -97,6 +98,35 @@ class PatientSerializer(serializers.ModelSerializer):
         model = Patient
         fields = '__all__'
         read_only_fields = ('id', 'matricule', 'created_at', 'updated_at')
+        extra_kwargs = {
+            # Généré dans validate() si absent (accueil réception sans N° SS).
+            'numero_securite_sociale': {'required': False, 'allow_blank': True},
+            'lieu_naissance': {'required': False, 'allow_blank': True},
+            'profession': {'required': False, 'allow_blank': True},
+            'code_identifiant': {'required': False, 'allow_blank': True},
+        }
+
+    def validate_profession(self, value):
+        cleaned = (value or '').strip()
+        minimal = self.initial_data.get('est_anonyme') or self.initial_data.get('dossier_incomplet')
+        if minimal:
+            return cleaned or 'Non renseigné'
+        if not cleaned:
+            raise serializers.ValidationError('La profession est obligatoire.')
+        if cleaned.lower() in ('non renseignée', 'non renseignee', 'n/a', '-'):
+            raise serializers.ValidationError('Indiquez la profession réelle du patient.')
+        return cleaned
+
+    def validate(self, attrs):
+        est_anonyme = attrs.get('est_anonyme', self.initial_data.get('est_anonyme'))
+        code = attrs.get('code_identifiant') or self.initial_data.get('code_identifiant')
+        if est_anonyme and code:
+            attrs.setdefault('nom', code)
+            attrs.setdefault('dossier_incomplet', True)
+        if not attrs.get('numero_securite_sociale'):
+            import uuid
+            attrs['numero_securite_sociale'] = f"TMP-{uuid.uuid4().hex[:12].upper()}"
+        return attrs
 
     def to_representation(self, instance):
         """Surcharge pour retourner les objets complets en lecture."""

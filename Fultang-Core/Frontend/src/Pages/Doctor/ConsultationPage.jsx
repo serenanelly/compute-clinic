@@ -8,10 +8,13 @@ import { doctorApi } from "../../services/doctorApi.js";
 import { 
     Stethoscope, User, Activity, FileText, Pill, FlaskConical, 
     Save, Plus, AlertCircle, Heart, Thermometer, Droplets, CheckCircle,
-    HeartPulse, Weight, Ruler
+    HeartPulse, Weight, Ruler, Download
 } from 'lucide-react';
+import { downloadPatientDossierPdf } from '../../Utils/exportPatientDossierPdf.js';
 import { AppRoutesPaths } from "../../Router/appRouterPaths.js";
 import axiosInstance from "../../Utils/axiosInstance.js";
+import { getVisiteById } from "../../services/visiteApi.js";
+import { getExamPrestations } from "../../services/prestationsApi.js";
 
 export const ConsultationPage = () => {
     const [searchParams] = useSearchParams();
@@ -22,6 +25,7 @@ export const ConsultationPage = () => {
     const [activeTab, setActiveTab] = useState('dossier');
     const [isLoading, setIsLoading] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
+    const [isExportingDossier, setIsExportingDossier] = useState(false);
     
     const [patientData, setPatientData] = useState(null);
     const [donneesCliniques, setDonneesCliniques] = useState(null);
@@ -32,15 +36,24 @@ export const ConsultationPage = () => {
     const [newSymptome, setNewSymptome] = useState({ nom: '', description: '', date_apparition: '' });
 
     const [diagnostics, setDiagnostics] = useState([]);
-    const [newDiagnostic, setNewDiagnostic] = useState({ libelle: '', description: '', type: 'PRINCIPAL' });
+    const [newDiagnostic, setNewDiagnostic] = useState({ libelle: '', description: '', type_diagnostic: 'ETIOLOGIQUE' });
+    const [orientations, setOrientations] = useState([]);
+    const [newOrientation, setNewOrientation] = useState({ specialite: '', motif: '' });
+    const [examenPhysique, setExamenPhysique] = useState('');
+    const [examenPhysiqueEnregistre, setExamenPhysiqueEnregistre] = useState('');
 
     const [prescriptions, setPrescriptions] = useState([]);
     const [newPrescription, setNewPrescription] = useState({ medicament: '', posologie: '', duree: '' });
 
     const [examens, setExamens] = useState([]);
-    const [newExamen, setNewExamen] = useState({ nom_examen: '', motif: '' });
+    const [newExamen, setNewExamen] = useState({ nom_examen: '', motif: '', categorie: 'BIOLOGIE', prestation_id: '' });
+    const [examPrestations, setExamPrestations] = useState([]);
 
     const [hospitalisation, setHospitalisation] = useState({ service: '', motif: '', urgence: false });
+
+    useEffect(() => {
+        getExamPrestations().then(setExamPrestations).catch(() => setExamPrestations([]));
+    }, []);
 
     useEffect(() => {
         if (!patientId || !visiteId) {
@@ -53,6 +66,16 @@ export const ConsultationPage = () => {
     const initConsultation = useCallback(async () => {
         try {
             setIsLoading(true);
+
+            const visite = await getVisiteById(visiteId);
+            if (!visite.mode_urgence && (visite.paiement_actif === false || (!visite.paiement_actif && !visite.paiement_valide))) {
+                const msg = visite.paiement_valide
+                    ? "CORR-A2-002 : le délai de validité du paiement est expiré — le patient doit repasser à la caisse."
+                    : "RG-CF-001 : le patient doit régler la consultation à la caisse avant l'accès médecin.";
+                alert(msg);
+                navigate(AppRoutesPaths.doctorPage);
+                return;
+            }
             
             // Reset COMPLET — empêche les données de la consultation précédente de rester
             setSymptomes([]);
@@ -64,9 +87,11 @@ export const ConsultationPage = () => {
             setConsultationId(null);
             setHospitalisation({ service: '', motif: '', urgence: false });
             setNewSymptome({ nom: '', description: '', date_apparition: '' });
-            setNewDiagnostic({ libelle: '', description: '', type: 'PRINCIPAL' });
+            setNewDiagnostic({ libelle: '', description: '', type_diagnostic: 'ETIOLOGIQUE' });
             setNewPrescription({ medicament: '', posologie: '', duree: '' });
-            setNewExamen({ nom_examen: '', motif: '' });
+            setOrientations([]);
+            setNewOrientation({ specialite: '', motif: '' });
+            setNewExamen({ nom_examen: '', motif: '', categorie: 'BIOLOGIE', prestation_id: '' });
             setActiveTab('dossier');
             
             // 1. Fetch Patient Dossier
@@ -80,12 +105,8 @@ export const ConsultationPage = () => {
                 setDonneesCliniques(currentVisite.donnees_cliniques);
             }
 
-            // 2. Chercher une consultation existante POUR CETTE VISITE PRÉCISE uniquement
-            const existingConsultations = await doctorApi.getConsultations({ visite: visiteId });
-            // Filtrer côté client pour s'assurer qu'on ne charge que la consultation de cette visite
-            const consultationForThisVisite = Array.isArray(existingConsultations)
-                ? existingConsultations.find(c => c.visite === visiteId)
-                : null;
+            // 2. Chercher une consultation existante pour cette visite (filtre backend + comparaison UUID)
+            const consultationForThisVisite = await doctorApi.getConsultationByVisite(visiteId);
 
             if (consultationForThisVisite) {
                 setConsultationId(consultationForThisVisite.id);
@@ -94,6 +115,10 @@ export const ConsultationPage = () => {
                 if (consultationForThisVisite.diagnostics?.length > 0) setDiagnostics(consultationForThisVisite.diagnostics);
                 if (consultationForThisVisite.prescriptions?.length > 0) setPrescriptions(consultationForThisVisite.prescriptions);
                 if (consultationForThisVisite.examens?.length > 0) setExamens(consultationForThisVisite.examens);
+                if (consultationForThisVisite.orientations?.length > 0) setOrientations(consultationForThisVisite.orientations);
+                const savedExamen = consultationForThisVisite.examen_physique || '';
+                setExamenPhysiqueEnregistre(savedExamen);
+                setExamenPhysique('');
             } else {
                 // Aucune consultation pour cette visite → on en crée une nouvelle, vierge
                 const newConsult = await doctorApi.createConsultation(visiteId, {
@@ -110,6 +135,19 @@ export const ConsultationPage = () => {
         }
     }, [patientId, visiteId]);
 
+    const handleDownloadDossier = async () => {
+        if (!patientId || !patientData) return;
+        try {
+            setIsExportingDossier(true);
+            const patientVisites = await doctorApi.getPatientVisites(patientId);
+            downloadPatientDossierPdf(patientData, patientVisites);
+        } catch {
+            alert('Impossible de générer le dossier PDF.');
+        } finally {
+            setIsExportingDossier(false);
+        }
+    };
+
     const handleAddSymptome = async (e) => {
         e.preventDefault();
         if(!newSymptome.nom) return;
@@ -125,14 +163,37 @@ export const ConsultationPage = () => {
         }
     };
 
+    const handleSaveExamenPhysique = async (e) => {
+        e.preventDefault();
+        if (!consultationId) return;
+        if (!examenPhysique.trim()) return;
+        try {
+            setIsSaving(true);
+            const updated = await doctorApi.updateConsultation(consultationId, {
+                examen_physique: examenPhysique.trim(),
+            });
+            setExamenPhysiqueEnregistre(updated.examen_physique || examenPhysique.trim());
+            setExamenPhysique('');
+        } catch {
+            alert('Erreur lors de l\'enregistrement de l\'examen physique.');
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
     const handleAddDiagnostic = async (e) => {
         e.preventDefault();
         if(!newDiagnostic.libelle) return;
+        if (!examenPhysiqueEnregistre.trim()) {
+            alert('CORR-A4-002 : enregistrez d\'abord l\'examen physique (onglet Examen physique).');
+            setActiveTab('examen_physique');
+            return;
+        }
         try {
             setIsSaving(true);
             const added = await doctorApi.addDiagnostic(consultationId, newDiagnostic);
             setDiagnostics([...diagnostics, added]);
-            setNewDiagnostic({ libelle: '', description: '', type: 'PRINCIPAL' });
+            setNewDiagnostic({ libelle: '', description: '', type_diagnostic: 'ETIOLOGIQUE' });
         } catch (error) {
             alert("Erreur lors de l'ajout du diagnostic");
         } finally {
@@ -166,21 +227,43 @@ export const ConsultationPage = () => {
 
     const handleAddExamen = async (e) => {
         e.preventDefault();
-        if(!newExamen.nom_examen) return;
+        if (!newExamen.nom_examen?.trim()) {
+            alert("Le nom de l'examen est obligatoire.");
+            return;
+        }
         try {
             setIsSaving(true);
             
             // Le backend attend "nom" et non "nom_examen"
             const payload = {
-                nom: newExamen.nom_examen,
-                motif: newExamen.motif || "Examen de routine"
+                nom: newExamen.nom_examen.trim(),
+                motif: newExamen.motif?.trim() || '',
+                categorie: newExamen.categorie,
             };
             
             const added = await doctorApi.prescribeExam(consultationId, payload);
             setExamens([...examens, added]);
-            setNewExamen({ nom_examen: '', motif: '' });
+            setNewExamen({ nom_examen: '', motif: '', categorie: 'BIOLOGIE', prestation_id: '' });
         } catch (error) {
             alert("Erreur lors de la prescription d'examen");
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    const handleAddOrientation = async (e) => {
+        e.preventDefault();
+        if (!newOrientation.specialite?.trim() || !newOrientation.motif?.trim()) return;
+        try {
+            setIsSaving(true);
+            const added = await doctorApi.addOrientation(consultationId, {
+                specialite: newOrientation.specialite.trim(),
+                motif: newOrientation.motif.trim(),
+            });
+            setOrientations([...orientations, added]);
+            setNewOrientation({ specialite: '', motif: '' });
+        } catch (error) {
+            alert("Erreur lors de l'orientation spécialiste.");
         } finally {
             setIsSaving(false);
         }
@@ -223,7 +306,11 @@ export const ConsultationPage = () => {
                 }
                 navigate(AppRoutesPaths.doctorPage);
             } catch (error) {
-                alert("Erreur lors de la clôture.");
+                const msg = error.response?.data?.error
+                    || (error.response?.status === 402
+                        ? "RG-WP-005 : clôture impossible sans règlement enregistré à la caisse."
+                        : "Erreur lors de la clôture.");
+                alert(msg);
             }
         }
     };
@@ -231,9 +318,11 @@ export const ConsultationPage = () => {
     const tabs = [
         { id: 'dossier', label: 'Dossier & Constantes', icon: User },
         { id: 'symptomes', label: 'Symptômes', icon: AlertCircle, count: symptomes.length },
+        { id: 'examen_physique', label: 'Examen physique', icon: HeartPulse },
         { id: 'diagnostic', label: 'Diagnostic', icon: Stethoscope, count: diagnostics.length },
         { id: 'ordonnance', label: 'Ordonnance', icon: Pill, count: prescriptions.length },
         { id: 'examens', label: 'Examens', icon: FlaskConical, count: examens.length },
+        { id: 'orientation', label: 'Orientation', icon: Stethoscope, count: orientations.length },
         { id: 'hospitalisation', label: 'Hospitalisation', icon: Activity },
     ];
 
@@ -316,6 +405,18 @@ export const ConsultationPage = () => {
                             {/* TAB: DOSSIER & CONSTANTES */}
                             {activeTab === 'dossier' && (
                                 <div className="animate-fade-in-up">
+                                    <div className="flex items-center justify-between mb-4 border-b pb-2">
+                                        <h3 className="text-lg font-bold text-gray-800">Dossier patient</h3>
+                                        <button
+                                            type="button"
+                                            onClick={handleDownloadDossier}
+                                            disabled={isExportingDossier || !patientData}
+                                            className="px-3 py-1.5 text-sm bg-primary-start text-white rounded-lg font-bold flex items-center gap-1.5 disabled:opacity-50"
+                                        >
+                                            <Download className="w-4 h-4" />
+                                            {isExportingDossier ? 'Génération…' : 'Télécharger'}
+                                        </button>
+                                    </div>
                                     <h3 className="text-lg font-bold text-gray-800 mb-4 border-b pb-2">Constantes Vitales (Prises par l'infirmier)</h3>
                                      {donneesCliniques ? (
                                          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
@@ -427,11 +528,55 @@ export const ConsultationPage = () => {
                             )}
 
                             {/* TAB: DIAGNOSTIC */}
+                            {activeTab === 'examen_physique' && (
+                                <div className="animate-fade-in-up">
+                                    <h3 className="text-lg font-bold text-gray-800 mb-4 border-b pb-2 flex items-center gap-2">
+                                        <HeartPulse className="w-5 h-5 text-primary-start" /> Examen physique <span className="text-red-500 text-sm">*</span>
+                                    </h3>
+
+                                    <form onSubmit={handleSaveExamenPhysique} className="bg-gray-50 p-4 rounded-xl border border-gray-200 mb-6 flex flex-col gap-4">
+                                        <div>
+                                            <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Observations cliniques</label>
+                                            <textarea
+                                                value={examenPhysique}
+                                                onChange={(e) => setExamenPhysique(e.target.value)}
+                                                className="w-full px-3 py-2 border rounded-lg focus:ring-2 outline-none min-h-[120px]"
+                                                placeholder="Inspection, palpation, auscultation, signes cliniques…"
+                                                required
+                                            />
+                                        </div>
+                                        <div className="flex justify-end">
+                                            <button type="submit" disabled={isSaving || isLoading || !consultationId} className="px-6 py-2 bg-primary-start text-white rounded-lg font-bold flex items-center shadow-md disabled:opacity-50">
+                                                <Save className="w-4 h-4 mr-2" /> {isSaving ? 'Enregistrement...' : 'Enregistrer l\'examen physique'}
+                                            </button>
+                                        </div>
+                                    </form>
+
+                                    <ul className="space-y-3">
+                                        {!examenPhysiqueEnregistre.trim() ? (
+                                            <p className="text-gray-400 italic">Aucun examen physique enregistré.</p>
+                                        ) : (
+                                            <li className="p-4 bg-emerald-50 border border-emerald-100 rounded-lg shadow-sm">
+                                                <p className="text-[10px] font-bold uppercase text-emerald-600 mb-1">Examen physique</p>
+                                                <p className="text-gray-800 whitespace-pre-wrap">{examenPhysiqueEnregistre}</p>
+                                            </li>
+                                        )}
+                                    </ul>
+                                </div>
+                            )}
+
                             {activeTab === 'diagnostic' && (
                                 <div className="animate-fade-in-up">
                                     <h3 className="text-lg font-bold text-gray-800 mb-4 border-b pb-2">Diagnostics</h3>
                                     
                                     <form onSubmit={handleAddDiagnostic} className="bg-gray-50 p-4 rounded-xl border border-gray-200 mb-6 flex flex-col gap-4">
+                                        <div>
+                                            <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Type</label>
+                                            <select value={newDiagnostic.type_diagnostic} onChange={e => setNewDiagnostic({...newDiagnostic, type_diagnostic: e.target.value})} className="w-full px-3 py-2 border rounded-lg">
+                                                <option value="ETIOLOGIQUE">Diagnostic étiologique retenu</option>
+                                                <option value="DIFFERENTIEL">Hypothèse différentielle</option>
+                                            </select>
+                                        </div>
                                         <div>
                                             <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Diagnostic</label>
                                             <input type="text" value={newDiagnostic.libelle} onChange={e => setNewDiagnostic({...newDiagnostic, libelle: e.target.value})} className="w-full px-3 py-2 border rounded-lg focus:ring-2 outline-none" placeholder="Ex: Paludisme sévère" required />
@@ -442,14 +587,17 @@ export const ConsultationPage = () => {
                                         </div>
                                         <div className="flex justify-end">
                                             <button type="submit" disabled={isSaving} className="px-6 py-2 bg-primary-start text-white rounded-lg font-bold flex items-center shadow-md">
-                                                <Save className="w-4 h-4 mr-2" /> {isSaving ? 'Enregistrement...' : 'Poser le diagnostic'}
+                                                <Save className="w-4 h-4 mr-2" /> {isSaving ? 'Enregistrement...' : 'Enregistrer le diagnostic'}
                                             </button>
                                         </div>
                                     </form>
 
                                     <ul className="space-y-3">
-                                        {diagnostics.length === 0 ? <p className="text-gray-400 italic">Aucun diagnostic posé.</p> : diagnostics.map((d, i) => (
+                                        {diagnostics.length === 0 ? <p className="text-gray-400 italic">Aucun diagnostic enregistré.</p> : diagnostics.map((d, i) => (
                                             <li key={i} className="p-4 bg-blue-50 border border-blue-100 rounded-lg shadow-sm">
+                                                <span className="text-[10px] font-bold uppercase text-blue-500">
+                                                    {d.type_diagnostic === 'DIFFERENTIEL' ? 'Différentiel' : 'Étiologique'}
+                                                </span>
                                                 <p className="font-bold text-blue-800">{d.libelle}</p>
                                                 <p className="text-sm text-blue-600 mt-1">{d.description}</p>
                                             </li>
@@ -505,18 +653,53 @@ export const ConsultationPage = () => {
                                 <div className="animate-fade-in-up">
                                     <h3 className="text-lg font-bold text-gray-800 mb-4 border-b pb-2">Demande d'examens (Labo / Imagerie)</h3>
                                     
-                                    <form onSubmit={handleAddExamen} className="bg-gray-50 p-4 rounded-xl border border-gray-200 mb-6 flex items-end gap-4">
-                                        <div className="flex-1">
-                                            <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Type d'examen</label>
-                                            <input type="text" value={newExamen.nom_examen} onChange={e => setNewExamen({...newExamen, nom_examen: e.target.value})} className="w-full px-3 py-2 border rounded-lg focus:ring-2 outline-none" placeholder="Ex: Goutte épaisse, Échographie..." required />
+                                    <form onSubmit={handleAddExamen} className="bg-gray-50 p-4 rounded-xl border border-gray-200 mb-6 flex flex-col gap-4">
+                                        <div>
+                                            <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Catégorie</label>
+                                            <select value={newExamen.categorie} onChange={e => setNewExamen({...newExamen, categorie: e.target.value})} className="w-full px-3 py-2 border rounded-lg" required>
+                                                <option value="BIOLOGIE">Biologie</option>
+                                                <option value="IMAGERIE">Imagerie</option>
+                                                <option value="HISTOLOGIE">Histologie</option>
+                                            </select>
+                                        </div>
+                                        <div className="flex items-end gap-4">
+                                        <div>
+                                            <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Examen (catalogue)</label>
+                                            <select
+                                                value={newExamen.prestation_id}
+                                                onChange={(e) => {
+                                                    const p = examPrestations.find((x) => String(x.id) === e.target.value);
+                                                    const catMap = { laboratoire: 'BIOLOGIE', imagerie: 'IMAGERIE' };
+                                                    setNewExamen({
+                                                        ...newExamen,
+                                                        prestation_id: e.target.value,
+                                                        nom_examen: p?.libelle || '',
+                                                        categorie: catMap[p?.type_prestation] || newExamen.categorie,
+                                                    });
+                                                }}
+                                                className="w-full px-3 py-2 border rounded-lg mb-2"
+                                            >
+                                                <option value="">— Choisir dans le catalogue —</option>
+                                                {examPrestations
+                                                    .filter((p) => {
+                                                        if (newExamen.categorie === 'IMAGERIE') return p.type_prestation === 'imagerie';
+                                                        if (newExamen.categorie === 'HISTOLOGIE') return p.type_prestation === 'laboratoire';
+                                                        return p.type_prestation === 'laboratoire';
+                                                    })
+                                                    .map((p) => (
+                                                        <option key={p.id} value={p.id}>{p.libelle} ({p.tarif} FCFA)</option>
+                                                    ))}
+                                            </select>
+                                            <input type="text" value={newExamen.nom_examen} onChange={e => setNewExamen({...newExamen, nom_examen: e.target.value})} className="w-full px-3 py-2 border rounded-lg focus:ring-2 outline-none" placeholder="Ou saisie libre…" required />
                                         </div>
                                         <div className="flex-1">
                                             <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Motif / Indications</label>
-                                            <input type="text" value={newExamen.motif} onChange={e => setNewExamen({...newExamen, motif: e.target.value})} className="w-full px-3 py-2 border rounded-lg focus:ring-2 outline-none" placeholder="Ex: Suspicion paludisme" />
+                                            <input type="text" value={newExamen.motif} onChange={e => setNewExamen({...newExamen, motif: e.target.value})} className="w-full px-3 py-2 border rounded-lg focus:ring-2 outline-none" placeholder="Ex: Suspicion paludisme (facultatif)" />
                                         </div>
                                         <button type="submit" disabled={isSaving} className="px-4 py-2 bg-primary-start text-white rounded-lg font-bold flex items-center shadow-md">
                                             <Plus className="w-4 h-4 mr-1" /> {isSaving ? '...' : 'Demander'}
                                         </button>
+                                        </div>
                                     </form>
 
                                     <ul className="space-y-3">
@@ -524,7 +707,7 @@ export const ConsultationPage = () => {
                                             <li key={i} className="flex justify-between items-center p-3 bg-white border rounded-lg shadow-sm">
                                                 <div>
                                                     <p className="font-bold text-gray-800">{e.nom || e.nom_examen || e.examen}</p>
-                                                    <p className="text-sm text-gray-500">{e.motif || "Sans indication"}</p>
+                                                    <p className="text-sm text-gray-500">{e.categorie ? `${e.categorie} — ` : ''}{e.motif || "Sans indication"}</p>
                                                 </div>
                                                 <span className="px-2 py-1 bg-yellow-50 text-yellow-700 text-xs font-bold rounded-full border border-yellow-200">
                                                     En attente
@@ -535,10 +718,43 @@ export const ConsultationPage = () => {
                                 </div>
                             )}
 
+                            {/* TAB: ORIENTATION SPÉCIALISTE */}
+                            {activeTab === 'orientation' && (
+                                <div className="animate-fade-in-up">
+                                    <h3 className="text-lg font-bold text-gray-800 mb-4 border-b pb-2">Orientation spécialiste (prescription)</h3>
+                                    <form onSubmit={handleAddOrientation} className="bg-gray-50 p-4 rounded-xl border border-gray-200 mb-6 flex flex-col gap-4">
+                                        <div>
+                                            <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Spécialité / service</label>
+                                            <input type="text" value={newOrientation.specialite} onChange={e => setNewOrientation({...newOrientation, specialite: e.target.value})} className="w-full px-3 py-2 border rounded-lg" placeholder="Ex: Cardiologie, Pédiatrie…" required />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Motif de l'orientation</label>
+                                            <textarea value={newOrientation.motif} onChange={e => setNewOrientation({...newOrientation, motif: e.target.value})} className="w-full px-3 py-2 border rounded-lg" rows={2} required />
+                                        </div>
+                                        <div className="flex justify-end">
+                                            <button type="submit" disabled={isSaving} className="px-6 py-2 bg-primary-start text-white rounded-lg font-bold">
+                                                Prescrire l'orientation
+                                            </button>
+                                        </div>
+                                    </form>
+                                    <ul className="space-y-3">
+                                        {orientations.length === 0 ? (
+                                            <p className="text-gray-400 italic">Aucune orientation enregistrée.</p>
+                                        ) : orientations.map((o) => (
+                                            <li key={o.id} className="p-4 bg-purple-50 border border-purple-100 rounded-lg">
+                                                <p className="font-bold text-purple-900">{o.specialite}</p>
+                                                <p className="text-sm text-purple-700 mt-1">{o.motif}</p>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+
                             {/* TAB: HOSPITALISATION */}
                             {activeTab === 'hospitalisation' && (
                                 <div className="animate-fade-in-up">
                                     <h3 className="text-lg font-bold text-gray-800 mb-4 border-b pb-2">Demande d'Hospitalisation</h3>
+                                    <p className="text-sm text-gray-500 mb-4">Après validation de la demande, l&apos;infirmier(ère) du service affecte le patient à une salle et un lit.</p>
                                     
                                     <form onSubmit={handleHospitaliser} className="bg-gray-50 p-4 rounded-xl border border-gray-200 mb-6 flex flex-col gap-4">
                                         <div>
@@ -561,7 +777,7 @@ export const ConsultationPage = () => {
                                     </form>
                                     <div className="p-4 bg-blue-50 border border-blue-100 rounded-lg text-sm text-blue-800">
                                         <p className="font-bold flex items-center"><AlertCircle className="w-4 h-4 mr-2"/> Note</p>
-                                        <p className="mt-1">La demande sera envoyée à la réception / administration pour l'attribution d'une chambre (AdminChambresPage).</p>
+                                        <p className="mt-1">La demande est transmise à l&apos;infirmier(ère) du service concerné, qui procède à l&apos;affectation de la salle et du lit.</p>
                                     </div>
                                 </div>
                             )}

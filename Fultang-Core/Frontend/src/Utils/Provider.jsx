@@ -8,9 +8,11 @@ export const [FultangProvider, useAuthentication] = constate(
   (value) => value.authMethods
 );
 
+import { getValidToken } from "./setupAuthRefresh.js";
+
 function loadAuthFromStorage() {
   try {
-    const token = localStorage.getItem("token_key_fultang");
+    const token = getValidToken();
     if (!token) {
       return { isLogged: false, userData: {}, userRole: "" };
     }
@@ -306,7 +308,9 @@ function useLogin() {
         ['director', 'directeur'],
         ['laborantin', 'laboratory', 'laboratoryassistant', 'laboratory-assistant'],
         ['comptable_financier', 'comptable', 'accountant'],
-        ['compta_matiere', 'material_accountant']
+        ['compta_matiere', 'material_accountant'],
+        ['admin', 'administrateur', 'administrateur_systeme', 'administrator'],
+        ['platform_admin', 'platformadmin'],
       ];
 
       for (const group of groups) {

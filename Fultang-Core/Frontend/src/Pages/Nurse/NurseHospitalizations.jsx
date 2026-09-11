@@ -5,14 +5,18 @@ import { nurseNavLink } from "./nurseNavLink.js";
 import { NurseNavBar } from "./NurseNavBar.jsx";
 import { Loading } from "../../GlobalComponents/Loading.jsx";
 import { nurseApi } from "../../services/nurseApi.js";
+import axiosInstance from "../../Utils/axiosInstance.js";
 import { AppRoutesPaths } from "../../Router/appRouterPaths.js";
-import { Bed, User, Home, Plus, Activity, ClipboardList, ChevronRight, Search, X, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Bed, User, Home, Plus, Activity, ChevronRight, Search, X, CheckCircle2, AlertCircle, BedDouble, MapPin } from 'lucide-react';
+import NurseAssignRoomModal from './NurseAssignRoomModal.jsx';
 
 export const NurseHospitalizations = () => {
     const [hospitals, setHospitals] = useState([]);
     const [isLoading, setIsLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState("");
     const navigate = useNavigate();
+
+    const [assignTarget, setAssignTarget] = useState(null);
 
     // Care Modal State
     const [isModalOpen, setIsModalOpen] = useState(false);
@@ -39,6 +43,35 @@ export const NurseHospitalizations = () => {
             console.error(err);
         } finally {
             setIsLoading(false);
+        }
+    };
+
+    const handleDemanderSortie = async (hospId) => {
+        if (!window.confirm('Confirmer la demande de sortie pour ce patient ?')) return;
+        try {
+            await axiosInstance.post(`/hospitalisations/${hospId}/demander-sortie/`);
+            await loadHospitalizations();
+        } catch {
+            alert('Impossible de lancer la sortie.');
+        }
+    };
+
+    const handleValiderSortieMedicale = async (hosp) => {
+        const type = window.prompt('Type de sortie : AUTORISEE, CONTRE_AVIS ou EVASION', 'AUTORISEE');
+        if (!type) return;
+        const notes = type !== 'AUTORISEE' ? window.prompt('Notes obligatoires :') : '';
+        if (type !== 'AUTORISEE' && !notes?.trim()) {
+            alert('Notes requises pour CONTRE_AVIS ou EVASION.');
+            return;
+        }
+        try {
+            await axiosInstance.post(`/hospitalisations/${hosp.id}/valider-sortie-medicale/`, {
+                type_sortie: type.toUpperCase(),
+                notes_sortie: notes || '',
+            });
+            await loadHospitalizations();
+        } catch (err) {
+            alert(err.response?.data?.error || 'Validation médicale impossible.');
         }
     };
 
@@ -86,7 +119,9 @@ export const NurseHospitalizations = () => {
                                 <Bed className="w-7 h-7 mr-2 text-primary-start" />
                                 Gestion des Hospitalisations
                             </h2>
-                            <p className="text-sm text-gray-500 mt-1">Suivi des patients en séjour hospitalier et administration des soins</p>
+                            <p className="text-sm text-gray-500 mt-1">
+                                L&apos;infirmier(ère) affecte le patient à une salle et un lit, puis assure le suivi des soins
+                            </p>
                         </div>
                         <div className="relative w-full md:w-64">
                             <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-400" />
@@ -115,23 +150,44 @@ export const NurseHospitalizations = () => {
                                                     <p className="text-sm text-gray-500">{hosp.patient.age ? `${hosp.patient.age} ans` : '—'} • {hosp.patient.sexe}</p>
                                                 </div>
                                             </div>
-                                            <span className="px-3 py-1 bg-green-50 text-green-700 text-[10px] font-bold rounded-full border border-green-100">
-                                                {hosp.statut}
+                                            <span className={`px-3 py-1 text-[10px] font-bold rounded-full border ${
+                                                hosp.needsRoomAssignment
+                                                    ? 'bg-amber-50 text-amber-700 border-amber-100'
+                                                    : 'bg-green-50 text-green-700 border-green-100'
+                                            }`}>
+                                                {hosp.statut === 'EN_SORTIE'
+                                                    ? 'En cours de sortie'
+                                                    : hosp.needsRoomAssignment
+                                                        ? 'En attente d\'affectation'
+                                                        : 'Hospitalisé'}
                                             </span>
                                         </div>
+
+                                        {hosp.service && (
+                                            <div className="mb-4 flex items-center gap-2 text-sm text-primary-end font-semibold">
+                                                <MapPin className="w-4 h-4" />
+                                                {hosp.service}
+                                            </div>
+                                        )}
 
                                         <div className="grid grid-cols-2 gap-4 mb-6">
                                             <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
                                                 <div className="flex items-center text-xs font-bold text-gray-500 uppercase mb-1">
-                                                    <Home className="w-3 h-3 mr-1" /> Chambre
+                                                    <Home className="w-3 h-3 mr-1" /> Salle
                                                 </div>
-                                                <div className="text-sm font-semibold text-gray-700">Chambre assignée</div>
+                                                <div className="text-sm font-semibold text-gray-700">
+                                                    {hosp.room_id
+                                                        ? (hosp.room_nom || `Salle ${String(hosp.room_id).slice(0, 8)}…`)
+                                                        : '—'}
+                                                </div>
                                             </div>
                                             <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
                                                 <div className="flex items-center text-xs font-bold text-gray-500 uppercase mb-1">
-                                                    <User className="w-3 h-3 mr-1" /> Médecin
+                                                    <BedDouble className="w-3 h-3 mr-1" /> Lit
                                                 </div>
-                                                <div className="text-sm font-semibold text-gray-700">Médecin traitant</div>
+                                                <div className="text-sm font-semibold text-gray-700">
+                                                    {hosp.numero_lit ? `Lit ${hosp.numero_lit}` : '—'}
+                                                </div>
                                             </div>
                                         </div>
 
@@ -141,7 +197,35 @@ export const NurseHospitalizations = () => {
                                             </div>
                                         )}
 
-                                        <div className="flex gap-3">
+                                        <div className="flex gap-3 flex-wrap">
+                                            {hosp.needsRoomAssignment && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setAssignTarget(hosp)}
+                                                    className="flex-1 flex items-center justify-center px-4 py-2 bg-amber-500 text-white rounded-xl font-bold text-sm shadow-sm hover:bg-amber-600 transition-all"
+                                                >
+                                                    <BedDouble className="w-4 h-4 mr-2" />
+                                                    Affecter salle et lit
+                                                </button>
+                                            )}
+                                            {hosp.statut === 'EN_COURS' && hosp.room_id && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleDemanderSortie(hosp.id)}
+                                                    className="px-4 py-2 border border-amber-200 text-amber-800 rounded-xl font-bold text-xs"
+                                                >
+                                                    Demander sortie
+                                                </button>
+                                            )}
+                                            {hosp.statut === 'EN_SORTIE' && !hosp.validation_medicale && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleValiderSortieMedicale(hosp)}
+                                                    className="px-4 py-2 bg-amber-500 text-white rounded-xl font-bold text-xs"
+                                                >
+                                                    Valider sortie médicale
+                                                </button>
+                                            )}
                                             <button 
                                                 onClick={() => handleOpenCareModal(hosp.patient)}
                                                 className="flex-1 flex items-center justify-center px-4 py-2 bg-gradient-to-r from-primary-start to-primary-end text-white rounded-xl font-bold text-sm shadow-sm hover:opacity-90 transition-all"
@@ -171,6 +255,13 @@ export const NurseHospitalizations = () => {
                             ))
                         )}
                     </div>
+
+                    <NurseAssignRoomModal
+                        isOpen={Boolean(assignTarget)}
+                        hospitalization={assignTarget}
+                        onClose={() => setAssignTarget(null)}
+                        onAssigned={loadHospitalizations}
+                    />
 
                     {/* Care Administration Modal */}
                     {isModalOpen && (

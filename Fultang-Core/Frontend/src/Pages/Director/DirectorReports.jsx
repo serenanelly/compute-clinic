@@ -21,6 +21,7 @@ import { rapportApi, personnelApi } from "../../services/comptabiliteMatiereApi"
 import { getLoggedPersonnelId, formatPersonnelOption, getPersonnelUuid } from "../../Utils/personnelUtils";
 import { getBonsCommande, getTableauDeBordData } from "../../services/accountantApi";
 import { useAuthentication } from "../../Utils/Provider.jsx";
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
 
 export function DirectorReports() {
     const { userData } = useAuthentication();
@@ -241,7 +242,7 @@ export function DirectorReports() {
 
         doc.setFontSize(18);
         doc.setTextColor(26, 115, 163);
-        doc.text("FULTANG CLINIC", pageWidth / 2, 20, { align: "center" });
+        doc.text(APP_NAME, pageWidth / 2, 20, { align: "center" });
 
         doc.setFontSize(14);
         doc.setTextColor(80, 194, 185);
@@ -308,7 +309,7 @@ export function DirectorReports() {
         doc.setFontSize(9);
         doc.setTextColor(100);
         doc.text(`Document généré le ${new Date().toLocaleDateString('fr-FR')}`, margin, pageHeight - 18);
-        doc.text("Fultang Clinic - Direction", pageWidth - margin, pageHeight - 18, { align: "right" });
+        doc.text(brandFooter('Direction'), pageWidth - margin, pageHeight - 18, { align: "right" });
 
         doc.save(`rapport_${report.id}.pdf`);
     }

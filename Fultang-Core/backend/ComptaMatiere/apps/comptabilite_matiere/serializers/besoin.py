@@ -24,7 +24,7 @@ class BesoinCreateSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Besoin
-        fields = ['motif', 'idPersonnel_emetteur']
+        fields = ['motif', 'idPersonnel_emetteur', 'fournisseur_souhaite']
     
     def create(self, validated_data):
         """
@@ -59,6 +59,7 @@ class BesoinSerializer(serializers.ModelSerializer):
             'statut',
             'statut_display',
             'priorite',
+            'fournisseur_souhaite',
             'date_traitement_directeur',
             'commentaire_directeur',
         ]

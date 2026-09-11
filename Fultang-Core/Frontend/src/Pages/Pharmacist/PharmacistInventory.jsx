@@ -18,6 +18,7 @@ import {
 } from "react-icons/fa";
 import jsPDF from "jspdf";
 import { materielMedicalApi, archiveInventaireApi, ligneArchiveApi, getPersonnelId } from "../../services/comptabiliteMatiereApi";
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
 
 const isArchiveCloturee = (statut) => statut === "CLOTURE" || statut === "TERMINE";
 
@@ -338,7 +339,7 @@ export function PharmacistInventory() {
 
         doc.setFontSize(18);
         doc.setTextColor(26, 115, 163);
-        doc.text("FULTANG CLINIC - PHARMACIE", pageWidth / 2, 20, { align: "center" });
+        doc.text(brandFooter("PHARMACIE"), pageWidth / 2, 20, { align: "center" });
 
         doc.setFontSize(14);
         doc.setTextColor(80, 194, 185);
@@ -392,7 +393,7 @@ export function PharmacistInventory() {
         doc.setFontSize(9);
         doc.setTextColor(100);
         doc.text(`Document généré le ${new Date().toLocaleDateString('fr-FR')}`, margin, pageHeight - 15);
-        doc.text("Fultang Clinic - Pharmacie", pageWidth - margin, pageHeight - 15, { align: "right" });
+        doc.text(brandFooter('Pharmacie'), pageWidth - margin, pageHeight - 15, { align: "right" });
 
         doc.save(`ancien_stock_${archive.code_archive}.pdf`);
     }
@@ -410,7 +411,7 @@ export function PharmacistInventory() {
 
         doc.setFontSize(18);
         doc.setTextColor(26, 115, 163);
-        doc.text("FULTANG CLINIC - PHARMACIE", pageWidth / 2, 20, { align: "center" });
+        doc.text(brandFooter("PHARMACIE"), pageWidth / 2, 20, { align: "center" });
 
         doc.setFontSize(14);
         doc.setTextColor(80, 194, 185);
@@ -464,7 +465,7 @@ export function PharmacistInventory() {
         doc.setFontSize(9);
         doc.setTextColor(100);
         doc.text(`Document généré le ${new Date().toLocaleDateString('fr-FR')}`, margin, pageHeight - 15);
-        doc.text("Fultang Clinic - Pharmacie", pageWidth - margin, pageHeight - 15, { align: "right" });
+        doc.text(brandFooter('Pharmacie'), pageWidth - margin, pageHeight - 15, { align: "right" });
 
         doc.save(`nouveau_stock_${archive.code_archive}.pdf`);
     }
@@ -482,7 +483,7 @@ export function PharmacistInventory() {
 
         doc.setFontSize(18);
         doc.setTextColor(26, 115, 163);
-        doc.text("FULTANG CLINIC - PHARMACIE", pageWidth / 2, 20, { align: "center" });
+        doc.text(brandFooter("PHARMACIE"), pageWidth / 2, 20, { align: "center" });
 
         doc.setFontSize(14);
         doc.setTextColor(80, 194, 185);
@@ -573,7 +574,7 @@ export function PharmacistInventory() {
         doc.setFontSize(9);
         doc.setTextColor(100);
         doc.text(`Document généré le ${new Date().toLocaleDateString('fr-FR')}`, margin, pageHeight - 15);
-        doc.text("Fultang Clinic - Pharmacie", pageWidth - margin, pageHeight - 15, { align: "right" });
+        doc.text(brandFooter('Pharmacie'), pageWidth - margin, pageHeight - 15, { align: "right" });
 
         doc.save(`differences_${archive.code_archive}.pdf`);
     }
@@ -586,7 +587,7 @@ export function PharmacistInventory() {
 
         doc.setFontSize(18);
         doc.setTextColor(26, 115, 163);
-        doc.text("FULTANG CLINIC - PHARMACIE", pageWidth / 2, 15, { align: "center" });
+        doc.text(brandFooter("PHARMACIE"), pageWidth / 2, 15, { align: "center" });
 
         doc.setFontSize(14);
         doc.setTextColor(80, 194, 185);
@@ -670,7 +671,7 @@ export function PharmacistInventory() {
         doc.setFontSize(9);
         doc.setTextColor(100);
         doc.text(`Document généré le ${new Date().toLocaleDateString('fr-FR')}`, margin, pageHeight - 10);
-        doc.text("Fultang Clinic - Pharmacie", pageWidth - margin, pageHeight - 10, { align: "right" });
+        doc.text(brandFooter('Pharmacie'), pageWidth - margin, pageHeight - 10, { align: "right" });
 
         doc.save(`archive_complete_${archive.code_archive}.pdf`);
     }

@@ -5,6 +5,7 @@ import { Tooltip } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { useAuthentication } from '../Utils/Provider.jsx';
 import userIcon from '../assets/userIcon.png';
+import { APP_NAME } from '../constants/branding.js';
 
 /**
  * Header applicatif partagé (généralisé depuis la vue caissier).
@@ -17,7 +18,7 @@ import userIcon from '../assets/userIcon.png';
  * - titleResolver : fonction (pathname) => titre, utilisée si `title` absent
  * - rightSlot : contenu optionnel spécifique à la vue, affiché à droite (ex. badge caisse)
  */
-export function AppHeader({ subtitle = 'Polyclinique Fultang', title, titleResolver, rightSlot = null }) {
+export function AppHeader({ subtitle = APP_NAME, title, titleResolver, rightSlot = null }) {
     const { logout, userData } = useAuthentication();
     const { i18n } = useTranslation();
     const location = useLocation();
@@ -59,7 +60,7 @@ export function AppHeader({ subtitle = 'Polyclinique Fultang', title, titleResol
             <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3 sm:px-6">
                 <div className="min-w-0">
                     <p className="text-[10px] font-semibold uppercase tracking-widest text-white/70 m-0">
-                        Polyclinique Fultang · {subtitle}
+                        {APP_NAME} · {subtitle}
                     </p>
                     <h2 className="text-base font-bold text-white m-0 truncate sm:text-lg">{pageTitle}</h2>
                 </div>

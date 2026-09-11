@@ -41,9 +41,30 @@ class Service(models.Model):
     code_analytique = models.CharField(max_length=100)
     desc_service = models.TextField(blank=True, default='')
     chef_service_id = models.UUIDField(null=True, blank=True)
+    date_creation = models.DateField(auto_now_add=True)
+    date_decret = models.DateField(null=True, blank=True)
+    reference_decret = models.CharField(max_length=100, blank=True, default='')
 
     def __str__(self):
         return self.nom_service
+
+
+class Prime(models.Model):
+    """Prime pouvant couvrir plusieurs services (CORR-A5-008)."""
+    id_prime = models.AutoField(primary_key=True)
+    personnel_id = models.UUIDField(db_index=True)
+    service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name='primes')
+    montant_fcfa = models.DecimalField(max_digits=12, decimal_places=2)
+    motif = models.CharField(max_length=255, blank=True, default='')
+    date_debut = models.DateField()
+    date_fin = models.DateField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Prime"
+        verbose_name_plural = "Primes"
+
+    def __str__(self):
+        return f"Prime {self.montant_fcfa} FCFA — service {self.service_id}"
 
 class Personnel(models.Model):
     id_personnel = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

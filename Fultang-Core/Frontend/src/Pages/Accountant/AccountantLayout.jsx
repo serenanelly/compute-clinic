@@ -7,6 +7,7 @@ import { ChevronDown, ChevronUp } from "lucide-react";
 import { accountantNavLink } from "./NavLinks";
 import { AccountantNavBar } from "./NavBar";
 import { ACCOUNTANT_COLORS } from "./accountantTheme";
+import { APP_NAME } from "../../constants/branding.js";
 
 export function AccountantLayout({ children }) {
     AccountantLayout.propTypes = {
@@ -108,7 +109,7 @@ export function AccountantLayout({ children }) {
                 <div>
                     <div className="p-6 border-b border-white/10">
                         <h1 className="text-2xl font-black text-white tracking-wider">
-                            FULTANG CLINIC
+                            {APP_NAME}
                         </h1>
                         <p className="text-xs text-white/60 font-semibold uppercase mt-1 tracking-widest">
                             Finance & Comptabilité
@@ -119,7 +120,7 @@ export function AccountantLayout({ children }) {
                     </nav>
                 </div>
                 <div className="p-4 border-t border-white/10 text-center">
-                    <p className="text-xs text-white/40">© 2026 Polyclinique Fultang</p>
+                    <p className="text-xs text-white/40">© {new Date().getFullYear()} {APP_NAME}</p>
                 </div>
             </div>
 

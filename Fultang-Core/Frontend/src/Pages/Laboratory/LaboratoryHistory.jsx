@@ -5,6 +5,7 @@ import { LaboratoryNavLink } from "./LaboratoryNavLink.js";
 import { Filter, Clock } from "lucide-react";
 import { useLaboratoryData } from "../../hooks/useLaboratoryData";
 import './LaboratoryStyles.css';
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
 
 export const LaboratoryHistory = () => {
   const [selectedPatient, setSelectedPatient] = useState(null);
@@ -52,7 +53,7 @@ export const LaboratoryHistory = () => {
           icon={Clock}
           title="Historique" 
           subtitle="Suivi dans le temps des examens réalisés et archivage." 
-          tagText="Laboratoire Fultang Actif"
+          tagText={`Laboratoire ${APP_NAME} Actif`}
         />
 
         <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm flex flex-col">

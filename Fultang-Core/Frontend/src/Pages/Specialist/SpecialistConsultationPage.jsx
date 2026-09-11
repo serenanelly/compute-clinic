@@ -10,12 +10,17 @@ import {
 } from 'lucide-react';
 import { AppRoutesPaths } from "../../Router/appRouterPaths.js";
 import axiosInstance from "../../Utils/axiosInstance.js";
+import { useAuthentication } from "../../Utils/Provider.jsx";
+import { getSpecialtyFields } from "../../constants/specialtyConsultationFields.js";
 
 export const SpecialistConsultationPage = () => {
     const [searchParams] = useSearchParams();
     const patientId = searchParams.get('patient');
     const visiteId = searchParams.get('visite');
     const navigate = useNavigate();
+    const { userData } = useAuthentication();
+    const specialtyFields = getSpecialtyFields(userData?.specialite || userData?.specialite_medecin || '');
+    const [champsSpecialite, setChampsSpecialite] = useState({});
 
     const [activeTab, setActiveTab] = useState('dossier');
     const [isLoading, setIsLoading] = useState(true);
@@ -78,11 +83,8 @@ export const SpecialistConsultationPage = () => {
                 setDonneesCliniques(currentVisite.donnees_cliniques);
             }
 
-            // 2. Chercher une consultation existante POUR CETTE VISITE PRÉCISE uniquement
-            const existingConsultations = await doctorApi.getConsultations({ visite: visiteId });
-            const consultationForThisVisite = Array.isArray(existingConsultations)
-                ? existingConsultations.find(c => c.visite === visiteId)
-                : null;
+            // 2. Chercher une consultation existante pour cette visite
+            const consultationForThisVisite = await doctorApi.getConsultationByVisite(visiteId);
 
             if (consultationForThisVisite) {
                 setConsultationId(consultationForThisVisite.id);
@@ -90,6 +92,7 @@ export const SpecialistConsultationPage = () => {
                 if (consultationForThisVisite.diagnostics?.length > 0) setDiagnostics(consultationForThisVisite.diagnostics);
                 if (consultationForThisVisite.prescriptions?.length > 0) setPrescriptions(consultationForThisVisite.prescriptions);
                 if (consultationForThisVisite.examens?.length > 0) setExamens(consultationForThisVisite.examens);
+                if (consultationForThisVisite.champs_specialite) setChampsSpecialite(consultationForThisVisite.champs_specialite);
             } else {
                 const newConsult = await doctorApi.createConsultation(visiteId, { 
                     motif: currentVisite?.motif_visite || "Consultation spécialisée",
@@ -166,7 +169,7 @@ export const SpecialistConsultationPage = () => {
             
             const payload = {
                 nom: newExamen.nom_examen,
-                motif: newExamen.motif || "Examen spécialisé"
+                motif: newExamen.motif?.trim() || '',
             };
             
             const added = await doctorApi.prescribeExam(consultationId, payload);
@@ -348,6 +351,37 @@ export const SpecialistConsultationPage = () => {
                                         <p className="text-gray-800">{patientData?.antecedents?.length > 0 ? patientData.antecedents.map(a => a.description || a.nom).join(', ') : 'Aucun antécédent'}</p>
                                     </div>
                                 </div>
+
+                                {specialtyFields.length > 0 && (
+                                    <div className="mt-8">
+                                        <h3 className="text-lg font-bold text-gray-800 mb-4 border-b pb-2">Examens spécialisés ({userData?.specialite || 'Spécialité'})</h3>
+                                        <div className="space-y-4">
+                                            {specialtyFields.map((field) => (
+                                                <div key={field.name}>
+                                                    <label className="block text-xs font-bold text-gray-500 uppercase mb-1">{field.label}</label>
+                                                    <textarea
+                                                        value={champsSpecialite[field.name] || ''}
+                                                        onChange={(e) => setChampsSpecialite({ ...champsSpecialite, [field.name]: e.target.value })}
+                                                        className="w-full px-3 py-2 border rounded-lg min-h-[80px]"
+                                                        placeholder={field.placeholder}
+                                                    />
+                                                </div>
+                                            ))}
+                                            {consultationId && (
+                                                <button
+                                                    type="button"
+                                                    onClick={async () => {
+                                                        await doctorApi.updateConsultation(consultationId, { champs_specialite: champsSpecialite });
+                                                        alert('Champs spécialité enregistrés.');
+                                                    }}
+                                                    className="px-4 py-2 bg-primary-start text-white rounded-lg font-bold"
+                                                >
+                                                    Enregistrer les champs spécialité
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                         )}
 
@@ -399,13 +433,13 @@ export const SpecialistConsultationPage = () => {
                                     </div>
                                     <div className="flex justify-end">
                                         <button type="submit" disabled={isSaving} className="px-6 py-2 bg-purple-600 text-white rounded-lg font-bold flex items-center shadow-md hover:bg-purple-700">
-                                            <Save className="w-4 h-4 mr-2" /> {isSaving ? 'Enregistrement...' : 'Poser le diagnostic'}
+                                            <Save className="w-4 h-4 mr-2" /> {isSaving ? 'Enregistrement...' : 'Enregistrer le diagnostic'}
                                         </button>
                                     </div>
                                 </form>
 
                                 <ul className="space-y-3">
-                                    {diagnostics.length === 0 ? <p className="text-gray-400 italic">Aucun diagnostic posé.</p> : diagnostics.map((d, i) => (
+                                        {diagnostics.length === 0 ? <p className="text-gray-400 italic">Aucun diagnostic enregistré.</p> : diagnostics.map((d, i) => (
                                         <li key={i} className="p-4 bg-purple-50 border border-purple-100 rounded-lg shadow-sm">
                                             <p className="font-bold text-purple-800">{d.libelle}</p>
                                             <p className="text-sm text-purple-600 mt-1">{d.description}</p>
@@ -518,7 +552,7 @@ export const SpecialistConsultationPage = () => {
                                 </form>
                                 <div className="p-4 bg-purple-50 border border-purple-100 rounded-lg text-sm text-purple-800">
                                     <p className="font-bold flex items-center"><AlertCircle className="w-4 h-4 mr-2"/> Note</p>
-                                    <p className="mt-1">La demande sera envoyée à la réception / administration pour l'attribution d'une chambre dans votre service.</p>
+                                    <p className="mt-1">La demande est transmise à l&apos;infirmier(ère) du service concerné, qui affecte le patient à une salle et un lit.</p>
                                 </div>
                             </div>
                         )}

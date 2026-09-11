@@ -26,6 +26,7 @@ import {
 } from "react-icons/fa";
 import dayjs from 'dayjs';
 import { FaPrint, FaFileCsv } from "react-icons/fa";
+import { APP_NAME, brandFooter } from '../../../constants/branding.js';
 
 const { RangePicker } = DatePicker;
 
@@ -245,7 +246,7 @@ export function EcrituresComptablesPage({ defaultTab = "journal" }) {
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Grand Livre — Polyclinique Fultang</title>
+    <title>Grand Livre — ${APP_NAME}</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: Arial, sans-serif; font-size: 11px; color: #333; padding: 20px; }
@@ -261,7 +262,7 @@ export function EcrituresComptablesPage({ defaultTab = "journal" }) {
 </head>
 <body>
     <div class="header">
-        <h1>Polyclinique Fultang</h1>
+        <h1>${APP_NAME}</h1>
         <h2>GRAND LIVRE COMPTABLE — ${titre}</h2>
         <p>Édité le ${new Date().toLocaleDateString('fr-FR')} à ${new Date().toLocaleTimeString('fr-FR')}</p>
     </div>

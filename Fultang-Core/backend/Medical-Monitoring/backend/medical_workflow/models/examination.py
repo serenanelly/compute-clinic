@@ -2,14 +2,20 @@ import uuid
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 from .consultation import Consultation
-from .choices import StatutExamen
+from .choices import StatutExamen, CategorieExamen
 
 class Examen(models.Model):
     """Représente un examen prescrit lors d'une consultation."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     consultation = models.ForeignKey(Consultation, on_delete=models.CASCADE, related_name='examens')
     nom = models.CharField(max_length=255, verbose_name=_("Nom de l'examen"))
-    motif = models.TextField(verbose_name=_("Motif de l'examen"))
+    categorie = models.CharField(
+        max_length=20,
+        choices=CategorieExamen.choices,
+        default=CategorieExamen.BIOLOGIE,
+        verbose_name=_("Catégorie"),
+    )
+    motif = models.TextField(blank=True, default='', verbose_name=_("Motif de l'examen"))
     anatomie = models.CharField(max_length=255, blank=True, null=True, verbose_name=_("Zone anatomique"))
     statut = models.CharField(
         max_length=20, 

@@ -16,6 +16,7 @@ import { CashierPageHeader } from './components/CashierPageHeader.jsx';
 import { getQuittancesValidees, getJournalVentilation, downloadQuittancesCsv } from '../../services/accountantApi';
 import { useFeedback } from '../../contexts/FeedbackContext';
 import { saveAs } from 'file-saver';
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
 
 const { RangePicker } = DatePicker;
 const { Option } = Select;
@@ -131,7 +132,7 @@ export function QuittancesValideesPage() {
       </head>
       <body>
           <div class="header">
-              <h1>Polyclinique Fultang</h1>
+              <h1>${APP_NAME}</h1>
               <p>Rue de l'Hôpital, Yaoundé, Cameroun | Tél: +237 6XX XXX XXX</p>
               <p>Service Comptabilité & Caisse</p>
           </div>
@@ -176,7 +177,7 @@ export function QuittancesValideesPage() {
           </div>
           <div class="footer">
               Ce reçu sert de preuve officielle de règlement pour les soins décrits.
-              Généré le ${new Date().toLocaleString('fr-FR')} - Polyclinique Fultang
+              Généré le ${new Date().toLocaleString('fr-FR')} - ${APP_NAME}
           </div>
       </body>
       </html>

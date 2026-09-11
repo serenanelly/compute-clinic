@@ -2,7 +2,7 @@ import uuid
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 from patient.models.patient import Patient
-from .choices import StatutHospitalisation
+from .choices import StatutHospitalisation, TypeSortie
 from .visit import Visite
 
 class Hospitalisation(models.Model):
@@ -13,17 +13,32 @@ class Hospitalisation(models.Model):
     
     # Liens externes obligatoires
     room_id = models.UUIDField(verbose_name=_("ID de la Chambre"), null=True, blank=True)
+    numero_lit = models.CharField(
+        max_length=20, blank=True, default='', verbose_name=_("Numéro de lit"),
+    )
     doctor_id = models.UUIDField(verbose_name=_("ID du Médecin en charge"), null=True, blank=True)
     
     motif = models.TextField(verbose_name=_("Motif d'hospitalisation"))
     service = models.CharField(max_length=100, null=True, blank=True, verbose_name=_("Service d'accueil"))
     duree_prevue = models.CharField(max_length=100, blank=True, null=True, verbose_name=_("Durée prévue"))
     statut = models.CharField(
-        max_length=20, 
-        choices=StatutHospitalisation.choices, 
-        default=StatutHospitalisation.EN_COURS,
-        verbose_name=_("Statut")
+        max_length=20,
+        choices=StatutHospitalisation.choices,
+        default=StatutHospitalisation.EN_ATTENTE_LIT,
+        verbose_name=_("Statut"),
     )
+    validation_medicale = models.BooleanField(default=False, verbose_name=_("Sortie médicale validée"))
+    date_validation_medicale = models.DateTimeField(null=True, blank=True)
+    validation_financiere = models.BooleanField(default=False, verbose_name=_("Sortie financière validée"))
+    date_validation_financiere = models.DateTimeField(null=True, blank=True)
+    type_sortie = models.CharField(
+        max_length=20,
+        choices=TypeSortie.choices,
+        blank=True,
+        null=True,
+        verbose_name=_("Type de sortie"),
+    )
+    notes_sortie = models.TextField(blank=True, null=True, verbose_name=_("Notes de sortie"))
 
     class Meta:
         verbose_name = _("Hospitalisation")

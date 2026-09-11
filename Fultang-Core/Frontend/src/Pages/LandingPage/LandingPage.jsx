@@ -1,5 +1,6 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
+import { APP_NAME_DISPLAY } from '../../constants/branding.js';
 
 export function LandingPage() {
     const navigate = useNavigate();
@@ -76,7 +77,7 @@ export function LandingPage() {
             <div className="w-full max-w-2xl">
                 <h1 className="text-4xl md:text-5xl font-bold text-white text-left mb-4">
                     Welcome to<br />
-                    Fultang Polyclinic
+                    {APP_NAME_DISPLAY}
                 </h1>
                 <p className="text-white/80 text-left text-lg mb-8">
                     The hospital to trust to care about those you love
@@ -145,7 +146,7 @@ export function LandingPage() {
                         <div className="relative z-10">
                             <h2 className="text-3xl font-bold text-white mb-4">About us</h2>
                             <p className="text-white/90 max-w-xl">
-                                Fultang Polyclinic is committed to providing exceptional healthcare services 
+                                {APP_NAME_DISPLAY} is committed to providing exceptional healthcare services 
                                 through innovative medical solutions and compassionate care...
                             </p>
                         </div>
@@ -159,7 +160,7 @@ export function LandingPage() {
             </div>
 
             <footer className="bg-emerald-800 py-4 text-center text-white">
-                <p>© {new Date().getFullYear()} Fultang Polyclinic</p>
+                <p>© {new Date().getFullYear()} {APP_NAME_DISPLAY}</p>
             </footer>
         </div>
     );

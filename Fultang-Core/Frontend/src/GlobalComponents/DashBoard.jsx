@@ -5,6 +5,7 @@ import { useAuthentication } from "../Utils/Provider.jsx";
 import { useEffect, useState } from "react";
 import { Loading } from "./Loading.jsx";
 import { ChevronDown, ChevronUp } from "lucide-react";
+import { APP_NAME } from "../constants/branding.js";
 
 export function DashBoard({ children, linkList, requiredRole }) {
     DashBoard.propTypes = {
@@ -139,7 +140,7 @@ export function DashBoard({ children, linkList, requiredRole }) {
         <div className="flex h-screen">
             <div className="w-[19%] fixed h-screen bg-gradient-to-t from-primary-start to-primary-end flex flex-col overflow-y-auto scrollbar">
                 <h1 className="text-3xl font-bold ml-6 mb-10 mt-7 text-white">
-                    Fultang Clinic
+                    {APP_NAME}
                 </h1>
                 <nav className="flex flex-col space-y-1.5 mb-2 ">
                     {linkList.map((item, index) => renderLink(item, index))}

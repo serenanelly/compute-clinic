@@ -61,7 +61,7 @@ class LivraisonViewSet(viewsets.ModelViewSet):
         from django.db.models import Count, Sum
         
         fournisseurs = self.queryset.values('nom_fournisseur').annotate(
-            count=Count('idLivraison'),
+            count=Count('pk'),
             total=Sum('montant_total')
         ).order_by('nom_fournisseur')
         
@@ -86,7 +86,7 @@ class LivraisonViewSet(viewsets.ModelViewSet):
         from django.db.models import Sum, Avg, Count
         
         stats = self.queryset.aggregate(
-            total_livraisons=Count('idLivraison'),
+            total_livraisons=Count('pk'),
             montant_total=Sum('montant_total'),
             montant_moyen=Avg('montant_total'),
         )

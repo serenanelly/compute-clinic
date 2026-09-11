@@ -1,5 +1,6 @@
 import { useNavigate} from 'react-router-dom';
 import robotImage from "../assets/robotNotFound.png";
+import { APP_NAME } from "../constants/branding.js";
 
 
 
@@ -9,7 +10,7 @@ export function NotFound () {
     return (
         <div className="h-screen overflow-hidden bg-gradient-to-r from-primary-start to-primary-end flex justify-between ">
             <div className=" mt-36  flex flex-col ml-10" >
-                <span className="text-9xl font-bold mb-16 text-white">Fultang</span>
+                <span className="text-9xl font-bold mb-16 text-white">{APP_NAME}</span>
                 <span className="text-5xl font-bold text-white mb-4">404 Not Found</span>
                 <div className="text-2xl text-white font-bold ">
                     The page you are trying to access does not exist.

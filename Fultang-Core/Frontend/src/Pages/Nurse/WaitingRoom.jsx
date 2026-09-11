@@ -5,6 +5,7 @@ import { nurseNavLink } from "./nurseNavLink.js";
 import { NurseNavBar } from "./NurseNavBar.jsx";
 import { Loading } from "../../GlobalComponents/Loading.jsx";
 import { nurseApi } from "../../services/nurseApi.js";
+import { prendreVisiteEnCharge } from "../../services/visiteApi.js";
 import { AppRoutesPaths } from "../../Router/appRouterPaths.js";
 import { Clock, Activity, FileText, ChevronRight } from 'lucide-react';
 
@@ -22,12 +23,7 @@ export const WaitingRoom = () => {
         try {
             setIsLoading(true);
             const data = await nurseApi.getWaitingPatients();
-            
-            // Masquer les visites déjà traitées par l'infirmier
-            const treatedVisits = JSON.parse(localStorage.getItem('treated_visits') || '[]');
-            const filteredData = data.filter(v => !treatedVisits.includes(v.id));
-            
-            setPatients(filteredData);
+            setPatients(data);
         } catch (err) {
             setError("Impossible de charger la liste des patients en attente.");
         } finally {
@@ -46,9 +42,13 @@ export const WaitingRoom = () => {
                 visiteId = visite.id;
                 if (item.rdvId) await nurseApi.terminerRendezVous(item.rdvId);
             }
+            await prendreVisiteEnCharge(visiteId);
             navigate(AppRoutesPaths.patientDetailsPage.replace(':id', item.patient.id) + `?visite=${visiteId}`);
         } catch (err) {
-            setError("Impossible de démarrer la prise de paramètres pour ce patient.");
+            const msg = err.response?.status === 409
+                ? 'Ce patient est déjà pris en charge par un autre infirmier.'
+                : "Impossible de démarrer la prise de paramètres pour ce patient.";
+            setError(msg);
         }
     };
 
@@ -108,6 +108,9 @@ export const WaitingRoom = () => {
                                                     <td className="p-4 pl-6">
                                                         <div className="font-semibold text-gray-800">
                                                             {item.patient.nom} {item.patient.prenom}
+                                                            {item.mode_urgence && (
+                                                                <span className="ml-2 text-[10px] font-bold text-red-600 bg-red-50 px-2 py-0.5 rounded-full">Urgence</span>
+                                                            )}
                                                         </div>
                                                         <div className="text-xs text-gray-400 font-mono mt-0.5">
                                                             {item.patient.matricule || "—"}

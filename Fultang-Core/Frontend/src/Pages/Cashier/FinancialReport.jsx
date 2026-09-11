@@ -12,6 +12,7 @@ import { CaisseContextBanner } from './components/CaisseContextBanner.jsx';
 import { getRapportCaisse, getHistoriqueFlux } from '../../services/caissierApi';
 import { getEvolutionMensuelle } from '../../services/accountantApi';
 import { useFeedback } from '../../contexts/FeedbackContext';
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
 
 const { RangePicker } = DatePicker;
 
@@ -205,7 +206,7 @@ export function CashierFinancialReport() {
                 <!-- Header clinic -->
                 <div class="header-container">
                     <div class="logo-section">
-                        <h1>Polyclinique Fultang</h1>
+                        <h1>${APP_NAME}</h1>
                         <p>Plateforme de Gestion Clinique et Financière Intégrée</p>
                         <p style="font-size: 9px; color: #94a3b8;">Service Financier et Encaissements</p>
                     </div>

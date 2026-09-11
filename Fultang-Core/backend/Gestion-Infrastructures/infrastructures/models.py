@@ -42,6 +42,7 @@ class Salle(models.Model):
     nom = models.CharField(max_length=255)
     type = models.ForeignKey(TypeSalle, on_delete=models.RESTRICT, related_name='salles')
     capacite = models.IntegerField()
+    nb_lits = models.IntegerField(null=True, blank=True, help_text="Nombre de lits (≤ capacité totale)")
     numero = models.CharField(max_length=50)
     statut = models.CharField(max_length=50, choices=StatutSalle.choices, default=StatutSalle.DISPONIBLE)
     etage = models.ForeignKey(Etage, on_delete=models.CASCADE, related_name='salles')

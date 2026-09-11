@@ -11,6 +11,8 @@ import { Alert, DatePicker, ConfigProvider } from "antd";
 import frFR from "antd/locale/fr_FR";
 import dayjs from "dayjs";
 import "dayjs/locale/fr";
+import ProfessionSelect from "../../GlobalComponents/ProfessionSelect.jsx";
+import { validateProfessionFields } from "../../constants/patientProfessions.js";
 
 dayjs.locale("fr");
 
@@ -106,6 +108,7 @@ export function EditPatientInfosModal({
         if (!formData.nom?.trim()) newErrors.nom = "Le nom est obligatoire";
         if (!formData.date_naissance) newErrors.date_naissance = "La date de naissance est obligatoire";
         if (!formData.lieu_naissance?.trim()) newErrors.lieu_naissance = "Le lieu de naissance est obligatoire";
+        Object.assign(newErrors, validateProfessionFields(formData));
 
         const contactErr = validatePhone(formData.contact);
         if (contactErr) newErrors.contact = contactErr;
@@ -276,14 +279,17 @@ export function EditPatientInfosModal({
                                         <Briefcase className="w-5 h-5" /> Informations sociales
                                     </h4>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                        <div>
-                                            <label className={labelClass}>Profession</label>
-                                            <input
-                                                name="profession"
-                                                value={formData.profession}
-                                                onChange={handleChange}
-                                                className={inputClass()}
+                                        <div className="md:col-span-2">
+                                            <ProfessionSelect
+                                                professionSelect={formData.profession_select}
+                                                professionAutre={formData.profession_autre}
+                                                onSelectChange={handleChange}
+                                                onAutreChange={handleChange}
+                                                errors={errors}
+                                                required
                                                 disabled={loadingDossier || isSubmitting}
+                                                inputClass={inputClass()}
+                                                idPrefix="edit_profession"
                                             />
                                         </div>
                                         <div>

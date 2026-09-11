@@ -1,8 +1,8 @@
 from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework import viewsets, filters, status
 from django_filters.rest_framework import DjangoFilterBackend
+from .pagination import PatientPagePagination
 from .models import (
     Patient, Adresse, Contact, Nationalite, 
     PersonneAPrevenir, LienParente
@@ -17,8 +17,37 @@ class PatientViewSet(viewsets.ModelViewSet):
     """ViewSet pour gérer le CRUD complet des Patients."""
     queryset = Patient.objects.select_related('adresse').prefetch_related('contacts')
     serializer_class = PatientSerializer
-    filter_backends = [filters.SearchFilter]
-    search_fields = ['nom', 'prenom', 'matricule']
+    pagination_class = PatientPagePagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['nom', 'prenom', 'matricule', 'code_identifiant']
+    ordering_fields = ['nom', 'prenom', 'date_naissance', 'created_at']
+    ordering = ['nom', 'prenom']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        params = self.request.query_params
+
+        birth_year = params.get('birth_year')
+        birth_month = params.get('birth_month')
+        birth_day = params.get('birth_day')
+        if birth_year:
+            qs = qs.filter(date_naissance__year=birth_year)
+        if birth_month:
+            qs = qs.filter(date_naissance__month=birth_month)
+        if birth_day:
+            qs = qs.filter(date_naissance__day=birth_day)
+
+        created_year = params.get('created_year')
+        created_month = params.get('created_month')
+        created_day = params.get('created_day')
+        if created_year:
+            qs = qs.filter(created_at__year=created_year)
+        if created_month:
+            qs = qs.filter(created_at__month=created_month)
+        if created_day:
+            qs = qs.filter(created_at__day=created_day)
+
+        return qs
 
     def get_serializer_class(self):
         """Utilise un serializer allégé pour la liste complète."""
@@ -59,14 +88,21 @@ class PatientViewSet(viewsets.ModelViewSet):
         """Retourne la liste des examens prescrits à ce patient."""
         from medical_workflow.models import Examen
         from medical_workflow.serializers import ExamenSerializer
-        
+
+        patient = self.get_object()
         statut = request.query_params.get('statut')
-        examens = Examen.objects.filter(consultation__patient_id=pk)
-        
+        examens = Examen.objects.filter(consultation__patient=patient).select_related(
+            'consultation'
+        ).prefetch_related('prelevements', 'resultat')
+
         if statut:
             examens = examens.filter(statut=statut)
-            
-        serializer = ExamenSerializer(examens, many=True)
+
+        serializer = ExamenSerializer(
+            examens,
+            many=True,
+            context={'request': request},
+        )
         return Response(serializer.data)
 
     @action(detail=False, methods=['get'], url_path='exporter-medical')

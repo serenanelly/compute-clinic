@@ -4,6 +4,8 @@ import {
     upsertAllergie,
     createAntecedent,
 } from "./medicalDossierApi.js";
+import { confirmerParametresVisite, prendreVisiteEnCharge } from "./visiteApi.js";
+import { getGatewayBaseUrl } from "../Utils/gatewayUrls.js";
 
 // ============================================================
 // Fonctions utilitaires internes
@@ -123,8 +125,12 @@ export const nurseApi = {
             const response = await axiosInstance.get('/visites/');
             const allVisites = response.data.results || response.data;
 
-            // Filtrer côté client les visites en cours
-            const visitesEnCours = allVisites.filter(v => v.statut === 'EN_COURS');
+            // Filtrer côté client les visites en cours (CORR-A3-007 : exclure déjà prises par autre infirmier)
+            const visitesEnCours = allVisites.filter(v => {
+                if (v.statut !== 'EN_COURS') return false;
+                if (v.parametres_complets) return false;
+                return true;
+            });
 
             // Enrichir chaque visite avec les détails du patient
             const enriched = await Promise.all(
@@ -412,7 +418,8 @@ export const nurseApi = {
                     }
                 })
             );
-            return enriched;
+            // Exclure reportés et annulés — si visible ici, le RDV est actif/programmé.
+            return enriched.filter((rdv) => !['REPORTE', 'ANNULE'].includes(rdv.statut));
         } catch (error) {
             console.error("Erreur lors de la récupération des rendez-vous:", error);
             throw error;
@@ -497,10 +504,19 @@ export const nurseApi = {
                         console.warn("Impossible de récupérer le patient pour l'examen", examen.id, e);
                     }
 
+                    const prelevements = examen.prelevements || [];
+                    const needsPrelevement =
+                        examen.categorie === 'BIOLOGIE'
+                        && examen.statut === 'EN_ATTENTE'
+                        && prelevements.length === 0;
+
                     return {
                         ...examen,
                         patient: patientData,
-                        date_prescription: datePrescription
+                        date_prescription: datePrescription || examen.date_prescription,
+                        prelevements,
+                        needsPrelevement,
+                        prelevementEffectue: prelevements.length > 0,
                     };
                 })
             );
@@ -516,51 +532,76 @@ export const nurseApi = {
     // --------------------------------------------------------
 
     /**
-     * Récupérer les hospitalisations en cours.
-     * - GET /hospitalisations/?statut=EN_COURS (filtrage côté backend supporté)
-     * - Enrichit avec les données patient
-     * - room_id et doctor_id restent des UUID (entités gérées par un autre service)
+     * Récupérer les hospitalisations actives (attente de lit, en cours, en sortie).
+     * L'infirmier(ère) affecte salle + lit via assigner-chambre.
      */
     getHospitalizations: async () => {
         try {
             clearPatientCache();
-            const response = await axiosInstance.get('/hospitalisations/', {
-                params: { statut: 'EN_COURS' }
-            });
-            const hosps = response.data.results || response.data;
+            const gateway = getGatewayBaseUrl();
 
-            // Enrichir avec les données patient
+            const fetchByStatut = async (statut) => {
+                const response = await axiosInstance.get('/hospitalisations/', { params: { statut } });
+                return response.data.results || response.data || [];
+            };
+
+            const [enAttente, enCours, enSortie] = await Promise.all([
+                fetchByStatut('EN_ATTENTE_LIT'),
+                fetchByStatut('EN_COURS'),
+                fetchByStatut('EN_SORTIE'),
+            ]);
+            const hosps = [...enAttente, ...enCours, ...enSortie];
+
+            const roomCache = {};
+            const fetchRoom = async (roomId) => {
+                const key = String(roomId);
+                if (roomCache[key]) return roomCache[key];
+                try {
+                    const r = await axiosInstance.get(`${gateway}/infrastructure/salles/${key}/`);
+                    roomCache[key] = r.data;
+                    return r.data;
+                } catch {
+                    return null;
+                }
+            };
+
             const enriched = await Promise.all(
                 hosps.map(async (hosp) => {
+                    let patientBlock = {
+                        id: hosp.patient,
+                        nom: 'Inconnu',
+                        prenom: '',
+                        sexe: '-',
+                        age: null,
+                    };
                     try {
                         const patient = await fetchPatientCached(hosp.patient);
-                        return {
-                            ...hosp,
-                            patient: {
-                                id: patient.id,
-                                nom: patient.nom,
-                                prenom: patient.prenom,
-                                sexe: patient.sexe,
-                                age: patient.age,
-                                matricule: patient.matricule
-                            },
-                            // room_id et doctor_id restent tels quels (UUID provenant d'un autre service)
-                            date_entree: hosp.date_admission
+                        patientBlock = {
+                            id: patient.id,
+                            nom: patient.nom,
+                            prenom: patient.prenom,
+                            sexe: patient.sexe,
+                            age: patient.age,
+                            matricule: patient.matricule,
                         };
                     } catch {
-                        return {
-                            ...hosp,
-                            patient: {
-                                id: hosp.patient,
-                                nom: "Inconnu",
-                                prenom: "",
-                                sexe: "-",
-                                age: null
-                            },
-                            date_entree: hosp.date_admission
-                        };
+                        /* keep fallback */
                     }
-                })
+
+                    let room_nom = null;
+                    if (hosp.room_id) {
+                        const room = await fetchRoom(hosp.room_id);
+                        room_nom = room?.nom || (room?.numero ? `Salle ${room.numero}` : null);
+                    }
+
+                    return {
+                        ...hosp,
+                        patient: patientBlock,
+                        room_nom,
+                        date_entree: hosp.date_admission,
+                        needsRoomAssignment: !hosp.room_id || hosp.statut === 'EN_ATTENTE_LIT',
+                    };
+                }),
             );
             return enriched;
         } catch (error) {
@@ -607,6 +648,14 @@ export const nurseApi = {
             const {
                 allergie_declencheur,
                 allergie_manifestation,
+                a_des_allergies,
+                a_des_antecedents,
+                antecedent_medical_nom,
+                antecedent_medical_date,
+                antecedent_medical_description,
+                antecedent_familial_nom,
+                antecedent_familial_date,
+                antecedent_familial_description,
                 antecedent_type,
                 antecedent_nom,
                 antecedent_date,
@@ -616,9 +665,31 @@ export const nurseApi = {
             } = parameters;
 
             await upsertDonneesCliniques(patientId, clinicalData);
-            await upsertAllergie(patientId, allergie_declencheur, allergie_manifestation);
+            await upsertAllergie(
+                patientId,
+                allergie_declencheur,
+                allergie_manifestation,
+                a_des_allergies !== false && a_des_allergies !== 'non',
+            );
 
-            if (antecedent_nom?.trim()) {
+            if (a_des_antecedents === 'oui' || a_des_antecedents === true) {
+                if (antecedent_medical_nom?.trim()) {
+                    await createAntecedent(patientId, {
+                        type: 'MEDICAL',
+                        nom: antecedent_medical_nom,
+                        date: antecedent_medical_date,
+                        description: antecedent_medical_description,
+                    });
+                }
+                if (antecedent_familial_nom?.trim()) {
+                    await createAntecedent(patientId, {
+                        type: 'FAMILIAL',
+                        nom: antecedent_familial_nom,
+                        date: antecedent_familial_date,
+                        description: antecedent_familial_description,
+                    });
+                }
+            } else if (antecedent_nom?.trim()) {
                 await createAntecedent(patientId, {
                     type: antecedent_type || 'MEDICAL',
                     nom: antecedent_nom,
@@ -627,28 +698,31 @@ export const nurseApi = {
                 });
             }
 
-            // Ne PAS terminer la visite ici !
-            // La visite doit rester 'EN_COURS' pour que le médecin puisse
-            // la voir dans sa salle d'attente et faire la consultation.
-            // C'est le médecin qui terminera la visite à la fin.
-            
-            // HACK DE DÉVELOPPEMENT : On masque cette visite pour l'infirmier
-            // en l'ajoutant dans le localStorage pour simuler qu'elle est passée au médecin.
+            // HACK remplacé : confirmation serveur du triage (CORR-A3-007 / A3-004)
             if (visiteId) {
-                const treatedVisits = JSON.parse(localStorage.getItem('treated_visits') || '[]');
-                if (!treatedVisits.includes(visiteId)) {
-                    treatedVisits.push(visiteId);
-                    localStorage.setItem('treated_visits', JSON.stringify(treatedVisits));
-                }
+                await confirmerParametresVisite(visiteId);
             }
 
             return { success: true, message: "Données enregistrées avec succès" };
         } catch (error) {
             const detail = error.response?.data;
             console.error("Erreur lors de la sauvegarde des paramètres:", detail || error);
-            const msg = typeof detail === 'object'
-                ? Object.entries(detail).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`).join(' — ')
-                : (detail || error.message);
+            let msg = error.message;
+            if (typeof detail === 'string') {
+                msg = detail;
+            } else if (Array.isArray(detail)) {
+                msg = detail.join(' — ');
+            } else if (detail && typeof detail === 'object') {
+                if (detail.detail) {
+                    msg = typeof detail.detail === 'string' ? detail.detail : JSON.stringify(detail.detail);
+                } else if (detail.error) {
+                    msg = detail.error;
+                } else {
+                    msg = Object.entries(detail)
+                        .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
+                        .join(' — ');
+                }
+            }
             const err = new Error(msg);
             err.response = error.response;
             throw err;

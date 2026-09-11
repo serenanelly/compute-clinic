@@ -18,6 +18,7 @@ import {
 } from "react-icons/fa";
 import jsPDF from "jspdf";
 import { archiveInventaireApi, ligneArchiveApi, personnelApi } from "../../services/comptabiliteMatiereApi";
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
 
 export function AccountantInventoryArchives() {
     const [archives, setArchives] = useState([]);
@@ -113,7 +114,7 @@ export function AccountantInventoryArchives() {
             // En-tête
             doc.setFontSize(18);
             doc.setTextColor(26, 115, 163);
-            doc.text("FULTANG CLINIC", pageWidth / 2, 20, { align: "center" });
+            doc.text(APP_NAME, pageWidth / 2, 20, { align: "center" });
 
             doc.setFontSize(14);
             doc.setTextColor(80, 194, 185);
@@ -201,7 +202,7 @@ export function AccountantInventoryArchives() {
             doc.setFontSize(9);
             doc.setTextColor(100);
             doc.text(`Document généré le ${new Date().toLocaleDateString('fr-FR')}`, margin, pageHeight - 10);
-            doc.text("Fultang Clinic - Comptabilité Matière", pageWidth - margin, pageHeight - 10, { align: "right" });
+            doc.text(brandFooter('Comptabilité Matière'), pageWidth - margin, pageHeight - 10, { align: "right" });
 
             doc.save(`inventaire_${archive.code_archive}.pdf`);
         } catch (err) {

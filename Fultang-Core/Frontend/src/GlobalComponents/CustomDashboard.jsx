@@ -5,8 +5,9 @@ import { AccessDenied } from "./AccessDenied.jsx";
 import { useAuthentication } from "../Utils/Provider.jsx";
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { Loading } from "./Loading.jsx";
+import { APP_NAME } from "../constants/branding.js";
 
-export function CustomDashboard({ children, linkList, requiredRole, brandLabel = "Fultang Clinic" }) {
+export function CustomDashboard({ children, linkList, requiredRole, brandLabel = APP_NAME }) {
 
 
     CustomDashboard.propTypes = {

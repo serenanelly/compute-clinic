@@ -10,6 +10,7 @@ import {
   getExercices, getBudgets, getEvolutionMensuelle, getTableauDeBordData
 } from '../../../services/accountantApi';
 import { useFeedback } from '../../../contexts/FeedbackContext';
+import { APP_NAME, brandFooter } from '../../../constants/branding.js';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip as RechartsTooltip, Legend, ResponsiveContainer,
@@ -304,12 +305,12 @@ export function RapportsPage() {
     }
 
     const win = window.open('', '_blank');
-    win.document.write(`<!DOCTYPE html><html><head><title>Rapport Financier — Fultang</title>
+    win.document.write(`<!DOCTYPE html><html><head><title>Rapport Financier — ${APP_NAME}</title>
       <style>body{font-family:Arial,sans-serif;padding:30px;color:#333}
       table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px}
       tr:nth-child(even){background:#f9f9f9}</style></head><body>
       <div style="text-align:center;border-bottom:3px double #333;padding-bottom:10px;margin-bottom:20px">
-        <h1 style="margin:0">Polyclinique Fultang</h1>
+        <h1 style="margin:0">${APP_NAME}</h1>
         <p style="margin:4px 0 0;font-size:12px;color:#666">Service de Comptabilité Financière & de Gestion</p>
         <p style="margin:2px 0 0;font-size:11px;color:#999">Généré le ${new Date().toLocaleString('fr-FR')}</p>
       </div>${body}</body></html>`);
