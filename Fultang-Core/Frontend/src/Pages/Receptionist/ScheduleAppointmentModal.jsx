@@ -138,7 +138,7 @@ export function ScheduleAppointmentModal({ isOpen, onClose, patient, appointment
                 onClose();
             }, 1500);
         } catch (err) {
-            setError("Une erreur est survenue lors de l'enregistrement du rendez-vous.");
+            setError("Une erreur est survenue lors de l'enregistrement de la consultation.");
         } finally {
             setIsSubmitting(false);
         }
@@ -154,7 +154,7 @@ export function ScheduleAppointmentModal({ isOpen, onClose, patient, appointment
                     <div className="bg-gradient-to-r from-primary-start to-primary-end p-8 flex justify-between items-center text-white">
                         <div>
                             <h3 className="text-2xl font-black uppercase tracking-tight">
-                                {appointmentToEdit ? "Modifier le rendez-vous" : "Planifier un rendez-vous"}
+                                {appointmentToEdit ? "Modifier la consultation" : "Enregistrer une consultation"}
                             </h3>
                             <p className="text-white/70 text-xs font-bold uppercase tracking-widest mt-1">Organisation du planning clinique</p>
                         </div>
@@ -165,18 +165,12 @@ export function ScheduleAppointmentModal({ isOpen, onClose, patient, appointment
 
                     <form onSubmit={handleSubmit} className="p-10 space-y-8 overflow-y-auto max-h-[70vh] relative">
                         {error && <Alert message={error} type="error" showIcon className="rounded-2xl font-bold" />}
-                        <Alert
-                            type="info"
-                            showIcon
-                            className="rounded-2xl"
-                            message="CORR-A3-005 : la réception et l'infirmier peuvent programmer un RDV. Le médecin consulte son planning ; seule la réception ouvre le dossier de visite et encaisse à la caisse."
-                        />
 
                         {/* Success Overlay */}
                         {showLocalSuccess && (
                             <div data-testid="success-overlay" className="absolute inset-0 z-20 bg-white/95 backdrop-blur-sm flex flex-col items-center justify-center animate-in zoom-in-95 duration-300 rounded-b-[2.5rem]">
                                 <CheckCircle2 className="w-20 h-20 text-green-500 mb-4 animate-bounce" />
-                                <h4 className="text-2xl font-bold text-gray-900">Rendez-vous enregistré !</h4>
+                                <h4 className="text-2xl font-bold text-gray-900">Consultation enregistrée !</h4>
                                 <p className="text-gray-500 italic font-medium">Planning mis à jour avec succès.</p>
                             </div>
                         )}
@@ -262,7 +256,7 @@ export function ScheduleAppointmentModal({ isOpen, onClose, patient, appointment
                         {/* Raison */}
                         <div className="space-y-3">
                             <label htmlFor="reason-textarea" className="text-xs font-black text-gray-400 uppercase tracking-widest flex items-center gap-2">
-                                <MessageSquare className="w-4 h-4 text-primary-start" /> Motif du rendez-vous
+                                <MessageSquare className="w-4 h-4 text-primary-start" /> Motif de la consultation
                             </label>
                             <textarea
                                 id="reason-textarea"
@@ -289,7 +283,7 @@ export function ScheduleAppointmentModal({ isOpen, onClose, patient, appointment
                                 className="flex-1 bg-gradient-to-r from-primary-start to-primary-end text-white py-5 rounded-3xl font-black shadow-xl shadow-primary-end/20 hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-3 disabled:opacity-50 uppercase text-xs tracking-widest"
                             >
                                 <CheckCircle2 className="w-5 h-5" />
-                                {appointmentToEdit ? "Enregistrer les modifications" : "Confirmer le rendez-vous"}
+                                {appointmentToEdit ? "Enregistrer les modifications" : "Enregistrer la consultation"}
                             </button>
                         </div>
                     </form>
