@@ -148,6 +148,17 @@ class ComptableFinancier(Personnel):
 class ComptableMatiere(Personnel):
     pass
 
+class Caissier(Personnel):
+    """
+    Modèle dédié au poste Caissier (service fonctionnel CAISSE) — avant ce
+    correctif, aucun modèle propre n'existait pour ce poste : la création
+    d'un « Caissier » via le formulaire Personnel créait en réalité un
+    `ComptableFinancier` (bug de mapping, voir POSTE_MODEL_MAP dans
+    views.py), routant la personne vers le dashboard Comptabilité
+    Financière au lieu du dashboard Caisse.
+    """
+    pass
+
 class Laborantin(Personnel):
     specialite_labo = models.CharField(max_length=100, choices=SpecialiteLabo.choices)
 

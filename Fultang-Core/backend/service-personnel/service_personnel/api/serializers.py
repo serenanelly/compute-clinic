@@ -3,7 +3,7 @@ from rest_framework import serializers
 from drf_spectacular.utils import extend_schema_serializer, OpenApiExample
 from .models import (
     Service, Medecin, MedecinGeneraliste, Infirmiere, Receptionniste,
-    ComptableFinancier, ComptableMatiere, Laborantin,
+    ComptableFinancier, ComptableMatiere, Caissier, Laborantin,
     Pharmacien, Directeur, Admin, Prime,
     GradeInfirmier, Langue, NiveauAccreditation, SpecialiteLabo, Statut
 )
@@ -97,7 +97,7 @@ class ServiceSerializer(serializers.ModelSerializer):
             return
         personnel_models = [
             Medecin, MedecinGeneraliste, Infirmiere, Receptionniste,
-            ComptableFinancier, ComptableMatiere, Laborantin,
+            ComptableFinancier, ComptableMatiere, Caissier, Laborantin,
             Pharmacien, Directeur, Admin,
         ]
         for model in personnel_models:
@@ -138,12 +138,12 @@ class ServiceSerializer(serializers.ModelSerializer):
             else:
                 from .models import (
                     Medecin, MedecinGeneraliste, Infirmiere, Receptionniste,
-                    ComptableFinancier, ComptableMatiere, Laborantin,
+                    ComptableFinancier, ComptableMatiere, Caissier, Laborantin,
                     Pharmacien, Directeur, Admin
                 )
                 personnel_models = [
-                    Medecin, MedecinGeneraliste, Infirmiere, Receptionniste, ComptableFinancier, 
-                    ComptableMatiere, Laborantin, Pharmacien, Directeur, Admin
+                    Medecin, MedecinGeneraliste, Infirmiere, Receptionniste, ComptableFinancier,
+                    ComptableMatiere, Caissier, Laborantin, Pharmacien, Directeur, Admin
                 ]
                 found = False
                 for model in personnel_models:
@@ -165,7 +165,7 @@ class ServiceSerializer(serializers.ModelSerializer):
             return None
         from .models import (
             Medecin, MedecinGeneraliste, Infirmiere, Receptionniste,
-            ComptableFinancier, ComptableMatiere, Laborantin,
+            ComptableFinancier, ComptableMatiere, Caissier, Laborantin,
             Pharmacien, Directeur, Admin
         )
         POSTE_MAP = {
@@ -354,6 +354,11 @@ class ComptableFinancierSerializer(BasePersonnelSerializer):
 class ComptableMatiereSerializer(BasePersonnelSerializer):
     class Meta(BasePersonnelSerializer.Meta):
         model = ComptableMatiere
+        fields = '__all__'
+
+class CaissierSerializer(BasePersonnelSerializer):
+    class Meta(BasePersonnelSerializer.Meta):
+        model = Caissier
         fields = '__all__'
 
 @extend_schema_serializer(

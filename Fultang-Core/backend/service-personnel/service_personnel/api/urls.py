@@ -2,7 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     ServiceViewSet, MedecinViewSet, MedecinGeneralisteViewSet, InfirmiereViewSet, ReceptionnisteViewSet,
-    ComptableFinancierViewSet, ComptableMatiereViewSet, LaborantinViewSet,
+    ComptableFinancierViewSet, ComptableMatiereViewSet, CaissierViewSet, LaborantinViewSet,
     PharmacienViewSet, DirecteurViewSet, AdminViewSet, AuthVerifyView, PersonnelViewSet,
     PrimeViewSet, ProvisionDatabaseView, CreateFirstAdminView, FunctionalServiceInvalidateView,
 )
@@ -15,6 +15,7 @@ router.register(r'infirmieres', InfirmiereViewSet)
 router.register(r'receptionnistes', ReceptionnisteViewSet)
 router.register(r'comptables-financiers', ComptableFinancierViewSet)
 router.register(r'comptables-matieres', ComptableMatiereViewSet)
+router.register(r'caissiers', CaissierViewSet)
 router.register(r'laborantins', LaborantinViewSet)
 router.register(r'pharmaciens', PharmacienViewSet)
 router.register(r'directeurs', DirecteurViewSet)

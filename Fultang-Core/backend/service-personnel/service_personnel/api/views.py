@@ -4,12 +4,12 @@ from rest_framework.response import Response
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from .models import (
     Service, Medecin, MedecinGeneraliste, Infirmiere, Receptionniste, 
-    ComptableFinancier, ComptableMatiere, Laborantin, 
+    ComptableFinancier, ComptableMatiere, Caissier, Laborantin, 
     Pharmacien, Directeur, Admin, Prime
 )
 from .serializers import (
-    ServiceSerializer, MedecinSerializer, MedecinGeneralisteSerializer, InfirmiereSerializer, ReceptionnisteSerializer, 
-    ComptableFinancierSerializer, ComptableMatiereSerializer, LaborantinSerializer, 
+    ServiceSerializer, MedecinSerializer, MedecinGeneralisteSerializer, InfirmiereSerializer, ReceptionnisteSerializer,
+    ComptableFinancierSerializer, ComptableMatiereSerializer, CaissierSerializer, LaborantinSerializer,
     PharmacienSerializer, DirecteurSerializer, AdminSerializer, PrimeSerializer
 )
 from rest_framework.views import APIView
@@ -103,7 +103,7 @@ class ServiceViewSet(viewsets.ModelViewSet):
         service = self.get_object()
         personnel_models = [
             Medecin, MedecinGeneraliste, Infirmiere, Receptionniste,
-            ComptableFinancier, ComptableMatiere, Laborantin,
+            ComptableFinancier, ComptableMatiere, Caissier, Laborantin,
             Pharmacien, Directeur, Admin,
         ]
         results = []
@@ -188,9 +188,17 @@ class ReceptionnisteViewSet(TemporaryPasswordResponseMixin, viewsets.ModelViewSe
 class ComptableFinancierViewSet(TemporaryPasswordResponseMixin, viewsets.ModelViewSet):
     """
     Responsabilités budgétaires majeures (cadres).
+
+    Activation/désactivation de service réellement effective : si
+    COMPTA_FINANCIERE est désactivé pour le tenant courant, TOUTE
+    opération de ce ViewSet est refusée — même mécanisme que
+    LaborantinViewSet/PharmacienViewSet. Avant ce correctif, aucun
+    contrôle n'existait ici (ni sur ce ViewSet, ni sur la création
+    générique : POSTE_TO_FUNCTIONAL_SERVICE ne connaissait pas ce poste).
     """
     queryset = ComptableFinancier.objects.all()
     serializer_class = ComptableFinancierSerializer
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
 
 @extend_schema_view(
     list=extend_schema(summary="Lister comptables matière", description="Logs des responsables matériel hospitalier."),
@@ -204,9 +212,36 @@ class ComptableFinancierViewSet(TemporaryPasswordResponseMixin, viewsets.ModelVi
 class ComptableMatiereViewSet(TemporaryPasswordResponseMixin, viewsets.ModelViewSet):
     """
     Logistique et stocks hospitaliers.
+
+    Activation/désactivation de service réellement effective : si
+    COMPTA_MATIERE est désactivé pour le tenant courant, TOUTE opération
+    de ce ViewSet est refusée — même mécanisme que
+    LaborantinViewSet/PharmacienViewSet.
     """
     queryset = ComptableMatiere.objects.all()
     serializer_class = ComptableMatiereSerializer
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_MATIERE')]
+
+@extend_schema_view(
+    list=extend_schema(summary="Lister caissiers", description="Personnel affecté à la caisse (encaissement, quittances)."),
+    retrieve=extend_schema(summary="Détail caissier", description="Accès détaillé."),
+    create=extend_schema(summary="Créer un caissier", description="Nouveau profil affecté à la caisse."),
+    update=extend_schema(summary="Modifier caissier", description="Mise à jour complète."),
+    partial_update=extend_schema(summary="Patch caissier", description="Changement rapide."),
+    destroy=extend_schema(summary="Supprimer caissier", description="Éviction du poste.")
+)
+@extend_schema(tags=['Administration - Comptabilité'])
+class CaissierViewSet(TemporaryPasswordResponseMixin, viewsets.ModelViewSet):
+    """
+    Personnel affecté au poste Caissier (service fonctionnel CAISSE).
+
+    Activation/désactivation de service réellement effective : si CAISSE
+    est désactivé pour le tenant courant, TOUTE opération de ce ViewSet
+    est refusée — même mécanisme que LaborantinViewSet/PharmacienViewSet.
+    """
+    queryset = Caissier.objects.all()
+    serializer_class = CaissierSerializer
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('CAISSE')]
 
 @extend_schema_view(
     list=extend_schema(summary="Lister laborantins", description="Profils travaillant aux biologies et virologies cliniques."),
@@ -341,7 +376,7 @@ class AuthVerifyView(APIView):
         # Liste des modèles de personnel à vérifier
         personnel_models = [
             Medecin, MedecinGeneraliste, Infirmiere, Receptionniste, ComptableFinancier,
-            ComptableMatiere, Laborantin, Pharmacien, Directeur, Admin
+            ComptableMatiere, Caissier, Laborantin, Pharmacien, Directeur, Admin
         ]
 
         user = None
@@ -389,8 +424,15 @@ POSTE_MODEL_MAP = {
     'medecin': Medecin,
     'infirmier': Infirmiere,
     'receptioniste': Receptionniste,
-    'caissier': ComptableFinancier,
-    'comptable': ComptableMatiere,
+    # Correctif de mapping : 'caissier' pointait vers ComptableFinancier et
+    # 'comptable' vers ComptableMatiere (inversés/confondus) — aucun poste
+    # ne créait jamais de Caissier ni de vrai routage CAISSE. 'comptable'
+    # désigne désormais sans ambiguïté la Comptabilité Financière ;
+    # 'comptable_matiere' est un poste distinct, jusqu'ici absent, pour la
+    # Comptabilité Matière (auparavant confondue avec 'comptable').
+    'caissier': Caissier,
+    'comptable': ComptableFinancier,
+    'comptable_matiere': ComptableMatiere,
     'laborantin': Laborantin,
     'pharmacien': Pharmacien,
     'directeur': Directeur,
@@ -399,7 +441,7 @@ POSTE_MODEL_MAP = {
 
 CATEGORIE_POSTES = {
     'medical': {'medecin', 'infirmier', 'laborantin', 'pharmacien'},
-    'admin': {'receptioniste', 'caissier', 'comptable', 'directeur', 'admin'},
+    'admin': {'receptioniste', 'caissier', 'comptable', 'comptable_matiere', 'directeur', 'admin'},
 }
 
 
@@ -431,6 +473,9 @@ POSTE_TO_FUNCTIONAL_SERVICE = {
     'pharmacien': 'PHARMACIE',
     'laborantin': 'LABORATOIRE',
     'infirmier': 'SOINS_INFIRMIERS',
+    'caissier': 'CAISSE',
+    'comptable': 'COMPTA_FINANCIERE',
+    'comptable_matiere': 'COMPTA_MATIERE',
 }
 
 def serialize_personnel(instance, model_class):
@@ -486,7 +531,7 @@ class PersonnelViewSet(viewsets.ViewSet):
     def get_user_and_model(self, pk):
         personnel_models = [
             Medecin, MedecinGeneraliste, Infirmiere, Receptionniste, ComptableFinancier, 
-            ComptableMatiere, Laborantin, Pharmacien, Directeur, Admin
+            ComptableMatiere, Caissier, Laborantin, Pharmacien, Directeur, Admin
         ]
         for model in personnel_models:
             try:
@@ -499,7 +544,7 @@ class PersonnelViewSet(viewsets.ViewSet):
     def list(self, request):
         personnel_models = [
             Medecin, MedecinGeneraliste, Infirmiere, Receptionniste, ComptableFinancier, 
-            ComptableMatiere, Laborantin, Pharmacien, Directeur, Admin
+            ComptableMatiere, Caissier, Laborantin, Pharmacien, Directeur, Admin
         ]
         results = []
         service_id = request.query_params.get('service')
@@ -685,7 +730,7 @@ class PersonnelViewSet(viewsets.ViewSet):
             
         personnel_models = [
             Medecin, MedecinGeneraliste, Infirmiere, Receptionniste, ComptableFinancier, 
-            ComptableMatiere, Laborantin, Pharmacien, Directeur, Admin
+            ComptableMatiere, Caissier, Laborantin, Pharmacien, Directeur, Admin
         ]
         for model in personnel_models:
             try:
@@ -709,7 +754,7 @@ class PersonnelViewSet(viewsets.ViewSet):
             
         personnel_models = [
             Medecin, MedecinGeneraliste, Infirmiere, Receptionniste, ComptableFinancier, 
-            ComptableMatiere, Laborantin, Pharmacien, Directeur, Admin
+            ComptableMatiere, Caissier, Laborantin, Pharmacien, Directeur, Admin
         ]
         for model in personnel_models:
             try:

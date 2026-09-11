@@ -172,7 +172,8 @@
             "medecin": "Médecin",
             "laborantin": "Laborantin",
             "pharmacien": "Pharmacien",
-            "comptable": "Comptable",
+            "comptable": "Comptable Financier",
+            "comptable_matiere": "Comptable Matière",
             "directeur": "Directeur"
         }
     },

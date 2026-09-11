@@ -8,12 +8,13 @@ import { AdminNavBar } from './AdminNavBar.jsx';
 import { newAdminNavLink } from './newAdminNavLink.js';
 import { getAllPersonnel, deletePersonnel, resetPersonnelPassword, getPersonnelDependencies } from '../../services/personnelApi';
 import { getAllServices } from '../../services/servicesApi';
+import { getMyFunctionalServices } from '../../services/tenantConfigApi';
 import { useAuthentication } from '../../Utils/Provider.jsx';
 import { AddPersonnelModal } from './Personnel/AddPersonnelModal.jsx';
 import { EditPersonnelModal } from './Personnel/EditPersonnelModal.jsx';
 import { PersonnelDetailsModal } from './Personnel/PersonnelDetailsModal.jsx';
 import { PersonnelPrimesModal } from './Personnel/PersonnelPrimesModal.jsx';
-import { buildPostesOptions, BACKEND_STATUTS, POSTE_CATEGORIES, getServiceId } from '../../constants/personnelPostes.js';
+import { buildPostesOptions, BACKEND_STATUTS, POSTE_CATEGORIES, POSTE_TO_FUNCTIONAL_SERVICE, getServiceId } from '../../constants/personnelPostes.js';
 
 /**
  * Page de gestion du personnel hospitalier.
@@ -31,6 +32,7 @@ export function AdminPersonnelPage() {
     const [filterCategorie, setFilterCategorie] = useState('');
     const [filterService, setFilterService] = useState('');
     const [services, setServices] = useState([]);
+    const [disabledFunctionalServices, setDisabledFunctionalServices] = useState(new Set());
 
     const [addModalOpen, setAddModalOpen] = useState(false);
     const [editModalOpen, setEditModalOpen] = useState(false);
@@ -43,6 +45,7 @@ export function AdminPersonnelPage() {
     useEffect(() => {
         fetchPersonnel();
         fetchServicesList();
+        fetchFunctionalServices();
     }, []);
 
     const fetchServicesList = async () => {
@@ -52,6 +55,22 @@ export function AdminPersonnelPage() {
             setServices(Array.isArray(data) ? data : []);
         } catch {
             setServices([]);
+        }
+    };
+
+    // Statut « Inactif » affiché quand le FunctionalService associé au
+    // poste d'un personnel est désactivé (voir getStatusTag) — même
+    // source de vérité que le filtrage à la création (AddPersonnelModal).
+    // Purement un affichage : ne modifie jamais `statut` en base, ne
+    // supprime aucun compte, ne touche pas à un éventuel User.is_active.
+    const fetchFunctionalServices = async () => {
+        try {
+            const data = await getMyFunctionalServices();
+            const disabled = new Set((Array.isArray(data) ? data : []).filter((s) => !s.enabled).map((s) => s.code));
+            setDisabledFunctionalServices(disabled);
+        } catch (error) {
+            console.error('Erreur de chargement de la configuration des services fonctionnels:', error);
+            setDisabledFunctionalServices(new Set());
         }
     };
 
@@ -163,7 +182,19 @@ export function AdminPersonnelPage() {
         });
     };
 
-    const getStatusTag = (statut) => {
+    const getStatusTag = (statut, poste) => {
+        // Le service fonctionnel du poste est désactivé pour ce tenant :
+        // affiché comme Inactif quel que soit le `statut` RH réel — le
+        // compte, ses données et son `statut` d'origine restent intacts,
+        // ce badge est purement visuel (voir fetchFunctionalServices).
+        const serviceCode = POSTE_TO_FUNCTIONAL_SERVICE[poste];
+        if (serviceCode && disabledFunctionalServices.has(serviceCode)) {
+            return (
+                <Tag color="default" title="Service désactivé pour cet établissement">
+                    {t('personnel.statuses.inactifService', { defaultValue: 'Inactif (service désactivé)' })}
+                </Tag>
+            );
+        }
         const colors = { Actif: 'green', 'Congé': 'orange', Suspendu: 'red', Autre: 'default' };
         const labels = {
             Actif: t('personnel.statuses.actif', { defaultValue: 'Actif' }),
@@ -183,6 +214,7 @@ export function AdminPersonnelPage() {
             laborantin: 'green',
             pharmacien: 'magenta',
             comptable: 'gold',
+            comptable_matiere: 'lime',
             directeur: 'red',
             admin: 'volcano',
         };
@@ -236,7 +268,7 @@ export function AdminPersonnelPage() {
             dataIndex: 'statut',
             key: 'statut',
             width: 100,
-            render: (statut) => getStatusTag(statut)
+            render: (statut, record) => getStatusTag(statut, record.poste)
         },
         {
             title: t('services.actions'),

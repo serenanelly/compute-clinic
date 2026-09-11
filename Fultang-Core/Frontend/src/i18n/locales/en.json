@@ -172,7 +172,8 @@
             "medecin": "Doctor",
             "laborantin": "Lab Technician",
             "pharmacien": "Pharmacist",
-            "comptable": "Accountant",
+            "comptable": "Financial Accountant",
+            "comptable_matiere": "Material Accountant",
             "directeur": "Director"
         }
     },

@@ -14,21 +14,8 @@ import {
     getServiceId,
     MEDICAL_SPECIALITES,
     POSTE_CATEGORIES,
+    POSTE_TO_FUNCTIONAL_SERVICE,
 } from '../../../constants/personnelPostes.js';
-
-/**
- * Correspondance poste → service fonctionnel (Tenant Configuration) —
- * copie frontend de POSTE_TO_FUNCTIONAL_SERVICE (service-personnel/api/views.py),
- * uniquement pour ne PAS PROPOSER un poste dont le service est désactivé
- * pour cet établissement. Le blocage réel reste toujours côté backend
- * (HasFunctionalServiceEnabled) — ceci n'est qu'un affichage cohérent,
- * jamais la seule protection.
- */
-const POSTE_TO_FUNCTIONAL_SERVICE = {
-    pharmacien: 'PHARMACIE',
-    laborantin: 'LABORATOIRE',
-    infirmier: 'SOINS_INFIRMIERS',
-};
 
 /**
  * Modal pour ajouter un nouveau personnel.

@@ -1690,6 +1690,59 @@ Zéro régression introduite par la fusion sur les 4 services — chaque échec 
 
 ---
 
+### 14.12 Correction du mapping des rôles comptables (CAISSE / COMPTA_FINANCIERE / COMPTA_MATIERE)
+
+#### AVANT
+
+`POSTE_MODEL_MAP` (`service-personnel/api/views.py`) faisait pointer les postes affichés dans le formulaire Personnel vers les MAUVAIS modèles :
+
+```python
+POSTE_MODEL_MAP = {
+    'caissier': ComptableFinancier,   # créait un ComptableFinancier -> rôle 'comptable_financier' -> dashboard COMPTA_FINANCIERE
+    'comptable': ComptableMatiere,    # créait un ComptableMatiere -> rôle 'compta_matiere' -> dashboard COMPTA_MATIERE
+    # aucune entrée ne créait jamais de personnel routé vers le dashboard Caisse
+}
+```
+
+`Provider.jsx` détermine le rôle de navigation à partir du **nom de la classe Django** retournée à la connexion (`ROLE_MAP['ComptableFinancier'] = 'comptable_financier'`, etc.) — jamais à partir du champ `poste` saisi à la création. Sélectionner « Caissier » dans le formulaire créait donc un `ComptableFinancier`, et la personne atterrissait après connexion sur le dashboard Comptabilité Financière (pas Caisse) ; sélectionner « Comptable » créait un `ComptableMatiere`, menant à Comptabilité Matière. **Aucun poste ne créait de personnel routé vers CAISSE** — la seule façon d'obtenir le rôle `'caissier'` était un hack de démo par email (`EMAIL_ROLE_OVERRIDE` côté frontend, `CANONICAL_ROLES` côté backend, tous deux non liés au poste réellement choisi). `POSTE_TO_FUNCTIONAL_SERVICE` (le verrou qui bloque la création si le service est désactivé) ne connaissait par ailleurs aucun de ces trois postes.
+
+#### MODIFICATIONS
+
+**1. Nouveau modèle `Caissier(Personnel)`** (`service-personnel/api/models.py`) — jusqu'ici seul rôle avec dashboard dédié sans modèle Personnel propre. Migration `0008_add_caissier.py` (écrite à la main : `makemigrations` détecte un changement pré-existant et non lié sur `Service.date_creation`, non traité ici) ; appliquée sur `default` et sur les 51 bases tenant existantes.
+
+**2. Mapping corrigé** (`POSTE_MODEL_MAP`, `POSTE_TO_FUNCTIONAL_SERVICE`, `CATEGORIE_POSTES` — `views.py`) :
+
+| Poste | Modèle | FunctionalService | Rôle de navigation |
+|---|---|---|---|
+| `caissier` | `Caissier` (nouveau) | `CAISSE` | `caissier` |
+| `comptable` | `ComptableFinancier` | `COMPTA_FINANCIERE` | `comptable_financier` |
+| `comptable_matiere` (nouveau poste) | `ComptableMatiere` | `COMPTA_MATIERE` | `compta_matiere` |
+
+`comptable_matiere` est un poste distinct nouvellement créé — l'ancien poste `comptable` désignait ambiguë­ment deux fonctions différentes (Financier ET Matière) ; ils sont maintenant strictement séparés, sans rien supprimer (aucun poste existant retiré).
+
+**3. Gating backend des 3 ViewSets HR dédiés** (`CaissierViewSet`, `ComptableFinancierViewSet`, `ComptableMatiereViewSet`) avec `HasFunctionalServiceEnabled.for_service(...)`, même mécanisme que `LaborantinViewSet`/`PharmacienViewSet` — bloque aussi bien la création générique (`poste=...`) que la création directe via l'endpoint dédié (`/personnel/comptables-financiers/`, etc.), les deux chemins existants.
+
+**4. `Caissier` ajouté à toutes les listes polymorphes** (`personnel_models` dans `AuthVerifyView`, `PersonnelViewSet`, résolution de `chef_service`) — sans quoi un Caissier n'aurait pas pu se connecter ni être désigné chef de service.
+
+**5. Frontend** : `POSTE_TO_FUNCTIONAL_SERVICE` centralisé dans `constants/personnelPostes.js` (auparavant dupliqué localement dans `AddPersonnelModal.jsx`) — seule source de vérité frontend, utilisée maintenant à deux endroits : filtrage des postes proposés à la création (déjà existant) ET nouveau statut « Inactif » sur la liste Personnel de l'admin.
+
+**6. Statut « Inactif » dans l'admin** (`AdminPersonnelPage.jsx`) : `getStatusTag` affiche « Inactif (service désactivé) » quand `POSTE_TO_FUNCTIONAL_SERVICE[poste]` est désactivé pour le tenant — **purement un badge d'affichage** : ne modifie jamais le champ `statut` réel en base, ne supprime rien, ne touche à aucun `User.is_active`. Redevient « Actif »/statut réel dès réactivation. Le personnel reste toujours visible (la liste passe par `PersonnelViewSet`, un ViewSet polymorphe distinct des ViewSets dédiés, jamais gaté — comportement déjà en place pour Laborantin/Pharmacien, vérifié ici).
+
+**7. Investigation "page déjà ouverte" (COMPTA_FINANCIERE / COMPTA_MATIERE)** : les 17 + 13 ViewSets métier de ces deux services étaient déjà correctement gatés (session précédente). Testé en direct : page ouverte → désactivation → nouvelle requête GET, POST, et sur un second endpoint du même dashboard → bloqués (404) dans tous les cas, y compris avec le même token JWT que celui utilisé avant désactivation (invalidation de cache déjà effective). **Non reproduit** malgré des tests ciblés (lecture, écriture, endpoint HR direct) — possiblement déjà résolu par le travail de finalisation d'une session précédente (§14.10/§14.11).
+
+#### TESTS
+
+Live, deux tenants réels (`e2e_roles_mapping.py`, 32/32 PASS) : mapping poste→modèle→FunctionalService vérifié par introspection Django ; cycle complet CAISSE (créer → connecter → accéder au dashboard → désactiver → bloqué partout, y compris `/personnel/caissiers/` → réactiver → accès restauré) ; même cycle pour COMPTA_FINANCIERE et COMPTA_MATIERE avec en plus le scénario "page déjà ouverte" (lecture ET écriture) ; isolation confirmée (CAISSE désactivé sur Tenant A, toujours actif et créable sur Tenant B).
+
+Non-régression (`service-personnel`, comparaison stricte via `git stash`) : 5 échecs déjà présents avant toute modification (payloads de test obsolètes, non liés — confirmés identiques avec/sans les changements de cette tâche).
+
+#### LIMITATIONS / points restants
+
+- `EMAIL_ROLE_OVERRIDE`/`CANONICAL_ROLES` (hacks de démo pré-existants pour `paul.talla@fultang.local`/`i.njoya@fultang.local`) non touchés — ces comptes de seed ne sont pas re-créés comme de vrais `Caissier` ; nouveau personnel créé via l'UI n'est pas affecté.
+- Frontend non re-testé dans un navigateur réel pour cette tâche (build + lint + contenu du bundle vérifiés ; comportement API confirmé en direct via 32 tests).
+
+---
+
 ## 15. Sécurité
 
 Décisions prises et vérifiées :

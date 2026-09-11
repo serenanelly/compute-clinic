@@ -103,6 +103,7 @@ function useLogin() {
           'Receptionniste': 'receptioniste',
           'ComptableFinancier': 'comptable_financier',
           'ComptableMatiere': 'compta_matiere',
+          'Caissier': 'caissier',
           'Laborantin': 'laborantin',
           'Pharmacien': 'pharmacien',
           'Directeur': 'directeur',
