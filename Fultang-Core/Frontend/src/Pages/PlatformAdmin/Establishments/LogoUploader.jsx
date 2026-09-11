@@ -2,20 +2,10 @@ import { useRef, useState } from "react";
 import PropTypes from "prop-types";
 import { UploadCloud, Trash2, Loader2, Image as ImageIcon } from "lucide-react";
 import { uploadTenantLogo, deleteTenantLogo } from "../../../services/platformAdminApi.js";
-import { getGatewayBaseUrl } from "../../../Utils/gatewayUrls.js";
+import { resolveTenantLogoUrl } from "../../../Utils/gatewayUrls.js";
 import { useFeedback } from "../../../contexts/FeedbackContext.jsx";
 
 const MAX_SIZE_BYTES = 2 * 1024 * 1024; // 2 Mo — même limite que le backend
-
-/**
- * Résout `logo_display_url` en une URL affichable : telle quelle si c'est
- * déjà une URL absolue (ancien champ `logo_url` externe), sinon préfixée
- * par la Gateway (fichier téléversé, chemin relatif `/tenants/media/...`).
- */
-function resolveLogoUrl(logoDisplayUrl) {
-    if (!logoDisplayUrl) return "";
-    return logoDisplayUrl.startsWith("http") ? logoDisplayUrl : `${getGatewayBaseUrl()}${logoDisplayUrl}`;
-}
 
 /**
  * Zone de dépôt (drag & drop) + sélection au clic pour le logo d'un
@@ -30,7 +20,7 @@ export function LogoUploader({ tenant, onUpdated }) {
     const [busy, setBusy] = useState(false);
     const inputRef = useRef(null);
 
-    const previewUrl = resolveLogoUrl(tenant?.logo_display_url);
+    const previewUrl = resolveTenantLogoUrl(tenant?.logo_display_url);
 
     const validateFile = (file) => {
         if (!file.type.startsWith("image/")) {

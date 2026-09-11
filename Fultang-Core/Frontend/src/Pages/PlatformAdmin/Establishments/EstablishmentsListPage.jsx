@@ -49,7 +49,7 @@ export function EstablishmentsListPage() {
     }, [tenants, searchText]);
 
     return (
-        <CustomDashboard linkList={platformAdminNavLink} requiredRole="platform_admin" brandLabel="FullTang Platform">
+        <CustomDashboard linkList={platformAdminNavLink} requiredRole="platform_admin" brandLabel="ComputeClinic Platform" showTenantIdentity={false}>
             <AppHeader subtitle="Platform Admin" title="Établissements" />
             <div className="p-6 bg-gray-50 min-h-screen">
                 {loadError && (

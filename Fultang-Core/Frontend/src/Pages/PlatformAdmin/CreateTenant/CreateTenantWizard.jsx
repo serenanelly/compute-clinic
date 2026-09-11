@@ -227,7 +227,7 @@ export function CreateTenantWizard() {
     };
 
     return (
-        <CustomDashboard linkList={platformAdminNavLink} requiredRole="platform_admin" brandLabel="FullTang Platform">
+        <CustomDashboard linkList={platformAdminNavLink} requiredRole="platform_admin" brandLabel="ComputeClinic Platform" showTenantIdentity={false}>
             <AppHeader subtitle="Platform Admin" title="Créer un établissement" />
             <div className="p-6 bg-gray-50 min-h-screen">
                 <motion.div

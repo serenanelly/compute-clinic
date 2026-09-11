@@ -48,7 +48,7 @@ export function PlatformAdminLogin() {
                     <div className="bg-gradient-to-r from-primary-start to-primary-end rounded-2xl p-4 shadow-lg mb-4">
                         <ShieldCheck className="w-8 h-8 text-white" />
                     </div>
-                    <h1 className="text-2xl font-bold text-secondary">FullTang</h1>
+                    <h1 className="text-2xl font-bold text-secondary">ComputeClinic</h1>
                     <p className="text-sm font-semibold uppercase tracking-widest text-gray-400 mt-1">
                         Platform Admin
                     </p>
@@ -77,7 +77,7 @@ export function PlatformAdminLogin() {
                                 value={email}
                                 onChange={(e) => setEmail(e.target.value)}
                                 className="w-full h-12 px-3 rounded-lg bg-gray-100 border-none outline-none focus:outline-none focus:ring-0"
-                                placeholder="admin@fultang.local"
+                                placeholder="admin@computeclinic.local"
                             />
                         </div>
 
@@ -118,7 +118,7 @@ export function PlatformAdminLogin() {
                 </div>
 
                 <p className="text-center text-xs text-gray-400 mt-6">
-                    Cette interface est réservée à l&apos;administration de la plateforme FullTang —
+                    Cette interface est réservée à l&apos;administration de la plateforme ComputeClinic —
                     pas au personnel hospitalier d&apos;un établissement.
                 </p>
             </div>

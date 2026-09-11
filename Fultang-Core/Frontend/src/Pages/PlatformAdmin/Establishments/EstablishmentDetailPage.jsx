@@ -138,7 +138,7 @@ export function EstablishmentDetailPage() {
     const activeCategory = establishmentConfigCategories.find((c) => c.key === activeCategoryKey);
 
     return (
-        <CustomDashboard linkList={platformAdminNavLink} requiredRole="platform_admin" brandLabel="FullTang Platform">
+        <CustomDashboard linkList={platformAdminNavLink} requiredRole="platform_admin" brandLabel="ComputeClinic Platform" showTenantIdentity={false}>
             <AppHeader subtitle="Platform Admin" title={tenant?.name || "Établissement"} />
             <div className="p-6 bg-gray-50 min-h-screen">
                 <Link
@@ -227,8 +227,8 @@ export function EstablishmentDetailPage() {
                             onConfirm={handleStatusConfirmed}
                             title={isTenantActive ? "Voulez-vous vraiment suspendre cet établissement ?" : "Voulez-vous vraiment réactiver cet établissement ?"}
                             message={isTenantActive
-                                ? "Cette action désactivera immédiatement l'accès à Fultang pour tous les utilisateurs de cet établissement. Les données et les bases de données seront conservées."
-                                : "Cette action rétablira immédiatement l'accès à Fultang pour les utilisateurs de cet établissement."}
+                                ? "Cette action désactivera immédiatement l'accès à ComputeClinic pour tous les utilisateurs de cet établissement. Les données et les bases de données seront conservées."
+                                : "Cette action rétablira immédiatement l'accès à ComputeClinic pour les utilisateurs de cet établissement."}
                             confirmText={isTenantActive ? "Oui, suspendre l'établissement" : "Oui, réactiver l'établissement"}
                             cancelText="Annuler"
                         />

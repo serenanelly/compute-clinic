@@ -82,7 +82,7 @@ export const Receptionist = () => {
             if (status === 401 || status === 403) {
                 setError("Session expirée — reconnectez-vous.");
             } else if (status >= 502) {
-                setError("Service medical indisponible. Vérifiez que fultang-medical-backend est démarré.");
+                setError("Service médical indisponible. Veuillez réessayer dans quelques instants.");
             } else {
                 setError("Impossible de charger la liste des patients.");
             }

@@ -17,6 +17,7 @@ export function AppRoute() {
     const PlatformAdminLogsPage = React.lazy(async () => ({ default: (await import("../Pages/PlatformAdmin/Logs/AdminLogsPage.jsx")).AdminLogsPage }));
     const ForgottenPage = React.lazy(async () => ({ default: (await import("../Pages/Authentication/ForgottenPassword.jsx")).ForgottenPassword }));
     const LandingPage = React.lazy(async () => ({ default: (await import("../Pages/LandingPage/LandingPage.jsx")).LandingPage }));
+    const LandingPageV2 = React.lazy(async () => ({ default: (await import("../Pages/LandingPage/LandingPageV2.jsx")).LandingPageV2 }));
     const NurseWaitingRoomPage = React.lazy(async () => ({ default: (await import("../Pages/Nurse/WaitingRoom.jsx")).WaitingRoom }));
     const NurseAppointmentsPage = React.lazy(async () => ({ default: (await import("../Pages/Nurse/NurseAppointments.jsx")).NurseAppointments }));
     const NurseExamsPage = React.lazy(async () => ({ default: (await import("../Pages/Nurse/NurseExams.jsx")).NurseExams }));
@@ -139,6 +140,7 @@ export function AppRoute() {
         <React.Suspense fallback={<Loading />}>
             <Routes>
                 <Route path={AppRoutesPaths.welcomePage} element={<LandingPage />} />
+                <Route path={AppRoutesPaths.newLandingPage} element={<LandingPageV2 />} />
                 <Route path={AppRoutesPaths.loginPage} element={<LoginPage />} />
                 <Route path={AppRoutesPaths.forgottenPasswordPage} element={<ForgottenPage />} />
                 <Route path={AppRoutesPaths.platformAdminLoginPage} element={<PlatformAdminLoginPage />} />

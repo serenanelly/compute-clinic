@@ -455,6 +455,35 @@ class TenantViewSet(mixins.CreateModelMixin,
         data = self.functional_service_service.list_for_tenant(tenant.id)
         return Response(TenantFunctionalServiceSerializer(data, many=True).data)
 
+    @action(
+        detail=False, methods=['get'], url_path='mine',
+        permission_classes=[IsAuthenticated],
+    )
+    def mine(self, request):
+        """
+        GET /tenants/tenants/mine/ — libre-service, même principe que
+        `my_functional_services` ci-dessus (tenant dérivé de
+        `request.user.tenant_id`, jamais d'un identifiant fourni par le
+        client). Sert au branding dynamique du frontend hospitalier
+        (nom + logo de l'établissement dans les sidebars) — réutilise
+        `TenantSerializer` tel quel, aucun nouveau modèle ni nouvelle
+        table : le nom/logo du tenant sont déjà stockés sur `Tenant`
+        (voir Platform Admin, `EstablishmentDetailPage`/`LogoUploader`).
+
+        404 si l'appelant n'a aucun tenant (PLATFORM_ADMIN, ou compte du
+        pool non assigné).
+        """
+        tenant_id = getattr(request.user, 'tenant_id', None)
+        if not tenant_id:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            tenant = self.service.get_tenant(tenant_id)
+        except (Tenant.DoesNotExist, ValueError, ValidationError):
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        return Response(TenantSerializer(tenant).data)
+
     @action(detail=True, methods=['get'], url_path='functional-services')
     def functional_services(self, request, id=None):
         """

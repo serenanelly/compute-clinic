@@ -8,8 +8,9 @@ import { useFunctionalServiceGate } from "../hooks/useFunctionalServiceGate.js";
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { Loading } from "./Loading.jsx";
 import { APP_NAME } from "../constants/branding.js";
+import { TenantBrandHeader } from "./TenantBrandHeader.jsx";
 
-export function CustomDashboard({ children, linkList, requiredRole, brandLabel = APP_NAME, requiredFunctionalService }) {
+export function CustomDashboard({ children, linkList, requiredRole, brandLabel = APP_NAME, requiredFunctionalService, showTenantIdentity = true }) {
 
 
     CustomDashboard.propTypes = {
@@ -20,6 +21,10 @@ export function CustomDashboard({ children, linkList, requiredRole, brandLabel =
         // Code FunctionalService (ex. "SOINS_INFIRMIERS") dont dépend cette
         // page — optionnel, voir hooks/useFunctionalServiceGate.js.
         requiredFunctionalService: PropTypes.string,
+        // true (défaut) : sidebar hospitalière -> nom + logo du tenant
+        // courant (TenantBrandHeader.jsx). false : Platform Admin (aucun
+        // tenant sélectionné) -> `brandLabel` statique, inchangé.
+        showTenantIdentity: PropTypes.bool,
     }
 
 
@@ -134,9 +139,13 @@ export function CustomDashboard({ children, linkList, requiredRole, brandLabel =
         <div className="flex h-screen">
             <div
                 className="w-[18%] fixed h-screen bg-gradient-to-t from-primary-start to-primary-end flex flex-col overflow-y-auto scrollbar">
-                <h1 className="text-3xl font-bold ml-6 mb-10 mt-7 text-white">
-                    {brandLabel}
-                </h1>
+                {showTenantIdentity ? (
+                    <TenantBrandHeader />
+                ) : (
+                    <h1 className="text-3xl font-bold ml-6 mb-10 mt-7 text-white">
+                        {brandLabel}
+                    </h1>
+                )}
                 <nav className="flex flex-col space-y-1.5 mb-2 ">
                     {linkList.map((item, index) => renderLink(item, index))}
                 </nav>

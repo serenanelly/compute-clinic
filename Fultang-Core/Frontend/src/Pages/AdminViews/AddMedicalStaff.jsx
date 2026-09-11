@@ -264,7 +264,7 @@ export function AddMedicalStaff() {
                                     <Input
                                         type="email"
                                         name="email"
-                                        placeholder="exemple@fultang.com"
+                                        placeholder="exemple@computeclinic.com"
                                         value={formData.email}
                                         onChange={handleChange}
                                         className={`rounded-xl h-11 ${errors.email ? 'border-red-500' : ''}`}

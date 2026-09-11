@@ -7,6 +7,9 @@ export const AppRoutesPaths = {
     adminPersonnelPage: "/admin/personnel",
     adminChambresPage: "/admin/chambres",
     welcomePage: "/",
+    // Nouvelle proposition de landing page (présentation) — indépendante,
+    // ne remplace pas welcomePage. Voir Pages/LandingPage/LandingPageV2.jsx.
+    newLandingPage: "/nouvelle-landing",
     loginPage: "/login",
     forgottenPasswordPage: "/forgotten-password",
 

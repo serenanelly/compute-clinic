@@ -11,6 +11,7 @@ import { accountantNavLink } from "./NavLinks";
 import { AccountantNavBar } from "./NavBar";
 import { ACCOUNTANT_COLORS } from "./accountantTheme";
 import { APP_NAME } from "../../constants/branding.js";
+import { TenantBrandHeader } from "../../GlobalComponents/TenantBrandHeader.jsx";
 
 export function AccountantLayout({ children }) {
     AccountantLayout.propTypes = {
@@ -123,11 +124,9 @@ export function AccountantLayout({ children }) {
             {/* Sidebar */}
             <div className="w-[19%] fixed h-screen bg-gradient-to-b from-primary-start to-primary-end flex flex-col justify-between shadow-2xl overflow-y-auto scrollbar z-30">
                 <div>
-                    <div className="p-6 border-b border-white/10">
-                        <h1 className="text-2xl font-black text-white tracking-wider">
-                            {APP_NAME}
-                        </h1>
-                        <p className="text-xs text-white/60 font-semibold uppercase mt-1 tracking-widest">
+                    <div className="border-b border-white/10 pb-2">
+                        <TenantBrandHeader />
+                        <p className="text-xs text-white/60 font-semibold uppercase ml-6 -mt-6 mb-4 tracking-widest">
                             Finance & Comptabilité
                         </p>
                     </div>

@@ -1743,6 +1743,47 @@ Non-régression (`service-personnel`, comparaison stricte via `git stash`) : 5 �
 
 ---
 
+### 14.13 Branding ComputeClinic (frontend) et identité dynamique du tenant dans les sidebars
+
+#### AVANT
+
+Le renommage Fultang → ComputeClinic (§14.11) avait couvert l'essentiel du code, mais 13 occurrences visibles subsistaient (dont une variante orthographique `FullTang`, non couverte par la recherche précédente) : écran « service indisponible », écran de suspension, page de connexion Platform Admin (titre, placeholder, mentions), en-tête de sidebar de 5 pages Platform Admin, email de support, placeholders de formulaires, un message d'erreur exposant un nom de container technique (`fultang-medical-backend`), et des données de démonstration statiques.
+
+Par ailleurs, toutes les sidebars hospitalières (Réceptionniste, Médecin, Infirmier, Pharmacien, Laborantin, Caissier, Comptable...) n'affichaient que la marque générique ComputeClinic — jamais le nom ni le logo de l'établissement, alors que ces informations existent déjà (`Tenant.name`/`Tenant.logo`, gérées depuis Platform Admin → `EstablishmentDetailPage`/`LogoUploader`).
+
+#### MODIFICATIONS
+
+**1. Renommage** : les 13 occurrences visibles corrigées (liste complète dans le rapport donné à l'utilisateur) — jamais les identifiants techniques (clés `localStorage`, noms de composants React, variables d'environnement `VITE_BACKEND_FULTANG_*`, domaine technique de repli `fulltang.com` dans `gatewayUrls.js`), conservés à l'identique.
+
+**2. Nouvel endpoint self-service** `GET /tenants/tenants/mine/` (`tenant-service/tenants/views.py`, `TenantViewSet.mine`) — même principe que `functional-services/mine/` déjà existant : tenant dérivé de `request.user.tenant_id` (jamais un identifiant fourni par le client), 404 pour un appelant sans tenant (Platform Admin, pool non assigné). Réutilise `TenantSerializer` tel quel — **aucun nouveau modèle, aucune nouvelle table** : `name`/`logo_display_url` existaient déjà.
+
+**3. Mécanisme frontend réutilisable** (un seul, partagé par tous les rôles) :
+   - `services/tenantConfigApi.js::getMyTenant()` — appelle l'endpoint ci-dessus.
+   - `Utils/gatewayUrls.js::resolveTenantLogoUrl()` — résolution d'URL de logo, extraite de `LogoUploader.jsx` (qui l'utilisait déjà en local) pour être partagée.
+   - `hooks/useTenantBranding.js` — hook `{name, logoUrl, loading}`, retombe silencieusement sur `{null, null}` en cas d'erreur/404 (jamais d'erreur visible pour une simple absence de tenant).
+   - `GlobalComponents/TenantBrandHeader.jsx` — composant unique affichant logo + nom du tenant + « ComputeClinic » en repli, câblé dans les 7 sidebars hospitalières (`DashBoard.jsx`, `CustomDashboard.jsx`, `AccountantLayout.jsx`, `AccountantDashBoard.jsx` [ComptaMatiere], `DirectorDashboard.jsx`, `LaboratoryDashboard.jsx`, `PharmacistDashboard.jsx`).
+
+**4. Platform Admin protégé explicitement** : `CustomDashboard.jsx` (partagé avec les rôles hospitaliers) reçoit un nouveau prop `showTenantIdentity` (défaut `true`) ; les 5 pages Platform Admin qui l'utilisent passent `showTenantIdentity={false}` pour garder leur libellé statique « ComputeClinic Platform » — jamais de nom d'hôpital arbitraire hors contexte tenant.
+
+**5. Découverte incidente — bug de dépôt** : `Frontend/.gitignore` contenait un motif nu `logs` qui, combiné à `core.ignorecase=true` (courant sur système de fichiers insensible à la casse), masquait aussi `src/Pages/PlatformAdmin/Logs/` — ce répertoire de code source (page de logs Platform Admin, `AdminLogsPage.jsx`) n'avait donc **jamais été suivi par git**, dans aucune session précédente. Motif corrigé en `/logs` (ancré à la racine du projet frontend) ; le répertoire est maintenant suivi.
+
+**6. Nouvelle landing page** (`Pages/LandingPage/LandingPageV2.jsx`, route `/nouvelle-landing`) — proposition indépendante, la landing actuelle (`/`) reste intacte et inchangée. Aucune détection de tenant, aucune dépendance à une image statique (icônes `lucide-react` uniquement, pour une fiabilité de rendu garantie). Le bouton « Se connecter » redirige vers `AppRoutesPaths.platformAdminLoginPage` (`/platform-admin/login`, déjà existant) — aucun nouveau système d'authentification.
+
+#### TESTS
+
+Live (`e2e_branding.py`, 7/7 PASS) : nom du tenant retourné correctement et distinctement pour deux tenants réels ; upload de logo via l'endpoint Platform Admin déjà existant (`POST /tenants/tenants/{id}/logo/`) ; logo visible dans `/mine/` pour son propre tenant ; **isolation confirmée** (le logo de A n'apparaît jamais pour B) ; Platform Admin (sans tenant) reçoit 404 sur `/mine/`, jamais un nom arbitraire.
+
+Non-régression `tenant-service` : 164/164 (identique à la baseline connue).
+
+Build + lint frontend propres sur tous les fichiers touchés ; bundle déployé vérifié sans occurrence de `FullTang`/`fultang` visible ; routes `/`, `/nouvelle-landing`, `/platform-admin/login` toutes accessibles (200).
+
+#### LIMITATIONS / points restants
+
+- Non re-testé dans un navigateur réel (rendu visuel du logo/nom en situation, responsive de la nouvelle landing) — vérifié par API + build + lint + contenu du bundle uniquement.
+- Le tenant de test ayant reçu un logo (`brand-a-*`) n'a pas été nettoyé.
+
+---
+
 ## 15. Sécurité
 
 Décisions prises et vérifiées :

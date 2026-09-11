@@ -20,3 +20,15 @@ export const getMyFunctionalServices = async () => {
     const response = await axiosInstance.get(`${getGatewayBaseUrl()}/tenants/tenants/functional-services/mine/`);
     return response.data;
 };
+
+/**
+ * Profil (nom, logo) de l'établissement de l'utilisateur courant — même
+ * principe que getMyFunctionalServices ci-dessus : dérivé du JWT côté
+ * backend (GET /tenants/tenants/mine/), jamais choisi côté client. Sert
+ * au branding dynamique des sidebars (hooks/useTenantBranding.js).
+ * @returns {Promise<{name: string, logo_display_url: string, ...}>}
+ */
+export const getMyTenant = async () => {
+    const response = await axiosInstance.get(`${getGatewayBaseUrl()}/tenants/tenants/mine/`);
+    return response.data;
+};

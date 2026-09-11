@@ -1,4 +1,5 @@
 import { ShieldAlert } from "lucide-react";
+import { APP_NAME } from "../constants/branding.js";
 
 /**
  * Écran de suspension d'un établissement (Cycle de vie du tenant, Phase 3).
@@ -22,7 +23,7 @@ export function TenantSuspendedScreen() {
                     <div className="bg-gradient-to-r from-primary-start to-primary-end rounded-2xl p-4 shadow-lg mb-4">
                         <ShieldAlert className="w-8 h-8 text-white" />
                     </div>
-                    <h1 className="text-2xl font-bold text-secondary">FullTang</h1>
+                    <h1 className="text-2xl font-bold text-secondary">{APP_NAME}</h1>
                 </div>
                 <div className="bg-white shadow-2xl border-2 rounded-lg p-8">
                     <h2 className="text-xl font-bold text-gray-800">Vous avez été suspendu.</h2>

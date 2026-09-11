@@ -9,11 +9,11 @@ export const ReceptionistMedicalStaffs = () => {
     const [searchQuery, setSearchQuery] = useState("");
 
     const mockStaffs = [
-        { id: "M-001", nom: "Kameni", prenom: "Marc", role: "Médecin Généraliste", specialite: "Médecine Générale", contact: "+237 690 123 456", email: "m.kameni@fultang.cm", statut: "DISPONIBLE", garde: "08:00 - 18:00" },
-        { id: "M-002", nom: "Ndongo", prenom: "Sylvie", role: "Médecin Spécialiste", specialite: "Pédiatrie", contact: "+237 671 234 567", email: "s.ndongo@fultang.cm", statut: "EN CONSULTATION", garde: "09:00 - 17:00" },
-        { id: "M-003", nom: "Awono", prenom: "Luc", role: "Médecin Spécialiste", specialite: "Cardiologie", contact: "+237 692 345 678", email: "l.awono@fultang.cm", statut: "INDISPONIBLE", garde: "10:00 - 19:00" },
-        { id: "I-001", nom: "Mbia", prenom: "Cécile", role: "Infirmier", specialite: "Urgences", contact: "+237 673 456 789", email: "c.mbia@fultang.cm", statut: "DISPONIBLE", garde: "00:00 - 08:00" },
-        { id: "I-002", nom: "Fouda", prenom: "Joseph", role: "Infirmier", specialite: "Soins Intensifs", contact: "+237 694 567 890", email: "j.fouda@fultang.cm", statut: "DISPONIBLE", garde: "08:00 - 16:00" }
+        { id: "M-001", nom: "Kameni", prenom: "Marc", role: "Médecin Généraliste", specialite: "Médecine Générale", contact: "+237 690 123 456", email: "m.kameni@computeclinic.cm", statut: "DISPONIBLE", garde: "08:00 - 18:00" },
+        { id: "M-002", nom: "Ndongo", prenom: "Sylvie", role: "Médecin Spécialiste", specialite: "Pédiatrie", contact: "+237 671 234 567", email: "s.ndongo@computeclinic.cm", statut: "EN CONSULTATION", garde: "09:00 - 17:00" },
+        { id: "M-003", nom: "Awono", prenom: "Luc", role: "Médecin Spécialiste", specialite: "Cardiologie", contact: "+237 692 345 678", email: "l.awono@computeclinic.cm", statut: "INDISPONIBLE", garde: "10:00 - 19:00" },
+        { id: "I-001", nom: "Mbia", prenom: "Cécile", role: "Infirmier", specialite: "Urgences", contact: "+237 673 456 789", email: "c.mbia@computeclinic.cm", statut: "DISPONIBLE", garde: "00:00 - 08:00" },
+        { id: "I-002", nom: "Fouda", prenom: "Joseph", role: "Infirmier", specialite: "Soins Intensifs", contact: "+237 694 567 890", email: "j.fouda@computeclinic.cm", statut: "DISPONIBLE", garde: "08:00 - 16:00" }
     ];
 
     const filteredStaffs = mockStaffs.filter(s => 

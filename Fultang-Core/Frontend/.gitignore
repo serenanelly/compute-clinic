@@ -1,5 +1,9 @@
 # Logs
-logs
+# Ancré à la racine de ce projet (/logs) — jamais un motif nu "logs", qui
+# (core.ignorecase=true, courant sur système de fichiers insensible à la
+# casse) masquait aussi src/Pages/PlatformAdmin/Logs/ : ce répertoire de
+# code source n'a donc jamais été suivi par git jusqu'à ce correctif.
+/logs
 *.log
 npm-debug.log*
 yarn-debug.log*

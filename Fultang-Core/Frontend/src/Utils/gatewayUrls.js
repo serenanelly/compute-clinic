@@ -51,3 +51,17 @@ export function getCurrentTenantIdentifier() {
 }
 
 export const PERSONNEL_MEDECINS_URL = () => `${getGatewayBaseUrl()}/personnel/medecins/`;
+
+/**
+ * Résout `logo_display_url` (tel que renvoyé par tenant-service,
+ * `TenantSerializer.get_logo_display_url`) en une URL affichable : telle
+ * quelle si c'est déjà une URL absolue (ancien champ `logo_url` externe),
+ * sinon préfixée par la Gateway (fichier réellement téléversé, chemin
+ * relatif `/tenants/media/...`). Partagé entre Platform Admin
+ * (LogoUploader.jsx) et le branding dynamique des sidebars hospitalières
+ * (hooks/useTenantBranding.js) — une seule implémentation.
+ */
+export function resolveTenantLogoUrl(logoDisplayUrl) {
+    if (!logoDisplayUrl) return '';
+    return logoDisplayUrl.startsWith('http') ? logoDisplayUrl : `${getGatewayBaseUrl()}${logoDisplayUrl}`;
+}

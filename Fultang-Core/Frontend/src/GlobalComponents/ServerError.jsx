@@ -37,7 +37,7 @@ export default function ServerErrorPage({errorStatus, message}) {
                     <p>If the problem persists, contact our technical support: </p>
                     <div className="text-primary-start font-semibold flex gap-1">
                         <MailIcon/>
-                        <p className="mr-4">technicalsupport@fultang.com</p>
+                        <p className="mr-4">technicalsupport@computeclinic.com</p>
                         <PhoneCall/>
                         <p>+237 6 98 55 25 32</p>
                     </div>
