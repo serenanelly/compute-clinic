@@ -47,6 +47,7 @@ export const AppRoutesPaths = {
     receptionistPage: "/receptionist/patients",
     receptionistMedicalStaffsPage: "/receptionist/medical-staffs",
     appointmentsPage: "/receptionist/appointments",
+    receptionistConsultationsPage: "/receptionist/consultations",
     hospitalizedPatientsPage: "/receptionist/hospitalized",
     adminPatientListPage: "/admin/patient-list",
     addDrug: "/admin/add-drug",
