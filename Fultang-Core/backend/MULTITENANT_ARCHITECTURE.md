@@ -1623,6 +1623,73 @@ Cas d'échec réel : tenter de désactiver GESTION_PERSONNEL → **400**, jamais
 
 ---
 
+### 14.11 Intégration du travail de Serena (parcours patient, renommage Compuclinic, RH/primes) dans l'architecture multi-tenant
+
+#### AVANT
+
+Une collaboratrice (Serena) a travaillé en parallèle, à partir d'un ancien point commun de l'historique (`a298d44`, "rendre medical-monitoring tenant-aware" — 2 commits derrière la référence multi-tenant courante), sur l'amélioration métier de l'application hospitalière : renommage d'affichage Fultang → COMPUTECLINIC, refonte du formulaire de création de personnel, nouveau modèle RH `Prime`, parcours patient (paiement de visite, verrouillage infirmier, triage, orientation spécialiste, attribution de chambre, sortie médicale/financière), et un nouveau module d'interventions chirurgicales. Son travail n'avait jamais été confronté à l'architecture multi-tenant construite depuis (suspension de tenant, désactivation de `FunctionalService`, isolation par base de données par tenant).
+
+#### DÉMARCHE
+
+Intégration sur une branche dédiée (`integration/serena-compuclinic`, créée depuis `Multitenancy@2223406`, elle-même taguée `multitenancy-reference-before-serena-integration` comme point de retour garanti) — jamais un merge direct sur `Multitenancy`. `git merge origin/serena` a produit 13 conflits textuels réels (sur 152 fichiers touchés par Serena), tous résolus en préservant explicitement LES DEUX intentions plutôt qu'en choisissant un camp — jamais un `git checkout --theirs`/`--ours` aveugle :
+
+| Fichier | Conflit | Résolution |
+|---|---|---|
+| `CustomDashboard.jsx` | son renommage `brandLabel = APP_NAME` vs mon prop `requiredFunctionalService` | les deux paramètres conservés |
+| `AddPersonnelModal.jsx` | sa refonte complète du formulaire (catégories de poste, spécialité médecin, date d'embauche, `FultangDatePicker`) vs mon filtrage des postes par service désactivé + affichage du mot de passe temporaire | les deux fusionnés ; son message "un email a été envoyé" retiré (aucune infrastructure SMTP n'existe réellement — déjà remplacé par l'affichage du `temporary_password` dans une session précédente) |
+| `axiosInstance.js` / nouveau `setupAuthRefresh.js` | son module de refresh JWT partagé (remplace la logique dupliquée) vs mon détecteur `TENANT_SUSPENDED`/`SERVICE_UNAVAILABLE` | détecteur déplacé À L'INTÉRIEUR de `setupAuthRefresh.js`, en première ligne de son handler — deux intercepteurs de réponse axios distincts ne se protègent pas mutuellement (le rejet de l'un n'empêche pas l'exécution de l'autre) : sans ce déplacement, un tenant suspendu (403) aurait déclenché la logique de refresh/redirection de session au lieu de `TenantSuspendedScreen` |
+| `service-personnel/serializers.py`, `urls.py` | son modèle `Prime` (primes RH multi-services) | ajouté tel quel — vérifié tenant-safe par construction (app_label `api`, routé comme tout le reste par `TenantDatabaseRouter`, aucune colonne `tenant_id` nécessaire) |
+| `Gestion-Infrastructures/infrastructures/views.py` | son `select_related`/`get_queryset` (filtres salle/étage/bâtiment) vs mon gating `GESTION_INFRASTRUCTURES` sur les 5 ViewSets | les deux fusionnés |
+| `Medical-Monitoring` (`medical_workflow/views.py`, `patient/views.py`) | l'intégralité de ses nouvelles fonctionnalités (paiement visite, verrouillage infirmier, triage, orientation spécialiste, attribution de chambre, sortie médicale/financière, interventions chirurgicales) vs mon gating par action précise (`get_permissions`, MEDECINE_GENERALE/LABORATOIRE/SOINS_INFIRMIERS) | les deux fusionnés |
+| `ComptaMatiere/{MaterialList,OutputList}.jsx` | conflit rendu illisible par une corruption de fins de ligne (CRLF→LF) introduite par mon propre script d'édition lors d'une session précédente | repartis de sa version propre (LF) plutôt que résoudre dans l'état corrompu, puis mon prop `requiredFunctionalService="COMPTA_MATIERE"` réappliqué par-dessus |
+| `chambresApi.js`, `medecinsApi.js`, `ForgottenPassword.jsx` | correctifs indépendants et fonctionnellement identiques des deux côtés (résolution tenant-aware du gateway par hostname au lieu d'un env var statique) | fusion triviale |
+
+#### ADAPTATIONS TENANT-AWARE
+
+Audit systématique des 48 fichiers backend touchés par Serena (modèles, serializers, vues, migrations) :
+
+- **Aucun nouveau `app_label` Django créé.** Tous les nouveaux modèles (`Prime`, `InterventionChirurgicale`, `MembreEquipeOperatoire`, champs ajoutés à `Visite`/`Hospitalisation`/`Examen`/`Patient`/`Besoin`/`Salle`/`Service`) vivent dans des apps déjà couvertes par le `TenantDatabaseRouter` de chaque service (`api`, `medical_workflow`+`patient`+`patient_informations`, `comptabilite_matiere`, `infrastructures`) — routage automatique par tenant, sans adaptation nécessaire.
+- **Aucun contournement du router** (`grep` sur `.using(`, `connections['default']` dans tout le code touché : aucune occurrence).
+- **Aucun nouvel appel réseau inter-services** introduit (le remaniement de `medical_client.py` ne fait que retraiter des données déjà récupérées).
+- **Aucune migration de données** (`RunPython`) parmi les 13 nouvelles migrations — uniquement du schéma, donc rejouable sans risque sur une base tenant existante.
+- **Toutes les nouvelles API `services/*.js` du frontend** (`infrastructureApi.js`, `medicalDossierApi.js`, `prestationsApi.js`, `primesApi.js`, `visiteApi.js`, `doctorApi.js`, `nurseApi.js`) utilisent déjà `axiosInstance`/`axiosInstanceCompta` + `getGatewayBaseUrl()` — Serena avait déjà adopté ces conventions tenant-aware, aucune correction nécessaire.
+- **Point opérationnel réel identifié et traité** : les 13 nouvelles migrations ne se seraient jamais appliquées automatiquement aux tenants déjà provisionnés (`ensure_connection_alias` n'exécute `migrate` qu'à la création d'un tenant, jamais après-coup). Un script ponctuel (non committé — usage unique) a listé chaque base `tenant_*_<service>` physiquement présente sur chaque serveur Postgres et appliqué `migrate --database=<alias>` : **89 bases tenant migrées avec succès, 0 échec**, sur les 4 services concernés (Medical-Monitoring, ComptaMatiere, Gestion-Infrastructures, service-personnel + sa base pool `default`).
+
+#### PROBLÈME SIGNALÉ, NON CORRIGÉ (rôle 11 — lister, pas cacher)
+
+`SalleViewSet` (Gestion-Infrastructures) est gaté `GESTION_INFRASTRUCTURES` depuis une session précédente ; `getChambresDisponibles` (`medecinsApi.js`), utilisé lors de l'attribution de chambre à l'hospitalisation (un geste MEDECINE_GENERALE), interrogeait jusqu'ici une URL cassée (bug corrigé par Serena dans cette même intégration) et n'atteignait donc jamais réellement cet endpoint. **Conséquence désormais réelle** : un tenant qui désactive Gestion des Infrastructures perd la sélection de chambre à l'hospitalisation. Décision produit hors du périmètre de cette tâche — signalé, non modifié.
+
+#### TESTS
+
+**Non-régression** (comparaison stricte avec `origin/serena` seule, via `git worktree`, même image Docker, même base de test) :
+
+| Service | Résultat merge | Résultat `origin/serena` seule | Écart |
+|---|---|---|---|
+| Medical-Monitoring | 131 tests, 6 failures + 3 erreurs | 125 tests, 6 failures + 3 erreurs (identiques) | +6 tests (mes tests `test_soins_gating.py`, tous PASS) |
+| ComptaMatiere | `ImportError` à la découverte des tests | idem sur `origin/serena` seule | aucun |
+| Gestion-Infrastructures | 52 tests, 7 failures | 52 tests, 7 failures (identiques) | aucun |
+| fultang-compta-financiere | 104 tests, 38 failures + 7 erreurs | baseline déjà connue (session précédente), non re-touchée par Serena | aucun |
+
+Zéro régression introduite par la fusion sur les 4 services — chaque échec pré-existe intégralement dans le travail de Serena, indépendamment de toute interaction avec le code multi-tenant.
+
+**Live, deux tenants réels** (`e2e_serena_integration.py`, 13/13 PASS) :
+- Création de médecin (endpoint refondu par Serena, champ `specialite`), création de patient (nouveau `get_queryset`/pagination de Serena) dans Tenant A.
+- Isolation confirmée : patient de A invisible depuis Tenant B, visible depuis A.
+- Parcours de paiement de visite (nouveau, Serena) : `ouvrir_consultation` sans paiement → 402 `PAIEMENT_REQUIS` ; `confirmer-paiement` → 200 ; nouvelle tentative → 201.
+- **Composition des deux mécanismes vérifiée** : une visite en `mode_urgence=True` (contourne le paiement chez Serena) reste bloquée en 404 `SERVICE_UNAVAILABLE` dès que `MEDECINE_GENERALE` est désactivé côté tenant — le gate FunctionalService prime bien sur la logique métier, jamais l'inverse.
+- Tenant B non affecté par la désactivation de A (isolation `FunctionalService` reconfirmée avec le code fusionné).
+
+**Frontend** : `npm run build` réussi ; `eslint` sur les 10 fichiers résolus manuellement : uniquement des avertissements pré-existants dans le code de Serena (imports inutilisés, prop-types manquants), confirmés absents de toute ligne modifiée par cette intégration.
+
+#### LIMITATIONS / points restants
+
+- Les tenants de test créés par `e2e_serena_integration.py` (`srn-inta-*`, `srn-intb-*`) n'ont pas été supprimés — nettoyage à faire comme pour les précédents lots `iso-*`/`final-*`/`newsvc-*`.
+- Dépendance croisée GESTION_INFRASTRUCTURES → sélection de chambre à l'hospitalisation (ci-dessus) : nécessite une décision produit, non traitée ici.
+- `AddPersonnelModal.jsx` : le message "Un email a été envoyé avec le mot de passe" pour la création d'un médecin (chemin `createMedecin`, texte déjà présent avant l'intervention de Serena) était trompeur avant fusion (aucun SMTP n'existe) — retiré au profit de l'écran de mot de passe temporaire déjà en place pour la création de personnel générique ; non vérifié si un autre écran affiche encore ce même message ailleurs dans le code de Serena.
+- Aucun audit ligne-à-ligne comparable à celui de Medical-Monitoring (recherche d'actions `@action` dupliquant une opération déjà gatée) n'a été refait pour les nouvelles actions ajoutées par Serena elle-même (`assigner-chambre`, `valider-sortie-medicale`, `valider-sortie-financiere`, module interventions chirurgicales) — ces actions ne portent aujourd'hui aucun gate `FunctionalService` (cohérent avec le fait qu'aucun service fonctionnel dédié "Chirurgie" ou "Hospitalisation" n'existe dans le référentiel actuel — pas une régression, mais un point à trancher si un tel service est créé plus tard).
+
+---
+
 ## 15. Sécurité
 
 Décisions prises et vérifiées :
