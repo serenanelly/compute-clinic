@@ -47,3 +47,29 @@ class ProvisionDatabaseView(APIView):
             )
 
         return Response(result, status=status.HTTP_200_OK)
+
+
+class FunctionalServiceInvalidateView(APIView):
+    """
+    POST /api/medical-monitoring/internal/functional-services/invalidate/ —
+    Cycle de vie du tenant, Phase 3 : copie fidèle de la vue homonyme de
+    service-personnel (voir sa docstring) — invalidation ACTIVE (poussée)
+    du cache local `functional_service_cache`, déclenchée par
+    tenant-service juste après un toggle/bulk-set réussi.
+    """
+    authentication_classes = []
+    permission_classes = [IsInternalService]
+
+    def post(self, request):
+        from .tenant_routing.functional_service_client import functional_service_cache
+
+        tenant_id = request.data.get('tenant_id')
+        code = request.data.get('code')
+        if not tenant_id or not code:
+            return Response(
+                {'detail': "Les champs 'tenant_id' et 'code' sont requis."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        functional_service_cache.invalidate(tenant_id, code)
+        return Response({}, status=status.HTTP_200_OK)

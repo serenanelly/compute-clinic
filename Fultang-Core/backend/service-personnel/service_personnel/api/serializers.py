@@ -1,17 +1,68 @@
+from django.contrib.auth.hashers import make_password
 from rest_framework import serializers
 from drf_spectacular.utils import extend_schema_serializer, OpenApiExample
 from .models import (
-    Service, Medecin, MedecinGeneraliste, Infirmiere, Receptionniste, 
-    ComptableFinancier, ComptableMatiere, Laborantin, 
+    Service, Medecin, MedecinGeneraliste, Infirmiere, Receptionniste,
+    ComptableFinancier, ComptableMatiere, Laborantin,
     Pharmacien, Directeur, Admin,
     GradeInfirmier, Langue, NiveauAccreditation, SpecialiteLabo, Statut
 )
+from .tenant_routing.context import get_current_tenant_context
+from .utils import generate_temporary_password
 
 class BasePersonnelSerializer(serializers.ModelSerializer):
     mot_de_passe = serializers.CharField(write_only=True, required=False)
 
     class Meta:
         fields = '__all__'
+
+    def create(self, validated_data):
+        """
+        Génère un mot de passe temporaire (réel, jamais un champ laissé
+        vide/en clair) si l'appelant n'en fournit pas un explicitement, et
+        hashe systématiquement la valeur retenue avant sauvegarde.
+
+        AVANT ce correctif : cette classe déclarait `mot_de_passe` en
+        écriture mais ne le hashait JAMAIS (l'implémentation par défaut de
+        `ModelSerializer.create` sauvegarde la valeur telle quelle) — tout
+        `ModelViewSet` basé dessus (MedecinViewSet, PharmacienViewSet...)
+        stockait donc soit un mot de passe en clair (si fourni), soit une
+        chaîne vide (si omis, cas du frontend actuel), rendant le compte
+        créé inutilisable pour se connecter.
+
+        `self.temporary_password` est lu par `TemporaryPasswordResponseMixin`
+        (views.py) pour l'inclure UNE SEULE FOIS dans la réponse HTTP de
+        création — jamais renvoyé par la suite (list/retrieve), jamais
+        stocké en clair nulle part.
+        """
+        provided_password = validated_data.pop('mot_de_passe', None)
+        self.temporary_password = provided_password or generate_temporary_password()
+        validated_data['mot_de_passe'] = make_password(self.temporary_password)
+
+        # Correctif critique : `tenant_id` (editable=False, donc absent de
+        # `validated_data` — DRF exclut les champs non éditables) n'était
+        # JAMAIS renseigné par ce chemin de création, alors que
+        # AuthVerifyView filtre explicitement par (email, tenant_id) —
+        # un compte créé sans tenant_id ne pouvait donc JAMAIS se
+        # connecter, quel que soit le mot de passe. La base physique de
+        # destination était déjà correcte (routée par tenant_id via le
+        # Database Router) ; seule la COLONNE tenant_id manquait sur la
+        # ligne elle-même. Toujours pris du Tenant Context courant — la
+        # même source de vérité que le Router lui-même — jamais d'une
+        # valeur fournie par le client.
+        tenant_context = get_current_tenant_context()
+        validated_data['tenant_id'] = tenant_context.tenant_id if tenant_context else None
+
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        """Même correctif que create() : ne jamais persister mot_de_passe en clair sur une mise à jour."""
+        new_password = validated_data.get('mot_de_passe')
+        if new_password:
+            validated_data['mot_de_passe'] = make_password(new_password)
+        else:
+            validated_data.pop('mot_de_passe', None)
+        return super().update(instance, validated_data)
 
 @extend_schema_serializer(
     examples=[

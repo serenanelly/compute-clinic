@@ -15,7 +15,7 @@ export default defineConfig({
     // uniquement pour pouvoir démontrer le multitenant en local via
     // /etc/hosts ; sans ceci, Vite rejette la requête avant même
     // qu'elle atteigne l'application.
-    allowedHosts: ["localhost", "127.0.0.1", ".fulltang.com"],
+    allowedHosts: ["localhost", "127.0.0.1", ".localhost", ".fulltang.com"],
   },
   server: {
     port: 5173,
@@ -28,6 +28,6 @@ export default defineConfig({
     // uniquement pour pouvoir démontrer le multitenant en local via
     // /etc/hosts ; sans ceci, Vite rejette la requête avant même
     // qu'elle atteigne l'application.
-    allowedHosts: ["localhost", "127.0.0.1", ".fulltang.com"],
+    allowedHosts: ["localhost", "127.0.0.1", ".localhost", ".fulltang.com"],
   },
 });

@@ -5,9 +5,12 @@ from django.db.models import Sum, Q, F
 from django.db import transaction
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
+
+from config.permissions import HasFunctionalServiceEnabled
 
 from apps.caisse.models import (
     Quittance, Cheque, PaiementMobile, PaiementCarte, VirementBancaire,
@@ -26,6 +29,7 @@ from apps.comptabilite.exercice_scope import get_exercice_ouvert
 # ─────────────────────────────────────────────────────────────────────
 
 class QuittanceViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('CAISSE')]
     queryset = Quittance.objects.select_related('journal', 'exercice', 'compte_tiers')
     serializer_class = QuittanceSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -545,6 +549,7 @@ class QuittanceViewSet(viewsets.ModelViewSet):
 # ─────────────────────────────────────────────────────────────────────
 
 class ChequeViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('CAISSE')]
     queryset = Cheque.objects.select_related('quittance')
     serializer_class = ChequeDetailSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter]
@@ -577,6 +582,7 @@ class ChequeViewSet(viewsets.ModelViewSet):
 # ─────────────────────────────────────────────────────────────────────
 
 class CaisseJournaliereViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('CAISSE')]
     queryset = CaisseJournaliere.objects.all()
     serializer_class = CaisseJournaliereSerializer
     filter_backends = [DjangoFilterBackend, OrderingFilter]
@@ -756,6 +762,7 @@ class CaisseJournaliereViewSet(viewsets.ModelViewSet):
 # ─────────────────────────────────────────────────────────────────────
 
 class InventaireCaisseViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('CAISSE')]
     queryset = InventaireCaisse.objects.all()
     serializer_class = InventaireCaisseSerializer
     filter_backends = [DjangoFilterBackend, OrderingFilter]
@@ -841,6 +848,7 @@ def _generer_ecriture_depense_menue(depense):
 
 
 class DepenseMenueViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('CAISSE')]
     queryset = DepenseMenue.objects.select_related('caisse', 'categorie_sortie')
     serializer_class = DepenseMenueSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]

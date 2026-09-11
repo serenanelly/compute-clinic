@@ -63,7 +63,7 @@ export const NurseExams = () => {
     };
 
     return (
-        <CustomDashboard linkList={nurseNavLink} requiredRole="nurse">
+        <CustomDashboard linkList={nurseNavLink} requiredRole="nurse" requiredFunctionalService="SOINS_INFIRMIERS">
             <NurseNavBar>
                 <div className="p-6 h-[calc(100vh-100px)] flex flex-col bg-gray-50/50 overflow-y-auto scrollbar">
                     

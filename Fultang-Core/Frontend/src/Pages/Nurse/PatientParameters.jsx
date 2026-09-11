@@ -103,7 +103,7 @@ export const PatientParameters = () => {
 
     if (isLoading) {
         return (
-            <CustomDashboard linkList={nurseNavLink} requiredRole="nurse">
+            <CustomDashboard linkList={nurseNavLink} requiredRole="nurse" requiredFunctionalService="SOINS_INFIRMIERS">
                 <NurseNavBar>
                     <div className="flex-1 flex justify-center items-center h-[calc(100vh-100px)]">
                         <Loading />
@@ -116,7 +116,7 @@ export const PatientParameters = () => {
     if (!patient) return null;
 
     return (
-        <CustomDashboard linkList={nurseNavLink} requiredRole="nurse">
+        <CustomDashboard linkList={nurseNavLink} requiredRole="nurse" requiredFunctionalService="SOINS_INFIRMIERS">
             <NurseNavBar>
                 <div className="p-6 h-[calc(100vh-100px)] flex flex-col bg-gray-50/50 overflow-y-auto scrollbar">
                     

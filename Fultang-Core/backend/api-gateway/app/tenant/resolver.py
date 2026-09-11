@@ -146,3 +146,47 @@ class TenantResolver:
             raise TenantInactiveError(identifier)
 
         return TenantContext(tenant_id=data["id"], tenant_identifier=data["identifier"], status=data["status"])
+
+    async def get_tenant_status(self, tenant_id: str) -> Optional[str]:
+        """
+        Résout le statut ACTUEL d'un tenant PAR SON ID — jamais mis en
+        cache, comme `resolve()` (aucun cache n'existe nulle part dans ce
+        module ; un aller-retour réseau par appel est déjà le coût accepté
+        de la résolution hostname existante).
+
+        Cycle de vie du tenant, Phase 3 : sert à détecter une SUSPENSION
+        (`Tenant.status` passé à INACTIVE) quand la résolution par
+        hostname ne s'applique pas — hostname hors convention (ex.
+        `localhost` en développement) mais requête porteuse d'un JWT émis
+        AVANT la suspension. Sans ce contrôle, un tel JWT resterait
+        valide indéfiniment malgré la suspension (faille corrigée ici),
+        puisque le JWT lui-même est stateless et ne porte aucune preuve
+        de fraîcheur du statut du tenant.
+
+        Retourne `None` si le tenant n'existe plus dans le Registre
+        (jamais un statut deviné) — l'appelant doit alors traiter ce cas
+        comme "accès refusé", au même titre qu'un statut inactif : un
+        JWT ne référençant plus aucun tenant réel n'a aucune raison de
+        rester valide.
+
+        Lève TenantResolutionError (503) si le Tenant Service est
+        injoignable — jamais un accès silencieusement autorisé faute de
+        pouvoir vérifier (même politique fail-closed que `resolve()`).
+        """
+        try:
+            response = await self._client.get(
+                f"{self._tenant_service_url}/api/tenants/resolve/",
+                params={"id": tenant_id},
+                headers={INTERNAL_SERVICE_TOKEN_HEADER: self._internal_service_token},
+            )
+        except httpx.RequestError as exc:
+            raise TenantResolutionError(f"Tenant Service injoignable : {exc}") from exc
+
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise TenantResolutionError(
+                f"Réponse inattendue du Tenant Service ({response.status_code})."
+            )
+
+        return response.json().get("status")

@@ -10,6 +10,7 @@
 import axios from "axios";
 import { getToken, getRefreshToken } from './authToken';
 import { getGatewayBaseUrl } from './gatewayUrls';
+import { dispatchFultangErrorEvent } from './fultangErrorEvents';
 
 // getGatewayBaseUrl() cible le hostname courant (résolution de tenant par
 // sous-domaine) — voir axiosInstance.js / Utils/gatewayUrls.js pour le détail.
@@ -59,6 +60,12 @@ axiosInstanceCompta.interceptors.response.use(
         return response;
     },
     async (error) => {
+        // Cycle de vie du tenant, Phase 3 — voir axiosInstance.js pour la
+        // justification (placé avant toute logique 401/403 existante).
+        if (dispatchFultangErrorEvent(error)) {
+            return Promise.reject(error);
+        }
+
         const originalRequest = error.config;
         const status = error.response?.status;
 

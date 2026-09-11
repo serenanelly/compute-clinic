@@ -2,6 +2,8 @@
 ViewSets pour les modèles ArchiveInventaire et LigneArchiveInventaire.
 """
 from rest_framework import viewsets, status
+from rest_framework.permissions import IsAuthenticated
+from core.permissions import HasFunctionalServiceEnabled
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.utils import timezone
@@ -22,6 +24,7 @@ class ArchiveInventaireViewSet(viewsets.ModelViewSet):
     """
     ViewSet pour les opérations CRUD sur ArchiveInventaire.
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_MATIERE')]
     queryset = ArchiveInventaire.objects.all()
     serializer_class = ArchiveInventaireSerializer
     pagination_class = None  # Désactiver la pagination
@@ -113,6 +116,7 @@ class LigneArchiveInventaireViewSet(viewsets.ModelViewSet):
     """
     ViewSet pour les opérations CRUD sur LigneArchiveInventaire.
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_MATIERE')]
     queryset = LigneArchiveInventaire.objects.all()
     serializer_class = LigneArchiveInventaireSerializer
     pagination_class = None  # Désactiver la pagination

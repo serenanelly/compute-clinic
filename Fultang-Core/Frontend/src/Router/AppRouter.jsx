@@ -11,6 +11,10 @@ export function AppRoute() {
     const LoginPage = React.lazy(async () => ({ default: (await import("../Pages/Authentication/Login.jsx")).LoginPage }));
     const PlatformAdminLoginPage = React.lazy(async () => ({ default: (await import("../Pages/PlatformAdmin/PlatformAdminLogin.jsx")).PlatformAdminLogin }));
     const PlatformAdminDashboardPage = React.lazy(async () => ({ default: (await import("../Pages/PlatformAdmin/PlatformAdminDashboard.jsx")).PlatformAdminDashboard }));
+    const PlatformAdminEstablishmentsPage = React.lazy(async () => ({ default: (await import("../Pages/PlatformAdmin/Establishments/EstablishmentsListPage.jsx")).EstablishmentsListPage }));
+    const PlatformAdminTenantDetailPage = React.lazy(async () => ({ default: (await import("../Pages/PlatformAdmin/Establishments/EstablishmentDetailPage.jsx")).EstablishmentDetailPage }));
+    const PlatformAdminCreateTenantPage = React.lazy(async () => ({ default: (await import("../Pages/PlatformAdmin/CreateTenant/CreateTenantWizard.jsx")).CreateTenantWizard }));
+    const PlatformAdminLogsPage = React.lazy(async () => ({ default: (await import("../Pages/PlatformAdmin/Logs/AdminLogsPage.jsx")).AdminLogsPage }));
     const ForgottenPage = React.lazy(async () => ({ default: (await import("../Pages/Authentication/ForgottenPassword.jsx")).ForgottenPassword }));
     const LandingPage = React.lazy(async () => ({ default: (await import("../Pages/LandingPage/LandingPage.jsx")).LandingPage }));
     const NurseWaitingRoomPage = React.lazy(async () => ({ default: (await import("../Pages/Nurse/WaitingRoom.jsx")).WaitingRoom }));
@@ -138,6 +142,10 @@ export function AppRoute() {
                 <Route path={AppRoutesPaths.forgottenPasswordPage} element={<ForgottenPage />} />
                 <Route path={AppRoutesPaths.platformAdminLoginPage} element={<PlatformAdminLoginPage />} />
                 <Route path={AppRoutesPaths.platformAdminDashboardPage} element={<PlatformAdminDashboardPage />} />
+                <Route path={AppRoutesPaths.platformAdminEstablishmentsPage} element={<PlatformAdminEstablishmentsPage />} />
+                <Route path={AppRoutesPaths.platformAdminCreateTenantPage} element={<PlatformAdminCreateTenantPage />} />
+                <Route path={AppRoutesPaths.platformAdminTenantDetailPage} element={<PlatformAdminTenantDetailPage />} />
+                <Route path={AppRoutesPaths.platformAdminLogsPage} element={<PlatformAdminLogsPage />} />
                 <Route path={AppRoutesPaths.nursePage} element={<NurseWaitingRoomPage />} />
                 <Route path={AppRoutesPaths.nurseWaitingRoomPage} element={<NurseWaitingRoomPage />} />
                 <Route path={AppRoutesPaths.nursePatientManagementPage} element={<PatientManagementPage />} />

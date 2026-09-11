@@ -39,17 +39,14 @@ Décision (documentée aussi dans MULTITENANT_ARCHITECTURE.md) :
     renvoyant vers l'API Phase 5 existante (`POST /tenant-databases/`)
     si un PLATFORM_ADMIN veut déclarer une configuration manuellement.
 """
-import json
 import logging
-import urllib.error
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from typing import List, Optional, Union
 from uuid import UUID
 
 from django.conf import settings
 
+from .internal_clients import InternalServiceCallError, call_internal_service
 from .models import PlatformServiceStatus, TenantDatabaseStatus, TenantStatus
 from .repositories import PlatformServiceRepository, TenantDatabaseRepository, TenantRepository
 
@@ -79,6 +76,47 @@ PROVISIONING_CAPABLE_SERVICES = {
     "COMPTA_MATIERE": f"{settings.PROVISIONING_SERVICE_COMPTA_MATIERE_URL.rstrip('/')}/api/compta_matiere",
     "INFRASTRUCTURE": f"{settings.PROVISIONING_SERVICE_INFRASTRUCTURE_URL.rstrip('/')}/api",
 }
+
+
+# Services qui consomment réellement le cache FunctionalService côté
+# consommateur (Cycle de vie du tenant — invalidation active) : uniquement
+# ceux qui ont un `HasFunctionalServiceEnabled` câblé sur au moins un
+# endpoint. Étendu (finalisation de la désactivation) à
+# fultang-compta-financiere (CAISSE + COMPTA_FINANCIERE), ComptaMatiere
+# (COMPTA_MATIERE) et Gestion-Infrastructures (GESTION_INFRASTRUCTURES),
+# qui exposent désormais chacun le même endpoint interne
+# `internal/functional-services/invalidate/`. Réutilise volontairement
+# les mêmes URLs de base que `PROVISIONING_CAPABLE_SERVICES` (déjà
+# correctement préfixées par service) plutôt que de dupliquer une
+# seconde table de configuration.
+_FUNCTIONAL_SERVICE_CACHE_CONSUMERS = ("PERSONNEL", "MEDICAL", "COMPTA", "COMPTA_MATIERE", "INFRASTRUCTURE")
+
+
+def invalidate_functional_service_cache(tenant_id: Union[UUID, str], code: str) -> None:
+    """
+    Pousse une invalidation de cache vers chaque service consommateur
+    (service-personnel, Medical-Monitoring) juste après un toggle/bulk-set
+    de FunctionalService réussi (Cycle de vie du tenant, Phase 3).
+
+    Best-effort et jamais bloquant : un consommateur injoignable ne doit
+    JAMAIS faire échouer l'action principale (le toggle a déjà réussi et
+    est déjà persisté) — seulement retarder l'effet visible pour CE
+    service jusqu'à l'expiration du TTL, qui reste le filet de sécurité.
+    Chaque échec est loggué, jamais silencieusement ignoré sans trace.
+    """
+    for service_code in _FUNCTIONAL_SERVICE_CACHE_CONSUMERS:
+        base_url = PROVISIONING_CAPABLE_SERVICES[service_code]
+        try:
+            call_internal_service(
+                base_url, "internal/functional-services/invalidate/",
+                {"tenant_id": str(tenant_id), "code": code},
+            )
+        except InternalServiceCallError as exc:
+            logger.warning(
+                "Invalidation du cache FunctionalService non propagée à %s pour (tenant=%s, code=%s) : %s "
+                "— le TTL du cache local de ce service reste le filet de sécurité.",
+                service_code, tenant_id, code, exc,
+            )
 
 
 class ProvisioningError(Exception):
@@ -156,8 +194,9 @@ def _call_physical_provisioning(service_code: str, callback_url: str, tenant_id:
     """
     Appelle l'endpoint interne de provisioning du service propriétaire.
 
-    Même mécanisme que `registry_client.py` côté service-personnel :
-    jeton de service interne partagé, `urllib` (stdlib), aucun nouveau
+    Mécanique HTTP déléguée à `internal_clients.call_internal_service`
+    (partagée avec la création du compte administrateur, Phase 2) : jeton
+    de service interne partagé, `urllib` (stdlib), aucun nouveau
     protocole. Direction symétrique à la Phase 6 (qui appelait
     tenant-service → service métier) : ici, tenant-service appelle LE
     SERVICE MÉTIER, qui est seul à connaître ses propres credentials
@@ -165,30 +204,16 @@ def _call_physical_provisioning(service_code: str, callback_url: str, tenant_id:
     connaît jamais, cohérent avec `secret_reference` étant une
     référence opaque (Phase 5).
     """
-    url = f"{callback_url.rstrip('/')}/internal/provision-database/"
-    payload = json.dumps({"tenant_id": str(tenant_id)}).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=payload,
-        headers={
-            "X-Internal-Service-Token": settings.TENANT_SERVICE_INTERNAL_TOKEN,
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=settings.PROVISIONING_TIMEOUT_SECONDS) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        logger.error(
-            "Provisioning physique refusé par %s pour tenant_id=%s : HTTP %s",
-            service_code, tenant_id, exc.code,
+        return call_internal_service(
+            callback_url, "internal/provision-database/", {"tenant_id": str(tenant_id)},
         )
-        raise PhysicalProvisioningError(f"{service_code} a répondu {exc.code} : {body[:300]}") from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
-        logger.error("Service %s injoignable pour provisioning tenant_id=%s : %s", service_code, tenant_id, exc)
-        raise PhysicalProvisioningError(f"{service_code} injoignable : {exc}") from exc
+    except InternalServiceCallError as exc:
+        logger.error(
+            "Provisioning physique refusé/injoignable pour %s, tenant_id=%s : %s",
+            service_code, tenant_id, exc,
+        )
+        raise PhysicalProvisioningError(f"{service_code} : {exc}") from exc
 
 
 class ProvisioningOrchestrator:

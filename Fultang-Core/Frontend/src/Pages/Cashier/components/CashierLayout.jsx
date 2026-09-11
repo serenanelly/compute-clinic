@@ -9,7 +9,7 @@ import { CASHIER_COLORS } from './cashierTheme.js';
  */
 export function CashierLayout({ children }) {
   return (
-    <DashBoard linkList={cashierNavLink} requiredRole="caissier">
+    <DashBoard linkList={cashierNavLink} requiredRole="caissier" requiredFunctionalService="CAISSE">
       <div
         className="flex min-h-screen flex-col"
         style={{ backgroundColor: CASHIER_COLORS.background }}

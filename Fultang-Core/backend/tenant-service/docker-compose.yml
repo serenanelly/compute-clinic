@@ -27,12 +27,26 @@ services:
       - .:/app
     ports:
       - "8005:8000"
+    # Identifiants SMTP réels (Cycle de vie du tenant, Phase 2 — email
+    # d'accès du compte administrateur) : dans un fichier séparé, JAMAIS
+    # commité (voir backend/.gitignore, motif ".env.*") — résolu relatif à
+    # ce fichier docker-compose.yml, donc sans ambiguïté quel que soit le
+    # répertoire depuis lequel `docker compose -f tenant-service/docker-compose.yml`
+    # est invoqué (voir backend/start_all.sh).
+    env_file:
+      - .env.email
     environment:
       - DB_HOST=tenant-db
       # Jeton service-to-service Gateway → Tenant Service (Phase 2.1).
       # Dev uniquement : à surcharger via un .env / secret en production.
       # Doit être identique à la valeur utilisée par api-gateway.
       - TENANT_SERVICE_INTERNAL_TOKEN=${TENANT_SERVICE_INTERNAL_TOKEN:-dev-local-only-shared-secret-change-me}
+      # SMTP réel (Gmail) — EMAIL_HOST_USER/EMAIL_HOST_PASSWORD/DEFAULT_FROM_EMAIL
+      # viennent de .env.email ci-dessus, jamais en dur ici.
+      - EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
+      - EMAIL_HOST=smtp.gmail.com
+      - EMAIL_PORT=587
+      - EMAIL_USE_TLS=true
     depends_on:
       tenant-db:
         condition: service_healthy

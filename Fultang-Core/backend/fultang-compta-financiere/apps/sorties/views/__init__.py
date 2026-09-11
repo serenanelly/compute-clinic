@@ -3,9 +3,12 @@ from django.utils import timezone
 from django.db.models import Sum
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
+
+from config.permissions import HasFunctionalServiceEnabled
 
 from apps.sorties.models import (
     CategorieSortie, Fournisseur,
@@ -22,6 +25,7 @@ from apps.sorties.serializers import (
 
 
 class CategorieSortieViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
     queryset = CategorieSortie.objects.all()
     serializer_class = CategorieSortieSerializer
     filter_backends = [SearchFilter]
@@ -29,6 +33,7 @@ class CategorieSortieViewSet(viewsets.ModelViewSet):
 
 
 class FournisseurViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
     queryset = Fournisseur.objects.all()
     serializer_class = FournisseurSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -48,6 +53,7 @@ class FournisseurViewSet(viewsets.ModelViewSet):
 
 
 class DemandeAchatViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
     queryset = DemandeAchat.objects.all()
     serializer_class = DemandeAchatSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -149,6 +155,7 @@ class DemandeAchatViewSet(viewsets.ModelViewSet):
 
 
 class BonCommandeViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
     queryset = BonCommande.objects.prefetch_related('lignes').select_related('fournisseur')
     serializer_class = BonCommandeSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -189,6 +196,7 @@ class BonCommandeViewSet(viewsets.ModelViewSet):
 
 
 class FactureViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
     queryset = Facture.objects.prefetch_related('lignes')
     serializer_class = FactureSerializer
     filter_backends = [DjangoFilterBackend, OrderingFilter]
@@ -381,6 +389,7 @@ def _generer_ecriture_decaissement_op(op, created_by_nom=None):
 
 
 class OrdrePaiementViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
     queryset = OrdrePaiement.objects.all()
     serializer_class = OrdrePaiementSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -510,6 +519,7 @@ class OrdrePaiementViewSet(viewsets.ModelViewSet):
 
 
 class PaiementSalaireViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
     queryset = PaiementSalaire.objects.prefetch_related('charges_sociales')
     serializer_class = PaiementSalaireSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -568,6 +578,7 @@ class PaiementSalaireViewSet(viewsets.ModelViewSet):
 
 
 class ChargeSocialeViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
     queryset = ChargeSociale.objects.all()
     serializer_class = ChargeSocialeSerializer
     filter_backends = [DjangoFilterBackend]

@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Building2, CheckCircle2, XCircle, Layers, Activity, Bell } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Building2, CheckCircle2, XCircle, Layers, Activity, Bell, ArrowRight } from "lucide-react";
 import { CustomDashboard } from "../../GlobalComponents/CustomDashboard.jsx";
 import { AppHeader } from "../../GlobalComponents/AppHeader.jsx";
 import StatCard from "../../GlobalComponents/StatCard.jsx";
 import { platformAdminNavLink } from "./platformAdminNavLink.js";
+import { AppRoutesPaths } from "../../Router/appRouterPaths.js";
 import { getAllTenants, getAllPlatformServices } from "../../services/platformAdminApi.js";
 
 /**
@@ -149,6 +151,18 @@ export function PlatformAdminDashboard() {
                                         ))}
                                     </tbody>
                                 </table>
+                            </div>
+                        )}
+
+                        {!loading && tenants.length > 0 && (
+                            <div className="mt-4 text-right">
+                                <Link
+                                    to={AppRoutesPaths.platformAdminEstablishmentsPage}
+                                    className="inline-flex items-center gap-1.5 text-sm font-semibold text-primary-start hover:text-primary-end transition-colors"
+                                >
+                                    Voir tous les établissements
+                                    <ArrowRight className="w-4 h-4" />
+                                </Link>
                             </div>
                         )}
                     </motion.div>

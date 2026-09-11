@@ -2,7 +2,10 @@ import { useState } from "react";
 import { Link, Navigate, useLocation } from "react-router-dom";
 import PropTypes from "prop-types";
 import { AccessDenied } from "../../GlobalComponents/AccessDenied.jsx";
+import { ServiceUnavailableScreen } from "../../GlobalComponents/ServiceUnavailableScreen.jsx";
+import { Loading } from "../../GlobalComponents/Loading.jsx";
 import { useAuthentication } from "../../Utils/Provider.jsx";
+import { useFunctionalServiceGate } from "../../hooks/useFunctionalServiceGate.js";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { accountantNavLink } from "./NavLinks";
 import { AccountantNavBar } from "./NavBar";
@@ -16,6 +19,11 @@ export function AccountantLayout({ children }) {
     const location = useLocation();
     const activeLink = location.pathname;
     const { isAuthenticated, hasRole } = useAuthentication();
+    // Ce layout ne sert QUE le rôle Comptable Financier — un seul
+    // FunctionalService concerné, câblé directement ici plutôt que via
+    // un prop (contrairement à CustomDashboard.jsx, partagé par
+    // plusieurs rôles avec des besoins différents).
+    const { checking: checkingService, blocked: serviceBlocked } = useFunctionalServiceGate("COMPTA_FINANCIERE");
     const [expandedLinks, setExpandedLinks] = useState(() => {
         const initial = {};
         accountantNavLink.forEach((item) => {
@@ -99,6 +107,14 @@ export function AccountantLayout({ children }) {
 
     if (!hasAccess) {
         return <AccessDenied Role="Comptable Financier" />;
+    }
+
+    if (checkingService) {
+        return <Loading />;
+    }
+
+    if (serviceBlocked) {
+        return <ServiceUnavailableScreen />;
     }
 
     return (

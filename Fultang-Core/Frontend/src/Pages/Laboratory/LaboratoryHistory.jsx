@@ -44,7 +44,7 @@ export const LaboratoryHistory = () => {
   const endItem = Math.min(currentPage * itemsPerPage, totalItems);
 
   return (
-    <LaboratoryDashboard linkList={LaboratoryNavLink} requiredRole="laboratory-assistant">
+    <LaboratoryDashboard linkList={LaboratoryNavLink} requiredRole="laboratory-assistant" requiredFunctionalService="LABORATOIRE">
       <div className="bg-[#f5f5f5] text-[#1a1a1a] min-h-screen p-8 flex flex-col gap-8 overflow-y-auto scrollbar">
         
         {/* EN-TÊTE DYNAMIQUE */}

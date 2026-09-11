@@ -8,7 +8,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
-from config.views import ProvisionDatabaseView
+from config.views import ProvisionDatabaseView, FunctionalServiceInvalidateView
 
 
 @api_view(['GET'])
@@ -32,6 +32,11 @@ urlpatterns = [
         'api/internal/provision-database/',
         ProvisionDatabaseView.as_view(),
         name='internal-provision-database',
+    ),
+    path(
+        'api/internal/functional-services/invalidate/',
+        FunctionalServiceInvalidateView.as_view(),
+        name='internal-functional-services-invalidate',
     ),
     # Apps
     path('api/', include('apps.comptabilite.urls')),

@@ -3,6 +3,7 @@ from rest_framework.response import Response
 from rest_framework import status
 
 from .tenant_routing.context import TenantContextMissingError
+from .tenant_routing.functional_service_client import FunctionalServiceRegistryUnavailableError
 from .tenant_routing.pool_registry import TenantDatabaseInactiveError
 from .tenant_routing.registry_client import TenantDatabaseNotFoundError, TenantRegistryUnavailableError
 
@@ -10,11 +11,15 @@ from .tenant_routing.registry_client import TenantDatabaseNotFoundError, TenantR
 # "la base de ce tenant n'est pas utilisable actuellement" — jamais un
 # repli vers une autre base. Traduites en 503 explicite plutôt que de
 # tomber dans le 500 générique ci-dessous (qui exposerait str(exc)).
+# FunctionalServiceRegistryUnavailableError (Phase 2, cycle de vie du
+# tenant) suit le même principe : impossible de vérifier si un service
+# fonctionnel est activé n'est jamais traité comme "autorisé par défaut".
 _TENANT_ROUTING_ERRORS = (
     TenantContextMissingError,
     TenantDatabaseInactiveError,
     TenantDatabaseNotFoundError,
     TenantRegistryUnavailableError,
+    FunctionalServiceRegistryUnavailableError,
 )
 
 
@@ -35,6 +40,16 @@ def fultang_exception_handler(exc, context):
     response = exception_handler(exc, context)
 
     if response is not None:
+        # Cycle de vie du tenant, Phase 3 : une exception qui porte déjà un
+        # `error_type` structuré (ex: HasFunctionalServiceEnabled levant
+        # NotFound({'error_type': 'SERVICE_UNAVAILABLE', ...})) ne doit
+        # JAMAIS être réenveloppée par la standardisation générique
+        # ci-dessous — le frontend a besoin de lire ce marqueur au même
+        # endroit quel que soit le service qui répond (voir
+        # axiosInstance.js). On la laisse donc passer telle quelle.
+        if isinstance(response.data, dict) and 'error_type' in response.data:
+            return response
+
         # Standardisation de l'objet d'erreur
         error_payload = {
             "success": False,

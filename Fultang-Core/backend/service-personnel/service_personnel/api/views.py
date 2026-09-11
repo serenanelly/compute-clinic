@@ -16,9 +16,42 @@ from rest_framework.views import APIView
 from rest_framework import status
 from django.contrib.auth.hashers import check_password
 
-from .permissions import IsInternalService
-from .tenant_routing.context import set_tenant_context
+from rest_framework.permissions import IsAuthenticated
+
+from .permissions import HasFunctionalServiceEnabled, IsInternalService
+from .tenant_routing.context import get_current_tenant_context, set_tenant_context
+from .utils import generate_temporary_password
 from .tenant_routing.pool_registry import DatabaseProvisioningError, provision_database
+from django.db import IntegrityError
+
+class TemporaryPasswordResponseMixin:
+    """
+    Inclut `temporary_password` dans la réponse HTTP d'une création
+    réussie, UNE SEULE FOIS, jamais dans list/retrieve/update.
+
+    Correctif : avant ce mixin, un compte créé via un de ces ViewSets
+    (Medecin, Pharmacien...) n'avait aucun moyen pour l'administrateur de
+    connaître le mot de passe réellement défini par
+    `BasePersonnelSerializer.create()` (voir serializers.py) — l'admin ne
+    pouvait tout simplement pas communiquer d'identifiants utilisables à
+    la personne créée. Même principe que `CreateFirstAdminView` (Cycle de
+    vie du tenant) et `reset_password` : le mot de passe temporaire est
+    montré une fois, jamais recalculable ensuite (il n'est stocké que
+    hashé) — à charge de l'administrateur de le transmettre, ou de la
+    personne de le changer via le flux "mot de passe oublié" existant.
+    """
+
+    def perform_create(self, serializer):
+        super().perform_create(serializer)
+        self._temporary_password = getattr(serializer, 'temporary_password', None)
+
+    def create(self, request, *args, **kwargs):
+        response = super().create(request, *args, **kwargs)
+        temporary_password = getattr(self, '_temporary_password', None)
+        if temporary_password and isinstance(response.data, dict):
+            response.data = {**response.data, 'temporary_password': temporary_password}
+        return response
+
 
 @extend_schema_view(
     list=extend_schema(summary="Lister tous les services", description="Récupère la liste de tous les services médicaux et administratifs de l'hôpital."),
@@ -70,7 +103,7 @@ class ServiceViewSet(viewsets.ModelViewSet):
     destroy=extend_schema(summary="Renvoi/Suppression médecin", description="Supprime les données et l'accès d'un médecin du système.")
 )
 @extend_schema(tags=['Corps Médical - Médecins'])
-class MedecinViewSet(viewsets.ModelViewSet):
+class MedecinViewSet(TemporaryPasswordResponseMixin, viewsets.ModelViewSet):
     """
     CRUD complet pour le corps médical : les Médecins.
     """
@@ -86,7 +119,7 @@ class MedecinViewSet(viewsets.ModelViewSet):
     destroy=extend_schema(summary="Renvoi/Suppression généraliste", description="Supprime les données et l'accès d'un généraliste du système.")
 )
 @extend_schema(tags=['Corps Médical - Médecins Généralistes'])
-class MedecinGeneralisteViewSet(viewsets.ModelViewSet):
+class MedecinGeneralisteViewSet(TemporaryPasswordResponseMixin, viewsets.ModelViewSet):
     """
     CRUD complet pour les Médecins Généralistes.
     """
@@ -102,7 +135,7 @@ class MedecinGeneralisteViewSet(viewsets.ModelViewSet):
     destroy=extend_schema(summary="Licenciement infirmière", description="Radier le profil médical de la base.")
 )
 @extend_schema(tags=['Corps Médical - Infirmières'])
-class InfirmiereViewSet(viewsets.ModelViewSet):
+class InfirmiereViewSet(TemporaryPasswordResponseMixin, viewsets.ModelViewSet):
     """
     Gestion complète pour les infirmières avec grade (Enum).
     """
@@ -118,7 +151,7 @@ class InfirmiereViewSet(viewsets.ModelViewSet):
     destroy=extend_schema(summary="Retirer réceptionniste", description="Dissoudre la présence métier de cette personne dans la base de réception.")
 )
 @extend_schema(tags=['Administration - Réception'])
-class ReceptionnisteViewSet(viewsets.ModelViewSet):
+class ReceptionnisteViewSet(TemporaryPasswordResponseMixin, viewsets.ModelViewSet):
     """
     Gestion des accueils et de la réception.
     """
@@ -134,7 +167,7 @@ class ReceptionnisteViewSet(viewsets.ModelViewSet):
     destroy=extend_schema(summary="Supprimer comptable fm", description="Éviction du poste.")
 )
 @extend_schema(tags=['Administration - Comptabilité'])
-class ComptableFinancierViewSet(viewsets.ModelViewSet):
+class ComptableFinancierViewSet(TemporaryPasswordResponseMixin, viewsets.ModelViewSet):
     """
     Responsabilités budgétaires majeures (cadres).
     """
@@ -150,7 +183,7 @@ class ComptableFinancierViewSet(viewsets.ModelViewSet):
     destroy=extend_schema(summary="Supprimer comptable matière", description="Supression du service de l l'utilisateur.")
 )
 @extend_schema(tags=['Administration - Comptabilité'])
-class ComptableMatiereViewSet(viewsets.ModelViewSet):
+class ComptableMatiereViewSet(TemporaryPasswordResponseMixin, viewsets.ModelViewSet):
     """
     Logistique et stocks hospitaliers.
     """
@@ -166,12 +199,21 @@ class ComptableMatiereViewSet(viewsets.ModelViewSet):
     destroy=extend_schema(summary="Supprimer profil laborantin", description="Retrait de service de labo.")
 )
 @extend_schema(tags=['Technique - Laboratoire'])
-class LaborantinViewSet(viewsets.ModelViewSet):
+class LaborantinViewSet(TemporaryPasswordResponseMixin, viewsets.ModelViewSet):
     """
     Spécialités de type Enum en base (Virologie, hématologie).
+
+    Activation/désactivation de service réellement effective (cycle de
+    vie du tenant) : si LABORATOIRE est désactivé pour le tenant courant,
+    TOUTE opération de ce ViewSet est refusée — même mécanisme que
+    PharmacienViewSet pour PHARMACIE. Avant ce correctif, seule la
+    création générique de personnel (poste='laborantin') était gatée ;
+    ce ViewSet (consultation/gestion du personnel de laboratoire déjà
+    créé) ne l'était pas du tout.
     """
     queryset = Laborantin.objects.all()
     serializer_class = LaborantinSerializer
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('LABORATOIRE')]
 
 @extend_schema_view(
     list=extend_schema(summary="Lister pharmaciens", description="Inventaire des employés pharmaciens en vigueur."),
@@ -182,12 +224,19 @@ class LaborantinViewSet(viewsets.ModelViewSet):
     destroy=extend_schema(summary="Supprimer le pharmacien", description="Le pharmacien quitte Fultang.")
 )
 @extend_schema(tags=['Technique - Pharmacie'])
-class PharmacienViewSet(viewsets.ModelViewSet):
+class PharmacienViewSet(TemporaryPasswordResponseMixin, viewsets.ModelViewSet):
     """
     Le personnel qui gère la pharmacie avec leur licence.
+
+    Activation/désactivation de service réellement effective (cycle de
+    vie du tenant, Phase 2, §12-15) : si le service fonctionnel PHARMACIE
+    est désactivé pour le tenant courant, TOUTE opération de ce ViewSet
+    (y compris la simple consultation) est refusée avec un 403 — jamais
+    un masquage seulement côté frontend.
     """
     queryset = Pharmacien.objects.all()
     serializer_class = PharmacienSerializer
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('PHARMACIE')]
 
 @extend_schema_view(
     list=extend_schema(summary="Lister directions", description="Tout le bureau directorial Fultang."),
@@ -198,7 +247,7 @@ class PharmacienViewSet(viewsets.ModelViewSet):
     destroy=extend_schema(summary="Révoquer direction", description="Changement au conseil d'établissement.")
 )
 @extend_schema(tags=['Direction - Exécutif'])
-class DirecteurViewSet(viewsets.ModelViewSet):
+class DirecteurViewSet(TemporaryPasswordResponseMixin, viewsets.ModelViewSet):
     """
     La direction de l'hôpital.
     """
@@ -214,7 +263,7 @@ class DirecteurViewSet(viewsets.ModelViewSet):
     destroy=extend_schema(summary="Retirer accès d'Admin", description="Désactivation compte superutilisateur backend.")
 )
 @extend_schema(tags=['Système - Administration'])
-class AdminViewSet(viewsets.ModelViewSet):
+class AdminViewSet(TemporaryPasswordResponseMixin, viewsets.ModelViewSet):
     """
     Les administrateurs en charge d'ajouter, éditer les profils globaux de l l'hôpital.
     """
@@ -335,6 +384,22 @@ def generate_matricule(poste):
     random_num = random.randint(1000, 9999)
     return f"{prefix}-{random_num}"
 
+
+# Correspondance poste → service fonctionnel (Tenant Configuration,
+# catalogue FunctionalService de tenant-service) — utilisée par
+# `_ensure_functional_service_enabled_for_poste` (Activation/désactivation
+# de service, cycle de vie du tenant Phase 2, §12-15). Un poste absent de
+# cette table n'est soumis à AUCUN contrôle de service fonctionnel (ex:
+# 'admin', 'directeur' : rôles de plateforme/direction, pas rattachés à un
+# service fonctionnel du catalogue produit) — décision explicite, pas un
+# oubli : ajouter une entrée ici est le SEUL geste nécessaire pour étendre
+# le contrôle à un nouveau poste, jamais une règle spéciale par vue.
+POSTE_TO_FUNCTIONAL_SERVICE = {
+    'pharmacien': 'PHARMACIE',
+    'laborantin': 'LABORATOIRE',
+    'infirmier': 'SOINS_INFIRMIERS',
+}
+
 def serialize_personnel(instance, model_class):
     poste = 'autre'
     for k, v in POSTE_MODEL_MAP.items():
@@ -442,6 +507,30 @@ class PersonnelViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Activation/désactivation de service réellement effective (cycle
+        # de vie du tenant, Phase 2, §12-15) : un poste rattaché à un
+        # FunctionalService désactivé pour ce tenant ne peut pas être créé
+        # via ce point d'entrée générique non plus — même contrôle que
+        # PharmacienViewSet, réutilisé sans dupliquer sa logique.
+        service_code = POSTE_TO_FUNCTIONAL_SERVICE.get(poste)
+        if service_code:
+            permission = HasFunctionalServiceEnabled.for_service(service_code)()
+            if not permission.has_permission(request, self):
+                return Response({"detail": permission.message}, status=status.HTTP_403_FORBIDDEN)
+
+        # Mot de passe temporaire RÉEL (jamais la même valeur fixe pour
+        # tout le monde) — voir generate_temporary_password(). Inclus une
+        # seule fois dans la réponse ci-dessous, jamais restocké en clair,
+        # jamais renvoyé par un GET ultérieur (serialize_personnel ne
+        # l'expose pas).
+        temporary_password = data.get('mot_de_passe') or generate_temporary_password()
+
+        # Correctif critique : sans ceci, le compte créé ne pouvait jamais
+        # se connecter (AuthVerifyView filtre par (email, tenant_id), voir
+        # BasePersonnelSerializer.create() dans serializers.py pour le
+        # même correctif appliqué aux ModelViewSet génériques).
+        tenant_context = get_current_tenant_context()
+
         create_data = {
             'nom': data.get('nom'),
             'prenom': data.get('prenom', ''),
@@ -452,7 +541,8 @@ class PersonnelViewSet(viewsets.ViewSet):
             'matricule': data.get('matricule') or generate_matricule(poste),
             'date_embauche': data.get('date_embauche') or timezone.now().date(),
             'statut': data.get('statut', 'Actif'),
-            'mot_de_passe': make_password(data.get('mot_de_passe') or 'Fultang@123'),
+            'mot_de_passe': make_password(temporary_password),
+            'tenant_id': tenant_context.tenant_id if tenant_context else None,
         }
         
         service_id = data.get('service')
@@ -477,7 +567,9 @@ class PersonnelViewSet(viewsets.ViewSet):
             create_data['numero_licence'] = data.get('numero_licence') or f"PH-CMR-{random.randint(10000, 99999)}"
             
         instance = model_class.objects.create(**create_data)
-        return Response(serialize_personnel(instance, model_class), status=status.HTTP_201_CREATED)
+        response_data = serialize_personnel(instance, model_class)
+        response_data['temporary_password'] = temporary_password
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
     def update(self, request, pk=None):
         user, model = self.get_user_and_model(pk)
@@ -547,7 +639,7 @@ class PersonnelViewSet(viewsets.ViewSet):
         for model in personnel_models:
             try:
                 user = model.objects.get(email=email)
-                new_pass = "Fultang@" + str(random.randint(100, 999))
+                new_pass = generate_temporary_password()
                 user.mot_de_passe = make_password(new_pass)
                 user.save()
                 return Response({"detail": "Mot de passe reinitialise", "new_password": new_pass})
@@ -629,3 +721,105 @@ class ProvisionDatabaseView(APIView):
             )
 
         return Response(result, status=status.HTTP_200_OK)
+
+
+class CreateFirstAdminView(APIView):
+    """
+    POST /api/internal/create-first-admin/ — Cycle de vie du tenant
+    (Phase 2) : crée le compte administrateur initial d'un établissement
+    fraîchement provisionné.
+
+    Endpoint interne symétrique de `ProvisionDatabaseView` (même
+    protection `IsInternalService`, même jeton partagé, jamais appelé via
+    la Gateway) — tenant-service l'appelle juste après que sa base
+    PERSONNEL est devenue ACTIVE.
+
+    Ne réutilise AUCUN nouveau mécanisme d'authentification : le compte
+    créé est un `Admin` ordinaire (voir models.py), avec un mot de passe
+    temporaire hashé exactement comme tout autre compte (`make_password`),
+    généré par la même fonction que `reset_password`
+    (`generate_temporary_password`). Champs obligatoires du modèle
+    `Personnel` non fournis par l'appelant (date de naissance, adresse,
+    contact, date d'embauche) reçoivent une valeur de départ neutre —
+    l'administrateur les complète lui-même une fois connecté (§4 de la
+    mission : "en restant simple").
+    """
+    authentication_classes = []
+    permission_classes = [IsInternalService]
+
+    def post(self, request):
+        tenant_id = request.data.get('tenant_id')
+        nom = request.data.get('nom')
+        email = request.data.get('email')
+        prenom = request.data.get('prenom', '')
+
+        if not tenant_id or not nom or not email:
+            return Response(
+                {'detail': "Les champs 'tenant_id', 'nom' et 'email' sont requis."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        set_tenant_context(tenant_id)
+
+        temporary_password = generate_temporary_password()
+        today = timezone.now().date()
+
+        try:
+            admin = Admin.objects.create(
+                tenant_id=tenant_id,
+                nom=nom,
+                prenom=prenom,
+                date_naissance=today,
+                adresse='',
+                email=email,
+                contact='',
+                matricule=generate_matricule('admin'),
+                date_embauche=today,
+                statut='Actif',
+                mot_de_passe=make_password(temporary_password),
+            )
+        except IntegrityError:
+            return Response(
+                {'detail': f"Un compte administrateur existe déjà pour l'email {email} dans cet établissement."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        return Response({
+            'id': str(admin.id_personnel),
+            'email': admin.email,
+            'temporary_password': temporary_password,
+        }, status=status.HTTP_201_CREATED)
+
+
+class FunctionalServiceInvalidateView(APIView):
+    """
+    POST /api/internal/functional-services/invalidate/ — Cycle de vie du
+    tenant, Phase 3 : invalidation ACTIVE (poussée) du cache local
+    `functional_service_cache` (voir tenant_routing/functional_service_client.py),
+    déclenchée par tenant-service juste après un toggle/bulk-set réussi de
+    FunctionalService, pour ne plus dépendre uniquement de l'expiration du
+    TTL (`FUNCTIONAL_SERVICE_CACHE_TTL_SECONDS`, conservé comme filet de
+    sécurité).
+
+    Endpoint interne symétrique de `ProvisionDatabaseView`/`CreateFirstAdminView`
+    (même protection `IsInternalService`, jamais appelé via la Gateway).
+    Corps attendu : `{tenant_id, code}`. Idempotent (`invalidate()` sur une
+    clé absente ne fait rien) — toujours 200 même si l'entrée n'existait
+    pas en cache localement.
+    """
+    authentication_classes = []
+    permission_classes = [IsInternalService]
+
+    def post(self, request):
+        from .tenant_routing.functional_service_client import functional_service_cache
+
+        tenant_id = request.data.get('tenant_id')
+        code = request.data.get('code')
+        if not tenant_id or not code:
+            return Response(
+                {'detail': "Les champs 'tenant_id' et 'code' sont requis."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        functional_service_cache.invalidate(tenant_id, code)
+        return Response({}, status=status.HTTP_200_OK)

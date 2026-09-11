@@ -2,20 +2,23 @@ import { useState, useEffect } from "react";
 import { Link, Navigate, useLocation } from "react-router-dom";
 import PropTypes from "prop-types";
 import { AccessDenied } from "../../../GlobalComponents/AccessDenied.jsx";
+import { ServiceUnavailableScreen } from "../../../GlobalComponents/ServiceUnavailableScreen.jsx";
 import { useAuthentication } from "../../../Utils/Provider.jsx";
+import { useFunctionalServiceGate } from "../../../hooks/useFunctionalServiceGate.js";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { Loading } from "../../../GlobalComponents/Loading.jsx";
 import { LaboratoryNavBar } from "./LaboratoryNavBar.jsx";
 
-export function LaboratoryDashboard({ children, linkList, requiredRole }) {
+export function LaboratoryDashboard({ children, linkList, requiredRole, requiredFunctionalService }) {
     LaboratoryDashboard.propTypes = {
         children: PropTypes.node.isRequired,
         linkList: PropTypes.array.isRequired,
         requiredRole: PropTypes.string.isRequired,
+        requiredFunctionalService: PropTypes.string,
     };
 
     const location = useLocation();
-    
+
     // Maintenir l'onglet précédent actif pendant la transition
     const [activeTabPath, setActiveTabPath] = useState(() => {
         return sessionStorage.getItem('laboratoryActiveTab') || location.pathname;
@@ -24,6 +27,7 @@ export function LaboratoryDashboard({ children, linkList, requiredRole }) {
     const { isAuthenticated, hasRole } = useAuthentication();
     const [expandedLinks, setExpandedLinks] = useState({});
     const [isNavigating, setIsNavigating] = useState(true);
+    const { checking: checkingService, blocked: serviceBlocked } = useFunctionalServiceGate(requiredFunctionalService);
 
     useEffect(() => {
         setIsNavigating(true);
@@ -130,6 +134,14 @@ export function LaboratoryDashboard({ children, linkList, requiredRole }) {
 
     if (!hasRole(requiredRole)) {
         return <AccessDenied Role={requiredRole} />;
+    }
+
+    if (checkingService) {
+        return <Loading />;
+    }
+
+    if (serviceBlocked) {
+        return <ServiceUnavailableScreen />;
     }
 
     if (isNavigating) {

@@ -1,0 +1,41 @@
+import { useEffect, useState } from "react";
+import {
+    FULTANG_TENANT_SUSPENDED_EVENT,
+    FULTANG_SERVICE_UNAVAILABLE_EVENT,
+} from "../Utils/fultangErrorEvents";
+import { TenantSuspendedScreen } from "./TenantSuspendedScreen.jsx";
+import { ServiceUnavailableScreen } from "./ServiceUnavailableScreen.jsx";
+
+/**
+ * Monté UNE SEULE FOIS près de la racine de l'app (App.jsx), à côté de
+ * `FeedbackProvider` — écoute les deux events globaux déclenchés par les
+ * intercepteurs axios (voir Utils/fultangErrorEvents.js) et affiche
+ * l'écran plein écran correspondant par-dessus l'application entière,
+ * quelle que soit la page/route active au moment où l'erreur survient.
+ *
+ * Ne modifie ni ne remplace `AppRoute` — un simple overlay conditionnel,
+ * jamais une redirection : l'utilisateur reste "bloqué" visuellement sur
+ * cet écran tant qu'il ne recharge pas/ne revient pas plus tard, sans que
+ * l'état de navigation sous-jacent soit perturbé.
+ */
+export function FultangGlobalErrorOverlay() {
+    const [screen, setScreen] = useState(null); // null | 'suspended' | 'unavailable'
+
+    useEffect(() => {
+        const onSuspended = () => setScreen('suspended');
+        const onUnavailable = () => setScreen('unavailable');
+
+        window.addEventListener(FULTANG_TENANT_SUSPENDED_EVENT, onSuspended);
+        window.addEventListener(FULTANG_SERVICE_UNAVAILABLE_EVENT, onUnavailable);
+        return () => {
+            window.removeEventListener(FULTANG_TENANT_SUSPENDED_EVENT, onSuspended);
+            window.removeEventListener(FULTANG_SERVICE_UNAVAILABLE_EVENT, onUnavailable);
+        };
+    }, []);
+
+    if (screen === 'suspended') return <TenantSuspendedScreen />;
+    if (screen === 'unavailable') return <ServiceUnavailableScreen />;
+    return null;
+}
+
+export default FultangGlobalErrorOverlay;

@@ -540,7 +540,7 @@ export function RegisterDelivery() {
     return (
         <AccountantDashBoard
             linkList={AccountantNavLink}
-            requiredRole={"compta_matiere"}
+            requiredRole={"compta_matiere"} requiredFunctionalService="COMPTA_MATIERE"
         >
             <AccountantNavBar />
             <div className="p-6 space-y-6">

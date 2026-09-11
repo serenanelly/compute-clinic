@@ -15,7 +15,14 @@ service de confiance, prouvant sa légitimité par ce jeton, le peut.
 import hmac
 
 from django.conf import settings
+from rest_framework.exceptions import NotFound
 from rest_framework.permissions import BasePermission
+
+from .tenant_routing.context import require_tenant_context
+from .tenant_routing.functional_service_client import (
+    FunctionalServiceUnknownError,
+    functional_service_cache,
+)
 
 INTERNAL_SERVICE_TOKEN_HEADER = 'X-Internal-Service-Token'
 
@@ -40,3 +47,58 @@ class IsInternalService(BasePermission):
             return False
 
         return hmac.compare_digest(provided, expected)
+
+
+class HasFunctionalServiceEnabled(BasePermission):
+    """
+    Autorise l'opération uniquement si un `FunctionalService` donné du
+    catalogue FullTang est activé pour le tenant COURANT (Cycle de vie du
+    tenant, Phase 2, §12-15 : activation/désactivation réellement
+    effective, jamais un simple masquage côté frontend).
+
+    Générique par construction : `.for_service(code)` produit une
+    sous-classe paramétrée par un code (ex: 'PHARMACIE') — un seul
+    mécanisme réutilisable pour n'importe quel service du catalogue,
+    jamais une règle spéciale écrite pour un seul service.
+
+    Renvoie 404 (pas 403) quand le service est désactivé — décision
+    explicite de la Phase 3 : un service désactivé doit apparaître comme
+    INEXISTANT pour ce tenant, jamais comme "existant mais interdit"
+    (ne jamais révéler au client qu'un mécanisme d'autorisation l'a
+    bloqué). AVANT ce correctif, `has_permission` retournait `False`,
+    que DRF traduit automatiquement en 403 — désormais elle lève
+    `NotFound` explicitement pour ce cas précis.
+
+    `FunctionalServiceRegistryUnavailableError` n'est PAS interceptée ici
+    : elle remonte telle quelle et est traduite en 503 par le gestionnaire
+    d'exceptions global (voir exceptions.py), exactement comme les autres
+    erreurs de résolution du Tenant Registry (Phase 6) — jamais un accès
+    silencieusement autorisé faute de pouvoir vérifier.
+    """
+
+    service_code: str = None
+
+    @classmethod
+    def for_service(cls, code: str):
+        return type(f'HasFunctionalServiceEnabled_{code}', (cls,), {'service_code': code})
+
+    def has_permission(self, request, view):
+        tenant_id = require_tenant_context().tenant_id
+        if tenant_id is None:
+            # Pool non assigné (aucun tenant) : aucune configuration de
+            # service fonctionnel ne s'applique — comportement historique
+            # préservé (voir GatewayHeaderAuthentication).
+            return True
+        try:
+            enabled = functional_service_cache.get(tenant_id, self.service_code)
+        except FunctionalServiceUnknownError:
+            # Tenant ou code absent du Registry : incohérence de données,
+            # jamais une raison d'autoriser silencieusement.
+            enabled = False
+
+        if not enabled:
+            raise NotFound(detail={
+                'error_type': 'SERVICE_UNAVAILABLE',
+                'message': "Ce service n'existe pas pour cet établissement.",
+            })
+        return True

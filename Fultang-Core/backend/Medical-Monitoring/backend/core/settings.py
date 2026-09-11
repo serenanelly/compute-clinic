@@ -129,6 +129,12 @@ TENANT_SERVICE_TIMEOUT_SECONDS = env.int('TENANT_SERVICE_TIMEOUT_SECONDS', defau
 # Cache TTL du mapping tenant → base (voir tenant_routing/cache.py).
 TENANT_DB_CACHE_TTL_SECONDS = env.int('TENANT_DB_CACHE_TTL_SECONDS', default=300)
 
+# Cache TTL de l'état activé/désactivé d'un service fonctionnel (cycle de
+# vie du tenant, Phase 2 — voir tenant_routing/functional_service_client.py).
+# Plus court que TENANT_DB_CACHE_TTL_SECONDS : une désactivation de service
+# doit se refléter rapidement.
+FUNCTIONAL_SERVICE_CACHE_TTL_SECONDS = env.int('FUNCTIONAL_SERVICE_CACHE_TTL_SECONDS', default=60)
+
 # "Pool" de connexion (CONN_MAX_AGE — voir tenant_routing/pool_registry.py
 # pour l'explication honnête de ce que Django appelle réellement un pool).
 TENANT_DB_CONN_MAX_AGE = env.int('TENANT_DB_CONN_MAX_AGE', default=60)

@@ -137,7 +137,7 @@ export function QuittancesAValiderPage() {
   ];
 
   return (
-    <DashBoard linkList={cashierNavLink} requiredRole="caissier">
+    <DashBoard linkList={cashierNavLink} requiredRole="caissier" requiredFunctionalService="CAISSE">
       <div className="space-y-6">
         {/* Header */}
         <div className="flex justify-between items-start">

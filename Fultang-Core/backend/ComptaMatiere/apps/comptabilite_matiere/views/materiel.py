@@ -6,6 +6,8 @@ Organization: ENSPY
 Date: 2025-12-18
 """
 from rest_framework import viewsets, status
+from rest_framework.permissions import IsAuthenticated
+from core.permissions import HasFunctionalServiceEnabled
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from apps.comptabilite_matiere.permissions import DevelopmentOrAuthenticated
@@ -39,7 +41,7 @@ class MaterielViewSet(viewsets.ModelViewSet):
     """
     
     queryset = Materiel.objects.all()
-    permission_classes = [DevelopmentOrAuthenticated]
+    permission_classes = [DevelopmentOrAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_MATIERE')]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     
     search_fields = ['nom_Materiel']
@@ -81,7 +83,7 @@ class MaterielMedicalViewSet(viewsets.ModelViewSet):
     """
     
     queryset = MaterielMedical.objects.all()
-    permission_classes = [DevelopmentOrAuthenticated]
+    permission_classes = [DevelopmentOrAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_MATIERE')]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     pagination_class = None  # Désactiver la pagination pour récupérer tous les éléments
     
@@ -178,7 +180,7 @@ class MaterielDurableViewSet(viewsets.ModelViewSet):
     """
     
     queryset = MaterielDurable.objects.all()
-    permission_classes = [DevelopmentOrAuthenticated]
+    permission_classes = [DevelopmentOrAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_MATIERE')]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     pagination_class = None  # Désactiver la pagination pour récupérer tous les éléments
     

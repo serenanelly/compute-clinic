@@ -746,6 +746,7 @@ class TenantDatabaseResolveActiveEndpointTests(APITestCase):
 
 from unittest.mock import patch
 
+from .internal_clients import InternalServiceCallError
 from .provisioning import (
     PROVISIONING_CAPABLE_SERVICES,
     PhysicalProvisioningError,
@@ -872,7 +873,7 @@ class ProvisioningOrchestratorTests(TestCase):
             return io.BytesIO(_json.dumps({'database_name': 'x', 'host': 'h', 'port': 5432}).encode())
 
         _make_service('MEDICAL', 'Medical Monitoring')
-        with patch('tenants.provisioning.urllib.request.urlopen', side_effect=fake_urlopen):
+        with patch('tenants.internal_clients.urllib.request.urlopen', side_effect=fake_urlopen):
             self.orchestrator.provision(self.tenant.id, ['MEDICAL'])
 
         self.assertEqual(
@@ -1060,3 +1061,688 @@ class PlatformAdminAuthVerifyTests(APITestCase):
         self.client.credentials()  # aucun header d'identité
         response = self._login(self.email, self.password)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+# =============================================================================
+# Tenant Management & Configuration — Phase 1 (profil du tenant +
+# catalogue/configuration des services fonctionnels)
+# =============================================================================
+
+from .models import FunctionalService, TenantFunctionalService  # noqa: E402
+from .services import TenantFunctionalServiceService, UnknownFunctionalServiceError  # noqa: E402
+
+
+def _make_functional_service(code='PHARMACIE', name='Pharmacie', display_order=0):
+    service, _ = FunctionalService.objects.get_or_create(
+        code=code, defaults={'name': name, 'display_order': display_order},
+    )
+    return service
+
+
+class TenantProfileFieldsTests(APITestCase):
+    """Champs de profil descriptifs (address/phone/email/logo_url) — tous facultatifs."""
+
+    def setUp(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+
+    def test_create_tenant_without_profile_fields_defaults_to_empty(self):
+        response = self.client.post('/api/tenants/', {
+            'name': 'Sans Profil', 'identifier': 'sans-profil',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        for field in ('address', 'phone', 'email', 'logo_url'):
+            self.assertEqual(response.data[field], '')
+
+    def test_create_tenant_with_profile_fields(self):
+        response = self.client.post('/api/tenants/', {
+            'name': 'Avec Profil', 'identifier': 'avec-profil',
+            'address': '12 rue de la Santé', 'phone': '+237600000001',
+            'email': 'contact@avec-profil.local', 'logo_url': 'https://example.com/logo.png',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['address'], '12 rue de la Santé')
+        self.assertEqual(response.data['phone'], '+237600000001')
+        self.assertEqual(response.data['email'], 'contact@avec-profil.local')
+        self.assertEqual(response.data['logo_url'], 'https://example.com/logo.png')
+
+    def test_missing_required_fields_rejected_with_400(self):
+        """name/identifier restent obligatoires — validation backend, jamais contournable."""
+        response = self.client.post('/api/tenants/', {'address': 'Sans nom ni identifiant'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('name', response.data)
+        self.assertIn('identifier', response.data)
+
+    def test_update_profile_fields_via_patch(self):
+        tenant = _make_tenant(identifier='profil-patch')
+        response = self.client.patch(f'/api/tenants/{tenant.id}/', {
+            'address': 'Nouvelle adresse', 'phone': '+237611111111',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tenant.refresh_from_db()
+        self.assertEqual(tenant.address, 'Nouvelle adresse')
+        self.assertEqual(tenant.phone, '+237611111111')
+
+    def test_patch_profile_fields_does_not_touch_export_authorization(self):
+        """PATCH partiel : modifier le profil ne doit jamais toucher allow_clinical_agent_export."""
+        tenant = _make_tenant(identifier='profil-isole')
+        tenant.allow_clinical_agent_export = False
+        tenant.save(update_fields=['allow_clinical_agent_export'])
+
+        response = self.client.patch(f'/api/tenants/{tenant.id}/', {'email': 'x@y.local'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tenant.refresh_from_db()
+        self.assertFalse(tenant.allow_clinical_agent_export)
+
+    def test_patch_export_authorization_does_not_touch_profile(self):
+        tenant = _make_tenant(identifier='export-isole')
+        tenant.address = 'Adresse originale'
+        tenant.save(update_fields=['address'])
+
+        response = self.client.patch(
+            f'/api/tenants/{tenant.id}/', {'allow_clinical_agent_export': False}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tenant.refresh_from_db()
+        self.assertEqual(tenant.address, 'Adresse originale')
+
+    def test_both_profile_and_export_authorization_in_one_patch(self):
+        tenant = _make_tenant(identifier='patch-combine')
+        response = self.client.patch(f'/api/tenants/{tenant.id}/', {
+            'allow_clinical_agent_export': False, 'phone': '+237699999999',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tenant.refresh_from_db()
+        self.assertFalse(tenant.allow_clinical_agent_export)
+        self.assertEqual(tenant.phone, '+237699999999')
+
+
+class FunctionalServiceCatalogModelTests(TestCase):
+    """`FunctionalService` — catalogue produit, distinct de `PlatformService`."""
+
+    def test_seed_migration_populated_the_expected_catalog(self):
+        """Vérifie le catalogue réellement seedé par 0009_seed_functional_services.py."""
+        expected_codes = {
+            'MEDECINE_GENERALE', 'SOINS_INFIRMIERS', 'PHARMACIE', 'LABORATOIRE',
+            'CAISSE', 'COMPTA_FINANCIERE', 'COMPTA_MATIERE', 'GESTION_PERSONNEL',
+            'GESTION_INFRASTRUCTURES',
+        }
+        actual_codes = set(FunctionalService.objects.values_list('code', flat=True))
+        self.assertEqual(actual_codes, expected_codes)
+
+    def test_catalog_is_ordered_by_display_order(self):
+        codes_in_order = list(FunctionalService.objects.order_by('display_order').values_list('code', flat=True))
+        self.assertEqual(codes_in_order[0], 'MEDECINE_GENERALE')
+        self.assertEqual(codes_in_order[1], 'SOINS_INFIRMIERS')
+
+    def test_distinct_from_platform_service_catalog(self):
+        """Un code peut exister dans les deux catalogues sans collision (tables séparées)."""
+        _make_service(code='COMPTA_MATIERE', name='Service technique Compta Matière')
+        functional = FunctionalService.objects.get(code='COMPTA_MATIERE')
+        platform = PlatformService.objects.get(code='COMPTA_MATIERE')
+        self.assertNotEqual(functional.name, platform.name)
+
+
+class TenantFunctionalServiceServiceTests(TestCase):
+    """Couche métier `TenantFunctionalServiceService` — indépendante de HTTP."""
+
+    def setUp(self):
+        self.tenant_a = _make_tenant(identifier='service-tests-tenant-a')
+        self.tenant_b = _make_tenant(identifier='service-tests-tenant-b', name='Tenant B')
+        self.service = TenantFunctionalServiceService()
+
+    def test_unconfigured_service_defaults_to_enabled(self):
+        listing = self.service.list_for_tenant(self.tenant_a.id)
+        self.assertTrue(all(item['enabled'] for item in listing))
+
+    def test_set_service_persists_and_is_reflected_in_listing(self):
+        self.service.set_service(self.tenant_a.id, 'PHARMACIE', False)
+        listing = {item['code']: item['enabled'] for item in self.service.list_for_tenant(self.tenant_a.id)}
+        self.assertFalse(listing['PHARMACIE'])
+        self.assertTrue(listing['LABORATOIRE'])  # non touché, reste par défaut
+
+    def test_set_unknown_service_raises_and_writes_nothing(self):
+        with self.assertRaises(UnknownFunctionalServiceError):
+            self.service.set_service(self.tenant_a.id, 'DOES_NOT_EXIST', False)
+        self.assertEqual(TenantFunctionalService.objects.filter(tenant=self.tenant_a).count(), 0)
+
+    def test_bulk_set_validates_all_codes_before_writing_any(self):
+        """§ symétrique de ProvisioningOrchestrator : jamais d'état partiellement appliqué."""
+        with self.assertRaises(UnknownFunctionalServiceError):
+            self.service.bulk_set(self.tenant_a.id, [('PHARMACIE', False), ('DOES_NOT_EXIST', True)])
+        self.assertEqual(TenantFunctionalService.objects.filter(tenant=self.tenant_a).count(), 0)
+
+    def test_bulk_set_applies_all_pairs(self):
+        self.service.bulk_set(self.tenant_a.id, [('PHARMACIE', False), ('LABORATOIRE', False)])
+        listing = {item['code']: item['enabled'] for item in self.service.list_for_tenant(self.tenant_a.id)}
+        self.assertFalse(listing['PHARMACIE'])
+        self.assertFalse(listing['LABORATOIRE'])
+        self.assertTrue(listing['CAISSE'])
+
+    def test_configuration_is_isolated_between_tenants(self):
+        """Aucune configuration ne doit être partagée accidentellement entre deux tenants."""
+        self.service.set_service(self.tenant_a.id, 'PHARMACIE', False)
+        self.service.set_service(self.tenant_b.id, 'PHARMACIE', True)
+
+        listing_a = {item['code']: item['enabled'] for item in self.service.list_for_tenant(self.tenant_a.id)}
+        listing_b = {item['code']: item['enabled'] for item in self.service.list_for_tenant(self.tenant_b.id)}
+        self.assertFalse(listing_a['PHARMACIE'])
+        self.assertTrue(listing_b['PHARMACIE'])
+
+    def test_set_service_is_idempotent(self):
+        self.service.set_service(self.tenant_a.id, 'PHARMACIE', False)
+        self.service.set_service(self.tenant_a.id, 'PHARMACIE', False)
+        self.assertEqual(
+            TenantFunctionalService.objects.filter(tenant=self.tenant_a, service_id='PHARMACIE').count(), 1,
+        )
+
+
+class FunctionalServiceEndpointTests(APITestCase):
+    """GET /api/functional-services/ — catalogue en lecture seule."""
+
+    def setUp(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+
+    def test_list_catalog(self):
+        response = self.client.get('/api/functional-services/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        codes = {item['code'] for item in response.data}
+        self.assertIn('PHARMACIE', codes)
+        self.assertIn('MEDECINE_GENERALE', codes)
+
+    def test_ordered_by_display_order(self):
+        response = self.client.get('/api/functional-services/')
+        codes_in_order = [item['code'] for item in response.data]
+        self.assertEqual(codes_in_order[0], 'MEDECINE_GENERALE')
+
+    def test_requires_platform_admin(self):
+        self.client.credentials(HTTP_X_USER_ID='regular-user', HTTP_X_USER_ROLES='Medecin')
+        response = self.client.get('/api/functional-services/')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_no_write_endpoint_exposed(self):
+        """Le catalogue est seedé par migration — pas de création via l'API dans cette phase."""
+        response = self.client.post('/api/functional-services/', {'code': 'X', 'name': 'X'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+class TenantFunctionalServiceEndpointTests(APITestCase):
+    """
+    GET/PATCH/bulk /api/tenants/{id}/functional-services/... — Tenant
+    Configuration, catégorie "Services", vue HTTP.
+    """
+
+    def setUp(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        self.tenant = _make_tenant(identifier='tenant-config-http')
+        self.other_tenant = _make_tenant(identifier='tenant-config-http-other', name='Autre Tenant')
+
+    def test_list_defaults_all_enabled(self):
+        response = self.client.get(f'/api/tenants/{self.tenant.id}/functional-services/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(all(item['enabled'] for item in response.data))
+        self.assertEqual(len(response.data), FunctionalService.objects.filter(status='ACTIVE').count())
+
+    def test_bulk_set_services(self):
+        response = self.client.post(f'/api/tenants/{self.tenant.id}/functional-services/bulk/', {
+            'services': [
+                {'code': 'PHARMACIE', 'enabled': False},
+                {'code': 'CAISSE', 'enabled': True},
+            ],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        by_code = {item['code']: item['enabled'] for item in response.data}
+        self.assertFalse(by_code['PHARMACIE'])
+        self.assertTrue(by_code['CAISSE'])
+
+    def test_bulk_set_unknown_code_returns_400_and_writes_nothing(self):
+        response = self.client.post(f'/api/tenants/{self.tenant.id}/functional-services/bulk/', {
+            'services': [{'code': 'NOT_REAL', 'enabled': True}],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(TenantFunctionalService.objects.filter(tenant=self.tenant).count(), 0)
+
+    def test_toggle_single_service(self):
+        response = self.client.patch(
+            f'/api/tenants/{self.tenant.id}/functional-services/PHARMACIE/', {'enabled': False}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        by_code = {item['code']: item['enabled'] for item in response.data}
+        self.assertFalse(by_code['PHARMACIE'])
+
+    def test_toggle_unknown_service_returns_400(self):
+        response = self.client.patch(
+            f'/api/tenants/{self.tenant.id}/functional-services/NOT_REAL/', {'enabled': False}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_toggle_requires_enabled_field(self):
+        response = self.client.patch(
+            f'/api/tenants/{self.tenant.id}/functional-services/PHARMACIE/', {}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_unknown_tenant_returns_404(self):
+        response = self.client.get(f'/api/tenants/{uuid.uuid4()}/functional-services/')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_requires_platform_admin(self):
+        self.client.credentials(HTTP_X_USER_ID='regular-user', HTTP_X_USER_ROLES='Medecin')
+        response = self.client.get(f'/api/tenants/{self.tenant.id}/functional-services/')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_configuration_is_isolated_between_tenants_over_http(self):
+        """Symétrique HTTP de TenantFunctionalServiceServiceTests — aucune fuite entre tenants."""
+        self.client.patch(
+            f'/api/tenants/{self.tenant.id}/functional-services/PHARMACIE/', {'enabled': False}, format='json',
+        )
+        response_other = self.client.get(f'/api/tenants/{self.other_tenant.id}/functional-services/')
+        by_code_other = {item['code']: item['enabled'] for item in response_other.data}
+        self.assertTrue(by_code_other['PHARMACIE'])  # non affecté par la configuration de l'autre tenant
+
+
+# =============================================================================
+# Cycle de vie complet du tenant (Phase 2) — compte administrateur, URL,
+# fiche technique, logo, logs d'administration, résolution interne des
+# services fonctionnels.
+# =============================================================================
+
+from .models import AdminActionLog  # noqa: E402
+
+
+class EstablishmentUrlAndLogoDisplayTests(APITestCase):
+    """`establishment_url` et `logo_display_url` — champs dérivés du TenantSerializer."""
+
+    def setUp(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+
+    def test_establishment_url_uses_configured_template(self):
+        with override_settings(TENANT_ESTABLISHMENT_URL_TEMPLATE='http://{identifier}.localhost:5173'):
+            response = self.client.post(
+                '/api/tenants/', {'name': 'Hôpital X', 'identifier': 'hopital-x'}, format='json',
+            )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['establishment_url'], 'http://hopital-x.localhost:5173')
+
+    def test_logo_display_url_falls_back_to_external_logo_url_when_no_file_uploaded(self):
+        tenant = _make_tenant(identifier='logo-fallback')
+        tenant.logo_url = 'https://example.com/logo.png'
+        tenant.save(update_fields=['logo_url'])
+        response = self.client.get(f'/api/tenants/{tenant.id}/')
+        self.assertEqual(response.data['logo_display_url'], 'https://example.com/logo.png')
+
+    def test_logo_display_url_empty_when_nothing_configured(self):
+        tenant = _make_tenant(identifier='logo-empty')
+        response = self.client.get(f'/api/tenants/{tenant.id}/')
+        self.assertEqual(response.data['logo_display_url'], '')
+
+
+class TenantLogoUploadEndpointTests(APITestCase):
+    """POST/DELETE /api/tenants/{id}/logo/ — upload réel (Cycle de vie du tenant, Phase 2)."""
+
+    # PNG 1x1 transparent minimal valide — évite une dépendance à Pillow
+    # pour GÉNÉRER l'image dans les tests (Pillow reste requis pour que
+    # Django accepte de sauver un ImageField, voir requirements.txt).
+    _PNG_1X1 = bytes.fromhex(
+        '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489'
+        '0000000a49444154789c6360000002000100ffff03000006000557bfabd4000000'
+        '0049454e44ae426082'
+    )
+
+    def setUp(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        self.tenant = _make_tenant(identifier='logo-upload')
+
+    def _png_file(self, name='logo.png'):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        return SimpleUploadedFile(name, self._PNG_1X1, content_type='image/png')
+
+    def test_upload_logo_succeeds_and_sets_display_url(self):
+        response = self.client.post(
+            f'/api/tenants/{self.tenant.id}/logo/', {'file': self._png_file()}, format='multipart',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['logo_display_url'].startswith('/tenants/media/tenants/logos/'))
+
+    def test_upload_rejects_non_image_file(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        text_file = SimpleUploadedFile('not-an-image.txt', b'hello', content_type='text/plain')
+        response = self.client.post(
+            f'/api/tenants/{self.tenant.id}/logo/', {'file': text_file}, format='multipart',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_upload_requires_file_field(self):
+        response = self.client.post(f'/api/tenants/{self.tenant.id}/logo/', {}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_delete_logo_clears_display_url(self):
+        self.client.post(f'/api/tenants/{self.tenant.id}/logo/', {'file': self._png_file()}, format='multipart')
+        response = self.client.delete(f'/api/tenants/{self.tenant.id}/logo/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['logo_display_url'], '')
+
+    def test_upload_logo_requires_platform_admin(self):
+        self.client.credentials(**ADMIN_HEADERS)
+        response = self.client.post(
+            f'/api/tenants/{self.tenant.id}/logo/', {'file': self._png_file()}, format='multipart',
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_logo_upload_is_logged(self):
+        self.client.post(f'/api/tenants/{self.tenant.id}/logo/', {'file': self._png_file()}, format='multipart')
+        self.assertTrue(
+            AdminActionLog.objects.filter(target_tenant_id=self.tenant.id, action='TENANT_LOGO_UPDATED').exists()
+        )
+
+
+@override_settings(TENANT_SERVICE_INTERNAL_TOKEN=TEST_INTERNAL_TOKEN)
+class FunctionalServicesResolveInternalEndpointTests(APITestCase):
+    """
+    GET /api/tenants/functional-services/resolve/ — utilisé par
+    service-personnel/Medical-Monitoring pour appliquer réellement
+    l'activation/désactivation d'un service (Cycle de vie du tenant,
+    Phase 2, §12-15). Réservé à la communication interne.
+    """
+
+    def setUp(self):
+        self.tenant = _make_tenant(identifier='resolve-fs')
+        _make_functional_service('PHARMACIE', 'Pharmacie')
+
+    def _resolve(self, tenant_id, code, token=TEST_INTERNAL_TOKEN):
+        credentials = {'HTTP_X_INTERNAL_SERVICE_TOKEN': token} if token is not None else {}
+        self.client.credentials(**credentials)
+        return self.client.get('/api/tenants/functional-services/resolve/', {'tenant': tenant_id, 'code': code})
+
+    def test_absent_configuration_defaults_to_enabled(self):
+        response = self._resolve(self.tenant.id, 'PHARMACIE')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['enabled'])
+
+    def test_disabled_service_is_reported_as_disabled(self):
+        TenantFunctionalService.objects.create(
+            tenant=self.tenant, service_id='PHARMACIE', enabled=False,
+        )
+        response = self._resolve(self.tenant.id, 'PHARMACIE')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['enabled'])
+
+    def test_unknown_tenant_returns_404(self):
+        response = self._resolve(uuid.uuid4(), 'PHARMACIE')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_unknown_code_returns_404(self):
+        response = self._resolve(self.tenant.id, 'NOT_REAL')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_missing_params_returns_400(self):
+        self.client.credentials(HTTP_X_INTERNAL_SERVICE_TOKEN=TEST_INTERNAL_TOKEN)
+        response = self.client.get('/api/tenants/functional-services/resolve/', {'tenant': str(self.tenant.id)})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_missing_token_is_rejected(self):
+        response = self._resolve(self.tenant.id, 'PHARMACIE', token=None)
+        self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_regular_platform_admin_jwt_is_not_sufficient(self):
+        """Ce endpoint exige le jeton interne — pas seulement une identité PLATFORM_ADMIN authentifiée."""
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        response = self.client.get(
+            '/api/tenants/functional-services/resolve/', {'tenant': str(self.tenant.id), 'code': 'PHARMACIE'},
+        )
+        self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+
+class TenantProvisionAdminEndpointTests(APITestCase):
+    """
+    POST /api/tenants/{id}/provision-admin/ — création du compte
+    administrateur initial + email d'accès (Cycle de vie du tenant,
+    Phase 2, §2/§4/§5). L'appel réseau vers service-personnel et l'envoi
+    d'email sont mockés ici — la preuve avec les vrais services est faite
+    séparément (validation en conditions réelles, voir rapport final).
+    """
+
+    def setUp(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        self.tenant = _make_tenant(identifier='provision-admin-tests')
+        _make_service('PERSONNEL', 'Service Personnel')
+
+    def _make_personnel_db_active(self):
+        TenantDatabase.objects.create(
+            id=uuid.uuid4(), tenant=self.tenant, service_id='PERSONNEL',
+            database_name='tenant_x_personnel', host='fultang-personnel', port=5432,
+            status=TenantDatabaseStatus.ACTIVE, secret_reference='shared:PERSONNEL',
+        )
+
+    def _provision_admin(self, payload=None):
+        return self.client.post(
+            f'/api/tenants/{self.tenant.id}/provision-admin/',
+            payload or {'nom': 'Dupont', 'prenom': 'Jean', 'email': 'admin@example.test'},
+            format='json',
+        )
+
+    def test_returns_409_when_personnel_database_is_not_active(self):
+        response = self._provision_admin()
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+
+    def test_returns_400_when_email_missing(self):
+        self._make_personnel_db_active()
+        response = self._provision_admin({'nom': 'Dupont'})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_successful_admin_and_email_creation(self):
+        self._make_personnel_db_active()
+        with patch(
+            'tenants.views.create_first_admin',
+            return_value={'id': 'x', 'email': 'admin@example.test', 'temporary_password': 'Fultang@123'},
+        ) as mock_create_admin, patch('tenants.views.send_tenant_admin_welcome_email') as mock_send_email:
+            response = self._provision_admin()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['admin_created'])
+        self.assertTrue(response.data['email_sent'])
+        mock_create_admin.assert_called_once()
+        mock_send_email.assert_called_once()
+        self.assertTrue(
+            AdminActionLog.objects.filter(
+                target_tenant_id=self.tenant.id, action='TENANT_ADMIN_PROVISIONED',
+            ).exists()
+        )
+
+    def test_admin_creation_failure_is_reported_honestly_never_faked_as_success(self):
+        self._make_personnel_db_active()
+        from .internal_clients import AdminProvisioningError
+        with patch('tenants.views.create_first_admin', side_effect=AdminProvisioningError("injoignable")), \
+             patch('tenants.views.send_tenant_admin_welcome_email') as mock_send_email:
+            response = self._provision_admin()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)  # requête valide : jamais un 5xx pour un échec partiel
+        self.assertFalse(response.data['admin_created'])
+        self.assertIn('injoignable', response.data['admin_detail'])
+        self.assertFalse(response.data['email_sent'])
+        mock_send_email.assert_not_called()  # jamais d'email envoyé si le compte n'a pas été créé
+
+    def test_email_failure_after_successful_admin_creation_is_reported_separately(self):
+        self._make_personnel_db_active()
+        with patch(
+            'tenants.views.create_first_admin',
+            return_value={'id': 'x', 'email': 'admin@example.test', 'temporary_password': 'Fultang@123'},
+        ), patch('tenants.views.send_tenant_admin_welcome_email', side_effect=Exception("SMTP down")):
+            response = self._provision_admin()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['admin_created'])
+        self.assertFalse(response.data['email_sent'])
+        self.assertIn('SMTP down', response.data['email_detail'])
+
+    def test_requires_platform_admin(self):
+        self._make_personnel_db_active()
+        self.client.credentials(**ADMIN_HEADERS)
+        response = self._provision_admin()
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class AdminActionLogEndpointTests(APITestCase):
+    """
+    GET /api/admin-logs/ — journal d'administration (Cycle de vie du
+    tenant, Phase 2, §16-17). Lecture seule, filtrable.
+    """
+
+    def setUp(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        self.tenant = _make_tenant(identifier='logs-tenant')
+
+    def test_tenant_creation_is_logged_with_actor_identity(self):
+        self.client.post('/api/tenants/', {'name': 'Loggé', 'identifier': 'logge'}, format='json')
+        response = self.client.get('/api/admin-logs/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        entries = [e for e in response.data['results']] if isinstance(response.data, dict) else response.data
+        matching = [e for e in entries if e['action'] == 'TENANT_CREATED' and e['target_tenant_identifier'] == 'logge']
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]['actor_id'], PLATFORM_ADMIN_HEADERS['HTTP_X_USER_ID'])
+
+    def test_status_change_is_logged(self):
+        self.client.patch(f'/api/tenants/{self.tenant.id}/status/', {'status': TenantStatus.INACTIVE}, format='json')
+        self.assertTrue(
+            AdminActionLog.objects.filter(target_tenant_id=self.tenant.id, action='TENANT_STATUS_CHANGED').exists()
+        )
+
+    def test_functional_service_toggle_is_logged_with_metadata(self):
+        _make_functional_service('PHARMACIE', 'Pharmacie')
+        self.client.patch(
+            f'/api/tenants/{self.tenant.id}/functional-services/PHARMACIE/', {'enabled': False}, format='json',
+        )
+        log = AdminActionLog.objects.get(target_tenant_id=self.tenant.id, action='FUNCTIONAL_SERVICE_TOGGLED')
+        self.assertEqual(log.metadata['service'], 'PHARMACIE')
+        self.assertFalse(log.metadata['enabled'])
+
+    def test_filter_by_tenant(self):
+        other_tenant = _make_tenant(identifier='logs-other-tenant')
+        self.client.patch(f'/api/tenants/{self.tenant.id}/status/', {'status': TenantStatus.INACTIVE}, format='json')
+        self.client.patch(f'/api/tenants/{other_tenant.id}/status/', {'status': TenantStatus.INACTIVE}, format='json')
+
+        response = self.client.get('/api/admin-logs/', {'tenant': str(self.tenant.id)})
+        entries = response.data['results'] if isinstance(response.data, dict) else response.data
+        self.assertTrue(all(e['target_tenant_id'] == str(self.tenant.id) for e in entries))
+        self.assertTrue(len(entries) >= 1)
+
+    def test_filter_by_action(self):
+        self.client.patch(f'/api/tenants/{self.tenant.id}/status/', {'status': TenantStatus.INACTIVE}, format='json')
+        response = self.client.get('/api/admin-logs/', {'action': 'TENANT_STATUS_CHANGED'})
+        entries = response.data['results'] if isinstance(response.data, dict) else response.data
+        self.assertTrue(all(e['action'] == 'TENANT_STATUS_CHANGED' for e in entries))
+
+    def test_requires_platform_admin(self):
+        self.client.credentials(**ADMIN_HEADERS)
+        response = self.client.get('/api/admin-logs/')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_actor_email_is_captured_when_gateway_sends_it(self):
+        self.client.credentials(
+            HTTP_X_USER_ID='platform-admin-test', HTTP_X_USER_ROLES='PLATFORM_ADMIN',
+            HTTP_X_USER_EMAIL='admin@platform.example',
+        )
+        self.client.patch(f'/api/tenants/{self.tenant.id}/status/', {'status': TenantStatus.INACTIVE}, format='json')
+        log = AdminActionLog.objects.get(target_tenant_id=self.tenant.id, action='TENANT_STATUS_CHANGED')
+        self.assertEqual(log.actor_email, 'admin@platform.example')
+
+
+class MyFunctionalServicesEndpointTests(APITestCase):
+    """
+    GET /api/tenants/functional-services/mine/ — libre-service pour tout
+    utilisateur tenant-scope authentifié (Cycle de vie du tenant, Phase 2 :
+    la case "Pharmacie désactivée" doit pouvoir être reflétée par le
+    frontend hospitalier lui-même, pas seulement bloquée côté backend).
+    """
+
+    def setUp(self):
+        self.tenant = _make_tenant(identifier='mine-fs')
+        self.other_tenant = _make_tenant(identifier='mine-fs-other', name='Autre')
+        _make_functional_service('PHARMACIE', 'Pharmacie')
+
+    def test_tenant_scoped_admin_sees_own_configuration(self):
+        TenantFunctionalService.objects.create(tenant=self.tenant, service_id='PHARMACIE', enabled=False)
+        self.client.credentials(HTTP_X_USER_ID='u1', HTTP_X_USER_ROLES='Admin', HTTP_X_TENANT_ID=str(self.tenant.id))
+        response = self.client.get('/api/tenants/functional-services/mine/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        by_code = {item['code']: item['enabled'] for item in response.data}
+        self.assertFalse(by_code['PHARMACIE'])
+
+    def test_never_leaks_another_tenants_configuration(self):
+        TenantFunctionalService.objects.create(tenant=self.tenant, service_id='PHARMACIE', enabled=False)
+        TenantFunctionalService.objects.create(tenant=self.other_tenant, service_id='PHARMACIE', enabled=True)
+        self.client.credentials(HTTP_X_USER_ID='u1', HTTP_X_USER_ROLES='Admin', HTTP_X_TENANT_ID=str(self.tenant.id))
+        response = self.client.get('/api/tenants/functional-services/mine/')
+        by_code = {item['code']: item['enabled'] for item in response.data}
+        self.assertFalse(by_code['PHARMACIE'])  # jamais la config de l'autre tenant (True)
+
+    def test_platform_admin_without_tenant_gets_404(self):
+        self.client.credentials(HTTP_X_USER_ID='pa', HTTP_X_USER_ROLES='PLATFORM_ADMIN')
+        response = self.client.get('/api/tenants/functional-services/mine/')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_unassigned_pool_user_without_tenant_gets_404(self):
+        self.client.credentials(HTTP_X_USER_ID='legacy', HTTP_X_USER_ROLES='Admin')
+        response = self.client.get('/api/tenants/functional-services/mine/')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_anonymous_is_rejected(self):
+        response = self.client.get('/api/tenants/functional-services/mine/')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_cannot_be_used_to_query_an_arbitrary_tenant_via_query_param(self):
+        """Aucun paramètre ne doit permettre de contourner X-Tenant-ID pour lire un autre tenant."""
+        TenantFunctionalService.objects.create(tenant=self.other_tenant, service_id='PHARMACIE', enabled=False)
+        self.client.credentials(HTTP_X_USER_ID='u1', HTTP_X_USER_ROLES='Admin', HTTP_X_TENANT_ID=str(self.tenant.id))
+        response = self.client.get(f'/api/tenants/functional-services/mine/?tenant={self.other_tenant.id}')
+        by_code = {item['code']: item['enabled'] for item in response.data}
+        self.assertTrue(by_code['PHARMACIE'])  # état par défaut de self.tenant, pas celui (désactivé) de l'autre
+
+
+class FunctionalServiceCacheInvalidationWiringTests(APITestCase):
+    """
+    Cycle de vie du tenant, Phase 3 : `toggle`/`bulk-set` doivent pousser
+    une invalidation vers chaque service consommateur — mockée ici pour
+    vérifier le CONTRAT (arguments, jamais bloquant) indépendamment de la
+    disponibilité réelle de service-personnel/Medical-Monitoring (déjà
+    couverte, en conditions réelles, par les tests existants
+    `test_toggle_single_service`/`test_bulk_set_services`, qui continuent
+    de fonctionner sans mock puisque `invalidate_functional_service_cache`
+    est intrinsèquement best-effort).
+    """
+
+    def setUp(self):
+        self.client.credentials(**PLATFORM_ADMIN_HEADERS)
+        self.tenant = _make_tenant(identifier='cache-invalidation-wiring')
+        _make_functional_service('PHARMACIE', 'Pharmacie')
+        _make_functional_service('CAISSE', 'Caisse', display_order=50)
+
+    def test_toggle_invalidates_the_cache_for_the_touched_tenant_and_code(self):
+        with patch('tenants.views.invalidate_functional_service_cache') as mock_invalidate:
+            response = self.client.patch(
+                f'/api/tenants/{self.tenant.id}/functional-services/PHARMACIE/', {'enabled': False}, format='json',
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_invalidate.assert_called_once_with(self.tenant.id, 'PHARMACIE')
+
+    def test_bulk_set_invalidates_the_cache_for_every_touched_code(self):
+        with patch('tenants.views.invalidate_functional_service_cache') as mock_invalidate:
+            response = self.client.post(f'/api/tenants/{self.tenant.id}/functional-services/bulk/', {
+                'services': [{'code': 'PHARMACIE', 'enabled': False}, {'code': 'CAISSE', 'enabled': True}],
+            }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(mock_invalidate.call_count, 2)
+        mock_invalidate.assert_any_call(self.tenant.id, 'PHARMACIE')
+        mock_invalidate.assert_any_call(self.tenant.id, 'CAISSE')
+
+    def test_toggle_response_unaffected_when_consumer_is_unreachable(self):
+        """Best-effort : un consommateur injoignable ne doit JAMAIS faire échouer la requête principale."""
+        with patch(
+            'tenants.provisioning.call_internal_service',
+            side_effect=InternalServiceCallError("service-personnel injoignable"),
+        ):
+            response = self.client.patch(
+                f'/api/tenants/{self.tenant.id}/functional-services/PHARMACIE/', {'enabled': False}, format='json',
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        by_code = {item['code']: item['enabled'] for item in response.data}
+        self.assertFalse(by_code['PHARMACIE'])  # l'écriture elle-même a bien réussi

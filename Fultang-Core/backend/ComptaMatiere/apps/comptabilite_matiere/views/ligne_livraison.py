@@ -1,9 +1,12 @@
 from rest_framework import viewsets
+from rest_framework.permissions import IsAuthenticated
+from core.permissions import HasFunctionalServiceEnabled
 from apps.comptabilite_matiere.models import LigneLivraison
 from apps.comptabilite_matiere.serializers import LigneLivraisonSerializer
 
 class LigneLivraisonViewSet(viewsets.ModelViewSet):
     """ViewSet for managing LigneLivraison objects."""
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_MATIERE')]
     queryset = LigneLivraison.objects.all()
     serializer_class = LigneLivraisonSerializer
     

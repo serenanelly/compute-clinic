@@ -40,15 +40,28 @@ autant PAS publique : elle exige le jeton de service interne partagé
 Gateway ↔ Tenant Service (IsInternalService, voir permissions.py),
 c'est-à-dire une preuve que l'appelant est bien la Gateway.
 """
+from django.conf import settings
 from django.contrib.auth.hashers import check_password
 from django.core.exceptions import ValidationError
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import PlatformAdmin, PlatformService, Tenant, TenantDatabase, TenantDatabaseStatus, TenantStatus
+from .internal_clients import AdminProvisioningError, create_first_admin
+from .emails import send_tenant_admin_welcome_email
+from .models import (
+    AdminAction,
+    FunctionalService,
+    PlatformAdmin,
+    PlatformService,
+    Tenant,
+    TenantDatabase,
+    TenantDatabaseStatus,
+    TenantStatus,
+)
 from .permissions import IsInternalService, IsPlatformAdmin
 from .provisioning import (
     ProvisioningOrchestrator,
@@ -56,20 +69,35 @@ from .provisioning import (
     TenantNotActiveForProvisioningError,
     TenantNotFoundForProvisioningError,
     UnknownServiceError,
+    invalidate_functional_service_cache,
 )
 from .serializers import (
+    AdminActionLogSerializer,
+    FunctionalServiceSerializer,
     PlatformServiceSerializer,
     TenantDatabaseResolutionSerializer,
     TenantDatabaseSerializer,
     TenantDatabaseStatusUpdateSerializer,
     TenantDatabaseUpdateSerializer,
+    TenantFunctionalServiceBulkSerializer,
+    TenantFunctionalServiceSerializer,
+    TenantFunctionalServiceToggleSerializer,
+    TenantProvisionAdminRequestSerializer,
     TenantProvisionRequestSerializer,
     TenantResolutionSerializer,
     TenantSerializer,
     TenantStatusUpdateSerializer,
     TenantUpdateSerializer,
 )
-from .services import PlatformServiceCatalog, TenantDatabaseService, TenantService
+from .services import (
+    AdminActionLogService,
+    ImmutableFunctionalServiceError,
+    PlatformServiceCatalog,
+    TenantDatabaseService,
+    TenantFunctionalServiceService,
+    TenantService,
+    UnknownFunctionalServiceError,
+)
 
 
 class TenantViewSet(mixins.CreateModelMixin,
@@ -92,6 +120,17 @@ class TenantViewSet(mixins.CreateModelMixin,
     def service(self) -> TenantService:
         return TenantService()
 
+    @property
+    def admin_action_log_service(self) -> AdminActionLogService:
+        return AdminActionLogService()
+
+    def _log(self, action_type: str, tenant: Tenant, description: str, **metadata):
+        """Raccourci pour journaliser une action de ce ViewSet (Logs d'administration, Phase 2)."""
+        self.admin_action_log_service.record(
+            actor=self.request.user, action=action_type, tenant=tenant,
+            description=description, metadata=metadata,
+        )
+
     def get_queryset(self):
         status_filter = self.request.query_params.get('status')
         return self.service.list_tenants(status=status_filter)
@@ -106,18 +145,45 @@ class TenantViewSet(mixins.CreateModelMixin,
         return TenantSerializer
 
     def perform_create(self, serializer):
+        data = serializer.validated_data
         tenant = self.service.create_tenant(
-            name=serializer.validated_data['name'],
-            identifier=serializer.validated_data['identifier'],
-            allow_clinical_agent_export=serializer.validated_data.get('allow_clinical_agent_export'),
+            name=data['name'],
+            identifier=data['identifier'],
+            allow_clinical_agent_export=data.get('allow_clinical_agent_export'),
+            address=data.get('address'),
+            phone=data.get('phone'),
+            email=data.get('email'),
+            logo_url=data.get('logo_url'),
         )
         serializer.instance = tenant
+        self._log(AdminAction.TENANT_CREATED, tenant, f"Établissement « {tenant.name} » créé.")
 
     def perform_update(self, serializer):
-        tenant = self.service.set_clinical_agent_export_authorization(
-            serializer.instance.id,
-            serializer.validated_data['allow_clinical_agent_export'],
-        )
+        """
+        PATCH/PUT /tenants/{id}/ — met à jour `allow_clinical_agent_export`
+        et/ou les champs de profil descriptifs, selon ce que le client a
+        effectivement envoyé (PATCH est partiel : `validated_data` ne
+        contient que les clés fournies).
+        """
+        data = dict(serializer.validated_data)
+        tenant = serializer.instance
+
+        if 'allow_clinical_agent_export' in data:
+            new_value = data.pop('allow_clinical_agent_export')
+            tenant = self.service.set_clinical_agent_export_authorization(tenant.id, new_value)
+            self._log(
+                AdminAction.TENANT_TECHNICAL_CONFIG_UPDATED, tenant,
+                f"Partage des données cliniques {'autorisé' if new_value else 'désactivé'}.",
+                allow_clinical_agent_export=new_value,
+            )
+        if data:
+            tenant = self.service.update_profile(tenant.id, **data)
+            self._log(
+                AdminAction.TENANT_PROFILE_UPDATED, tenant,
+                f"Informations générales modifiées ({', '.join(data.keys())}).",
+                fields=list(data.keys()),
+            )
+
         serializer.instance = tenant
 
     @action(detail=True, methods=['patch'], url_path='status')
@@ -133,6 +199,11 @@ class TenantViewSet(mixins.CreateModelMixin,
             tenant = self.service.activate_tenant(tenant.id)
         else:
             tenant = self.service.deactivate_tenant(tenant.id)
+
+        self._log(
+            AdminAction.TENANT_STATUS_CHANGED, tenant,
+            f"Statut changé en {new_status}.", status=new_status,
+        )
 
         return Response(TenantSerializer(tenant).data, status=status.HTTP_200_OK)
 
@@ -179,6 +250,12 @@ class TenantViewSet(mixins.CreateModelMixin,
                 {'detail': str(exc), 'service': exc.service_code}, status=status.HTTP_409_CONFLICT,
             )
 
+        self._log(
+            AdminAction.TENANT_PROVISIONED, tenant,
+            f"Provisioning déclenché pour {', '.join(service_codes)}.",
+            results={result.service_code: result.status for result in results},
+        )
+
         return Response(
             {
                 'tenant': str(tenant.id),
@@ -194,6 +271,78 @@ class TenantViewSet(mixins.CreateModelMixin,
             },
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=True, methods=['post'], url_path='provision-admin')
+    def provision_admin(self, request, id=None):
+        """
+        POST /tenants/{id}/provision-admin/ — Cycle de vie du tenant,
+        Phase 2 : crée le compte administrateur initial de l'établissement
+        et lui envoie son email d'accès.
+
+        Préalable : la base PERSONNEL du tenant doit être ACTIVE (le
+        compte administrateur vit dans cette base — voir
+        service-personnel/api/models.py::Admin) — 409 explicite sinon,
+        jamais une tentative de création dans le vide.
+
+        Toujours 200 si la requête elle-même est valide : le corps
+        détaille le résultat de CHAQUE sous-étape (`admin_created`,
+        `email_sent`) — un échec de l'une n'empêche jamais de rapporter
+        honnêtement l'état de l'autre (même principe que /provision/,
+        jamais un faux succès global).
+        """
+        tenant = self.get_object()
+
+        body_serializer = TenantProvisionAdminRequestSerializer(data=request.data)
+        body_serializer.is_valid(raise_exception=True)
+        payload = body_serializer.validated_data
+
+        personnel_db = TenantDatabaseService().get_for_tenant_and_service(tenant.id, 'PERSONNEL')
+        if personnel_db is None or personnel_db.status != TenantDatabaseStatus.ACTIVE:
+            return Response(
+                {'detail': "La base PERSONNEL de cet établissement n'est pas encore provisionnée (ACTIVE)."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        admin_created = False
+        admin_detail = None
+        email_sent = False
+        email_detail = None
+        admin_email = payload['email']
+
+        try:
+            result = create_first_admin(
+                tenant.id, nom=payload['nom'], prenom=payload.get('prenom', ''), email=admin_email,
+            )
+            admin_created = True
+            temporary_password = result.get('temporary_password')
+        except AdminProvisioningError as exc:
+            admin_detail = str(exc)
+            temporary_password = None
+
+        if admin_created and temporary_password:
+            establishment_url = settings.TENANT_ESTABLISHMENT_URL_TEMPLATE.format(identifier=tenant.identifier)
+            try:
+                send_tenant_admin_welcome_email(
+                    tenant_name=tenant.name, establishment_url=establishment_url,
+                    admin_email=admin_email, temporary_password=temporary_password,
+                )
+                email_sent = True
+            except Exception as exc:  # backend d'email potentiellement mal configuré (SMTP prod)
+                email_detail = str(exc)
+
+        self._log(
+            AdminAction.TENANT_ADMIN_PROVISIONED, tenant,
+            f"Compte administrateur provisionné pour {admin_email}.",
+            admin_created=admin_created, email_sent=email_sent,
+        )
+
+        return Response({
+            'tenant': str(tenant.id),
+            'admin_created': admin_created,
+            'admin_detail': admin_detail,
+            'email_sent': email_sent,
+            'email_detail': email_detail,
+        }, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'], url_path='resolve', permission_classes=[IsInternalService])
     def resolve(self, request):
@@ -227,6 +376,243 @@ class TenantViewSet(mixins.CreateModelMixin,
             return Response(status=status.HTTP_404_NOT_FOUND)
 
         return Response(TenantResolutionSerializer(tenant).data)
+
+    @property
+    def functional_service_service(self) -> TenantFunctionalServiceService:
+        return TenantFunctionalServiceService()
+
+    @action(
+        detail=False, methods=['get'], url_path='functional-services/resolve',
+        permission_classes=[IsInternalService],
+    )
+    def functional_services_resolve(self, request):
+        """
+        GET /tenants/functional-services/resolve/?tenant=<uuid>&code=<code>
+
+        Réservé à la communication interne (même jeton partagé que les
+        autres actions `resolve` de ce module) — utilisé par
+        service-personnel/Medical-Monitoring pour savoir si un service
+        fonctionnel est activé pour un tenant AVANT d'autoriser une
+        opération métier (Activation/désactivation de service — cycle de
+        vie du tenant, Phase 2, §12-15). Retourne `{"enabled": bool}` ;
+        404 si le tenant ou le code de service est inconnu — ne devine
+        jamais une valeur par défaut à ce niveau (c'est
+        `TenantFunctionalServiceService.list_for_tenant`, en aval, qui
+        porte la règle "absent = activé par défaut").
+        """
+        tenant_id = request.query_params.get('tenant')
+        code = request.query_params.get('code')
+        if not tenant_id or not code:
+            return Response(
+                {'detail': "Les paramètres 'tenant' et 'code' sont requis."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            tenant = self.service.get_tenant(tenant_id)
+        except (Tenant.DoesNotExist, ValueError, ValidationError):
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        entries = {item['code']: item['enabled'] for item in self.functional_service_service.list_for_tenant(tenant.id)}
+        if code not in entries:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        return Response({'enabled': entries[code]})
+
+    @action(
+        detail=False, methods=['get'], url_path='functional-services/mine',
+        permission_classes=[IsAuthenticated],
+    )
+    def my_functional_services(self, request):
+        """
+        GET /tenants/functional-services/mine/ — Cycle de vie du tenant,
+        Phase 2 : libre-service, pour n'importe quel utilisateur
+        AUTHENTIFIÉ (pas seulement PLATFORM_ADMIN) tenant-scope. Retourne
+        la configuration de SON PROPRE tenant (dérivé de `X-Tenant-ID`,
+        jamais d'un identifiant fourni par le client) — jamais celle d'un
+        autre tenant.
+
+        Sert par exemple à un administrateur d'établissement pour savoir,
+        depuis le frontend hospitalier, quels services fonctionnels sont
+        réellement disponibles pour lui (ex : ne pas proposer « Pharmacien »
+        dans un formulaire de création de personnel si PHARMACIE est
+        désactivé pour son établissement) — l'application réelle du
+        blocage reste toujours côté backend (voir
+        HasFunctionalServiceEnabled) ; ceci n'est qu'un affichage cohérent.
+
+        404 si l'appelant n'a aucun tenant (PLATFORM_ADMIN, ou compte du
+        pool non assigné) : il n'y a alors aucune configuration à montrer.
+        """
+        tenant_id = getattr(request.user, 'tenant_id', None)
+        if not tenant_id:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            tenant = self.service.get_tenant(tenant_id)
+        except (Tenant.DoesNotExist, ValueError, ValidationError):
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        data = self.functional_service_service.list_for_tenant(tenant.id)
+        return Response(TenantFunctionalServiceSerializer(data, many=True).data)
+
+    @action(detail=True, methods=['get'], url_path='functional-services')
+    def functional_services(self, request, id=None):
+        """
+        GET /tenants/{id}/functional-services/ — Tenant Configuration,
+        catégorie "Services".
+
+        Retourne CHAQUE service du catalogue produit (`FunctionalService`)
+        avec son état activé/désactivé pour ce tenant précis — jamais une
+        configuration partagée entre tenants (voir
+        `TenantFunctionalServiceService.list_for_tenant`).
+        """
+        tenant = self.get_object()
+        data = self.functional_service_service.list_for_tenant(tenant.id)
+        return Response(TenantFunctionalServiceSerializer(data, many=True).data)
+
+    @action(detail=True, methods=['post'], url_path='functional-services/bulk')
+    def bulk_set_functional_services(self, request, id=None):
+        """
+        POST /tenants/{id}/functional-services/bulk/ — Étape 3 du wizard
+        de création de tenant : enregistre en un seul appel l'état de
+        chaque service fonctionnel coché/décoché.
+
+        Corps attendu : `{"services": [{"code": "PHARMACIE", "enabled": true}, ...]}`.
+        400 si un code est absent du catalogue (aucune ligne écrite dans
+        ce cas — voir `TenantFunctionalServiceService.bulk_set`).
+        """
+        tenant = self.get_object()
+
+        body_serializer = TenantFunctionalServiceBulkSerializer(data=request.data)
+        body_serializer.is_valid(raise_exception=True)
+        pairs = [(item['code'], item['enabled']) for item in body_serializer.validated_data['services']]
+
+        try:
+            self.functional_service_service.bulk_set(tenant.id, pairs)
+        except UnknownFunctionalServiceError as exc:
+            return Response(
+                {'detail': str(exc), 'service': exc.code}, status=status.HTTP_400_BAD_REQUEST,
+            )
+        except ImmutableFunctionalServiceError as exc:
+            return Response(
+                {'detail': str(exc), 'service': exc.code}, status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        self._log(
+            AdminAction.FUNCTIONAL_SERVICES_BULK_SET, tenant,
+            f"{len(pairs)} service(s) configuré(s) en masse.",
+            services={code: enabled for code, enabled in pairs},
+        )
+
+        # Invalidation active du cache (Cycle de vie du tenant, Phase 3) —
+        # ne plus attendre le TTL des services consommateurs pour que le
+        # changement soit réellement pris en compte.
+        for code, _enabled in pairs:
+            invalidate_functional_service_cache(tenant.id, code)
+
+        data = self.functional_service_service.list_for_tenant(tenant.id)
+        return Response(TenantFunctionalServiceSerializer(data, many=True).data, status=status.HTTP_200_OK)
+
+    @action(
+        detail=True, methods=['patch'],
+        url_path=r'functional-services/(?P<service_code>[A-Z0-9_]+)',
+    )
+    def toggle_functional_service(self, request, id=None, service_code=None):
+        """
+        PATCH /tenants/{id}/functional-services/{service_code}/ — active
+        ou désactive UN service fonctionnel pour ce tenant (page
+        Établissement > Configuration > Services, hors wizard de création).
+        """
+        tenant = self.get_object()
+
+        body_serializer = TenantFunctionalServiceToggleSerializer(data=request.data)
+        body_serializer.is_valid(raise_exception=True)
+        enabled = body_serializer.validated_data['enabled']
+
+        try:
+            self.functional_service_service.set_service(tenant.id, service_code, enabled)
+        except UnknownFunctionalServiceError as exc:
+            return Response(
+                {'detail': str(exc), 'service': exc.code}, status=status.HTTP_400_BAD_REQUEST,
+            )
+        except ImmutableFunctionalServiceError as exc:
+            return Response(
+                {'detail': str(exc), 'service': exc.code}, status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        self._log(
+            AdminAction.FUNCTIONAL_SERVICE_TOGGLED, tenant,
+            f"Service {service_code} {'activé' if enabled else 'désactivé'}.",
+            service=service_code, enabled=enabled,
+        )
+
+        # Invalidation active du cache (Cycle de vie du tenant, Phase 3).
+        invalidate_functional_service_cache(tenant.id, service_code)
+
+        data = self.functional_service_service.list_for_tenant(tenant.id)
+        return Response(TenantFunctionalServiceSerializer(data, many=True).data, status=status.HTTP_200_OK)
+
+    @action(
+        detail=True, methods=['post', 'delete'], url_path='logo',
+        parser_classes=[MultiPartParser, FormParser],
+    )
+    def logo(self, request, id=None):
+        """
+        POST /tenants/{id}/logo/   (multipart, champ `file`) — remplace le logo.
+        DELETE /tenants/{id}/logo/ — supprime le logo.
+
+        Upload réel (Cycle de vie du tenant, Phase 2) : stockage disque
+        local (FileSystemStorage), aucun object storage — voir
+        Tenant.logo. Validation de type/taille faite ici plutôt que dans
+        un serializer dédié : c'est la seule route qui manipule ce champ.
+        """
+        tenant = self.get_object()
+
+        if request.method == 'DELETE':
+            tenant = self.service.remove_logo(tenant.id)
+            self._log(AdminAction.TENANT_LOGO_REMOVED, tenant, "Logo supprimé.")
+            return Response(TenantSerializer(tenant, context={'request': request}).data)
+
+        uploaded_file = request.FILES.get('file')
+        if uploaded_file is None:
+            return Response({'detail': "Le champ 'file' est requis."}, status=status.HTTP_400_BAD_REQUEST)
+        if not (uploaded_file.content_type or '').startswith('image/'):
+            return Response({'detail': "Le fichier doit être une image."}, status=status.HTTP_400_BAD_REQUEST)
+        max_bytes = 2 * 1024 * 1024
+        if uploaded_file.size > max_bytes:
+            return Response({'detail': "Le fichier dépasse la taille maximale (2 Mo)."}, status=status.HTTP_400_BAD_REQUEST)
+
+        tenant = self.service.set_logo(tenant.id, uploaded_file)
+        self._log(AdminAction.TENANT_LOGO_UPDATED, tenant, "Logo mis à jour.")
+        return Response(TenantSerializer(tenant, context={'request': request}).data)
+
+
+class FunctionalServiceViewSet(mixins.ListModelMixin,
+                                mixins.RetrieveModelMixin,
+                                viewsets.GenericViewSet):
+    """
+    Catalogue des services fonctionnels de FullTang (Tenant Configuration).
+
+    Endpoints exposés :
+        GET /api/functional-services/       → lister le catalogue
+        GET /api/functional-services/{code}/ → consulter un service
+
+    Lecture seule dans cette phase : le catalogue est seedé par migration
+    (`0009_seed_functional_services.py`) — voir `FunctionalService.__doc__`
+    pour la distinction avec `PlatformServiceViewSet` (microservices
+    techniques). Réservé au PLATFORM_ADMIN comme le reste du Tenant
+    Management.
+    """
+
+    queryset = FunctionalService.objects.all()
+    serializer_class = FunctionalServiceSerializer
+    lookup_field = 'code'
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+
+    def get_queryset(self):
+        status_filter = self.request.query_params.get('status')
+        service = TenantFunctionalServiceService()
+        return service.list_catalog(status=status_filter)
 
 
 class PlatformServiceViewSet(mixins.CreateModelMixin,
@@ -451,3 +837,32 @@ class PlatformAdminAuthVerifyView(APIView):
             'nom': admin.nom,
             'prenom': admin.prenom,
         })
+
+
+class AdminActionLogViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    """
+    GET /api/admin-logs/ — Logs d'administration (cycle de vie complet du
+    tenant, Phase 2).
+
+    Lecture seule : ce journal n'est jamais modifié depuis l'API, chaque
+    ligne est écrite exclusivement par `TenantViewSet._log` (voir
+    services.py::AdminActionLogService). Filtrable par
+    ?tenant=<uuid>&actor=<texte>&action=<code>&date_from=<iso>&date_to=<iso>.
+    """
+
+    serializer_class = AdminActionLogSerializer
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+
+    @property
+    def service(self) -> AdminActionLogService:
+        return AdminActionLogService()
+
+    def get_queryset(self):
+        params = self.request.query_params
+        return self.service.list_logs(
+            tenant_id=params.get('tenant'),
+            actor=params.get('actor'),
+            action=params.get('action'),
+            date_from=params.get('date_from'),
+            date_to=params.get('date_to'),
+        )

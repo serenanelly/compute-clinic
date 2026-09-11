@@ -2,6 +2,8 @@
 ViewSet pour le modèle Rapport.
 """
 from rest_framework import viewsets, status
+from rest_framework.permissions import IsAuthenticated
+from core.permissions import HasFunctionalServiceEnabled
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from apps.comptabilite_matiere.models import Rapport
@@ -16,6 +18,7 @@ class RapportViewSet(viewsets.ModelViewSet):
     ViewSet pour les opérations CRUD sur Rapport.
     Fournit des actions personnalisées pour marquer comme lu et filtrer.
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_MATIERE')]
     queryset = Rapport.objects.all()
     serializer_class = RapportSerializer
     pagination_class = None  # Désactiver la pagination pour récupérer tous les rapports

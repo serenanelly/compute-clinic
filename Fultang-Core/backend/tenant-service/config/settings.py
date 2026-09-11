@@ -132,6 +132,20 @@ PROVISIONING_SERVICE_INFRASTRUCTURE_URL = os.environ.get(
 )
 PROVISIONING_TIMEOUT_SECONDS = int(os.environ.get('PROVISIONING_TIMEOUT_SECONDS', '30'))
 
+# Cycle de vie complet du tenant (Phase 2) : gabarit de l'URL réelle d'un
+# établissement, affichée dans le Tenant Management et envoyée dans
+# l'email d'accès. `{identifier}` est substitué par Tenant.identifier.
+# Convention de développement local : sous-domaine `*.localhost`, qui se
+# résout automatiquement vers 127.0.0.1 dans les navigateurs modernes —
+# aucune entrée /etc/hosts à créer, à la différence de la convention
+# `*.fulltang.com` déjà présente ailleurs dans le code (voir
+# api-gateway/app/config.py, Frontend/vite.config.js). En production,
+# ce gabarit est reconfiguré via la variable d'environnement, jamais en
+# dur dans le code.
+TENANT_ESTABLISHMENT_URL_TEMPLATE = os.environ.get(
+    'TENANT_ESTABLISHMENT_URL_TEMPLATE', 'http://{identifier}.localhost:5173',
+)
+
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
@@ -168,6 +182,33 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+
+# Fichiers médias (logo des établissements — Cycle de vie du tenant,
+# Phase 2). Aucun object storage (S3/MinIO) n'existe dans FullTang à ce
+# stade : stockage disque local classique, comme le fait déjà
+# Medical-Monitoring pour les photos patient (voir
+# Medical-Monitoring/backend/core/settings.py) — même mécanisme copié
+# tel quel, pas de nouvelle infrastructure introduite.
+MEDIA_URL = '/api/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+# Envoi d'email (compte administrateur du tenant — Phase 2). Aucun SMTP
+# n'est configuré nulle part dans FullTang à ce stade (audit complet du
+# dépôt, voir MULTITENANT_ARCHITECTURE.md) : backend console par défaut
+# en développement, le contenu de l'email est alors visible dans les
+# logs du conteneur — permet de vérifier honnêtement que l'envoi a bien
+# été déclenché sans prétendre disposer d'une vraie boîte mail. Une
+# variable d'environnement permet de brancher un vrai SMTP en production
+# sans changer le code.
+EMAIL_BACKEND = os.environ.get(
+    'EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend',
+)
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'no-reply@fultang.local')
+EMAIL_HOST = os.environ.get('EMAIL_HOST', '')
+EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '25'))
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
+EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'false').lower() == 'true'
 
 import sys
 if 'test' in sys.argv:

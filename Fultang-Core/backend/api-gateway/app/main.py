@@ -76,8 +76,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Shared HTTP client for proxying
-client = httpx.AsyncClient()
+# Shared HTTP client for proxying.
+#
+# Timeout explicite (httpx défaut = 5s sur les 4 phases connect/write/
+# read/pool si non précisé) : trop court pour certaines opérations
+# légitimement longues relayées telles quelles — notamment
+# POST /tenants/{id}/provision/ (Cycle de vie du tenant, Phase 2), qui
+# provisionne jusqu'à 5 bases de données PLATEFORME séquentiellement
+# (CREATE DATABASE + migrate par service) côté tenant-service avant de
+# répondre. Un timeout de connexion court (le service est soit joignable,
+# soit non, en quelques secondes) combiné à un timeout de lecture long
+# laisse le temps à ces opérations lentes de se terminer sans pénaliser
+# la détection rapide d'un service réellement injoignable.
+client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=120.0))
 
 # Résolution hostname → tenant (Phase 2.1). Le Tenant Service reste la
 # seule source de vérité — voir app/tenant/resolver.py.
@@ -504,6 +515,16 @@ async def root_hub():
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _tenant_suspended_detail() -> dict:
+    """
+    Corps structuré d'une suspension de tenant (Cycle de vie du tenant,
+    Phase 3) — `error_type` permet au frontend de distinguer ce cas d'un
+    403 générique (permission métier insuffisante) sans jamais toucher à
+    la gestion existante des 403 "classiques", inchangée par cette phase.
+    """
+    return {"error_type": "TENANT_SUSPENDED", "message": "Vous avez été suspendu."}
+
+
 def _decode_bearer_token(request: Request) -> Optional[dict]:
     """Décode le JWT porté par le header Authorization, s'il y en a un de valide."""
     auth_header = request.headers.get("Authorization", "")
@@ -602,7 +623,7 @@ async def login(credentials: LoginCredentials, request: Request):
     except TenantNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except TenantInactiveError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
+        raise HTTPException(status_code=403, detail=_tenant_suspended_detail())
     except TenantResolutionError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
@@ -814,7 +835,7 @@ async def proxy_catch_all(path: str, request: Request):
     except TenantNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except TenantInactiveError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
+        raise HTTPException(status_code=403, detail=_tenant_suspended_detail())
     except TenantResolutionError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
@@ -831,6 +852,27 @@ async def proxy_catch_all(path: str, request: Request):
                 status_code=403,
                 detail="Ce token n'est pas valide pour l'établissement demandé.",
             )
+
+    # --- Suspension d'un tenant — vérifiée même hors convention hostname
+    # (Cycle de vie du tenant, Phase 3) -----------------------------------
+    # `tenant_context` n'est renseigné QUE si le hostname suit la
+    # convention `<identifier>.<root_domain>` — en développement local
+    # (hostname `localhost`), `tenant_context` est `None` et le contrôle
+    # de statut ci-dessus (fait par `resolve()`) n'a jamais lieu. Un JWT
+    # émis AVANT la suspension du tenant qu'il porte resterait alors
+    # valide indéfiniment, puisqu'un JWT est stateless : rien ne le
+    # révoque automatiquement. On revérifie donc ici le statut ACTUEL du
+    # tenant nommé dans le token lui-même, chaque fois que la résolution
+    # hostname n'a rien tranché — jamais un second appel quand
+    # `tenant_context` existe déjà (son statut ACTIVE est garanti par
+    # construction, voir TenantContext.__doc__).
+    if tenant_context is None and user_payload is not None and user_payload.get("tenant_id"):
+        try:
+            live_status = await tenant_resolver.get_tenant_status(user_payload["tenant_id"])
+        except TenantResolutionError as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+        if live_status != "ACTIVE":
+            raise HTTPException(status_code=403, detail=_tenant_suspended_detail())
 
     target_url = None
 

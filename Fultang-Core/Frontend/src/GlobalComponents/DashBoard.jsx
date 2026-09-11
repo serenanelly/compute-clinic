@@ -1,16 +1,20 @@
 import { Link, Navigate, useLocation } from "react-router-dom";
 import PropTypes from "prop-types";
 import { AccessDenied } from "./AccessDenied.jsx";
+import { ServiceUnavailableScreen } from "./ServiceUnavailableScreen.jsx";
 import { useAuthentication } from "../Utils/Provider.jsx";
+import { useFunctionalServiceGate } from "../hooks/useFunctionalServiceGate.js";
 import { useEffect, useState } from "react";
 import { Loading } from "./Loading.jsx";
 import { ChevronDown, ChevronUp } from "lucide-react";
 
-export function DashBoard({ children, linkList, requiredRole }) {
+export function DashBoard({ children, linkList, requiredRole, requiredFunctionalService }) {
     DashBoard.propTypes = {
         children: PropTypes.node.isRequired,
         linkList: PropTypes.array.isRequired,
-        requiredRole: PropTypes.string.isRequired
+        requiredRole: PropTypes.string.isRequired,
+        // Code FunctionalService (ex. "CAISSE") dont dépend cette page — optionnel.
+        requiredFunctionalService: PropTypes.string,
     }
 
     const location = useLocation();
@@ -23,6 +27,7 @@ export function DashBoard({ children, linkList, requiredRole }) {
     const { isAuthenticated, hasRole } = useAuthentication();
     const [expandedLinks, setExpandedLinks] = useState({});
     const [isNavigating, setIsNavigating] = useState(true);
+    const { checking: checkingService, blocked: serviceBlocked } = useFunctionalServiceGate(requiredFunctionalService);
 
     useEffect(() => {
         setIsNavigating(true);
@@ -129,6 +134,14 @@ export function DashBoard({ children, linkList, requiredRole }) {
 
     if (!hasRole(requiredRole)) {
         return <AccessDenied Role={requiredRole} />;
+    }
+
+    if (checkingService) {
+        return <Loading />;
+    }
+
+    if (serviceBlocked) {
+        return <ServiceUnavailableScreen />;
     }
 
     if (isNavigating) {

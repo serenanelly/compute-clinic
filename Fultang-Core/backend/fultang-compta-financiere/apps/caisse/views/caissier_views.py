@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+
+from config.permissions import HasFunctionalServiceEnabled
 
 from apps.caisse.models import Quittance
 from apps.caisse.serializers import QuittanceListSerializer
@@ -51,6 +54,7 @@ class CaissierViewSet(viewsets.ViewSet):
     GET  /api/caissier/{pk}/quittances/
     POST /api/caissier/{pk}/redirect-service/
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('CAISSE')]
 
     @action(detail=False, methods=['get'], url_path='patients-en-attente')
     def patients_en_attente(self, request):

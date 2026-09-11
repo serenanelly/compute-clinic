@@ -1103,17 +1103,523 @@ Un audit complet de tous les clients HTTP du frontend (au-delà des 3 déjà cor
 
 ---
 
-## 14. Configuration Tenant
+## 14. Configuration Tenant — Tenant Management & Configuration (Phase 9, ce chantier)
 
-| Déjà configurable | Pas encore configurable |
+### 14.1 AVANT
+
+Avant ce chantier : un tenant se créait avec `name`+`identifier` uniquement (+ `allow_clinical_agent_export`, optionnel, Phase Medical-Monitoring tenant-aware). Aucune information descriptive (adresse, contact), aucune notion de "service fonctionnel activé pour cet établissement" n'existait — seul `PlatformService` (catalogue des **microservices techniques**, utilisé pour le provisioning/routage) existait, ce qui n'est PAS la même chose (voir §14.2). Le Platform Admin frontend n'avait qu'un Dashboard (stats globales) — aucune page de liste des établissements, aucun formulaire de création, aucune configuration.
+
+| Déjà configurable (avant ce chantier) | Pas encore configurable |
 |---|---|
-| `identifier`, `name`, `status` (ACTIVE/INACTIVE) du tenant | Modules/fonctionnalités activés par tenant |
-| Domaine racine de résolution (`TENANT_ROOT_DOMAIN`, env var) | Formulaires/workflows personnalisés |
-| Jeton interne Gateway↔tenant-service (`TENANT_SERVICE_INTERNAL_TOKEN`, env var) | Feature flags |
-| — | Autorisation de transmission de données vers Clinical Agent (voir [§13](#13-medical-monitoring--clinical-agent)) |
-| — | Paramètres métier par établissement (facturation, langue, etc.) |
+| `identifier`, `name`, `status` (ACTIVE/INACTIVE) du tenant | Informations de profil (adresse, téléphone, email, logo) |
+| Autorisation de partage des données cliniques (`allow_clinical_agent_export`) | Services fonctionnels activés par tenant |
+| Domaine racine de résolution (`TENANT_ROOT_DOMAIN`, env var) | Formulaires/workflows personnalisés (hors périmètre de ce chantier) |
+| Jeton interne Gateway↔tenant-service (`TENANT_SERVICE_INTERNAL_TOKEN`, env var) | Feature flags (hors périmètre) |
 
-Toute configuration au-delà de `name`/`identifier`/`status` appartient à la **Phase 9 (Tenant Configuration)**, non commencée — le modèle `Tenant` a été conçu pour l'accueillir sans refonte (voir [§3.2](#32-modèle-tenant)).
+### 14.2 Distinction fondamentale — `PlatformService` vs `FunctionalService`
+
+**À NE JAMAIS CONFONDRE**, cette distinction structure tout ce chantier :
+
+| | `PlatformService` (existant, Phase 5) | `FunctionalService` (nouveau, ce chantier) |
+|---|---|---|
+| Représente | Un **microservice technique** de FullTang (PERSONNEL, MEDICAL, COMPTA, COMPTA_MATIERE, INFRASTRUCTURE) | Une **capacité produit** proposée par un établissement (Médecine générale, Pharmacie, Laboratoire...) |
+| Sert à | Provisioning (`TenantDatabase`), routage de bases | Sélection, par établissement, des fonctionnalités disponibles |
+| Granularité | 1 entrée = 1 microservice déployé séparément | 1 entrée = 1 capacité métier, plusieurs pouvant vivre dans le MÊME microservice (ex: Pharmacie et Laboratoire vivent toutes deux dans Medical-Monitoring) |
+| Catalogue actuel | 5 entrées (seed Phase 5) | 9 entrées (seed ce chantier, voir §14.4) |
+
+Le catalogue `FunctionalService` est dérivé du code EXISTANT (rôles service-personnel : Medecin/Infirmiere/Pharmacien/Laborantin/Caissier/Comptable ; apps métier de Medical-Monitoring/fultang-compta-financiere/ComptaMatiere/Gestion-Infrastructures) — pas une liste inventée.
+
+**Situation actuelle de `service-personnel`, non modifiée par ce chantier** : ce service permet encore aujourd'hui de créer/gérer librement des objets `Service` (services hospitaliers organisationnels, ex: "Cardiologie", propres à la base de chaque tenant — une notion complètement différente de `FunctionalService`). Cette situation est connue et **évoluera dans une phase ultérieure** vers : les services fonctionnels de FullTang définis uniquement dans le code produit, la couche de configuration des tenants servant seulement à les activer/désactiver — jamais à en créer de nouveaux. **Aucun refactoring de `service-personnel` n'a été fait dans ce chantier** (délibérément hors périmètre, voir mission §10).
+
+### 14.3 Modèles ajoutés (`tenant-service/tenants/models.py`)
+
+```python
+class Tenant(models.Model):
+    # ... champs existants (id, name, identifier, status, allow_clinical_agent_export, created_at) ...
+    address = models.TextField(blank=True, default='')
+    phone = models.CharField(max_length=30, blank=True, default='')
+    email = models.EmailField(blank=True, default='')
+    logo_url = models.URLField(blank=True, default='')  # référence, pas un upload de fichier
+
+class FunctionalService(models.Model):
+    code = models.CharField(max_length=50, primary_key=True)  # ex: PHARMACIE
+    name = models.CharField(max_length=100)
+    status = models.CharField(choices=FunctionalServiceStatus.choices, default=ACTIVE)
+    display_order = models.PositiveIntegerField(default=0)  # ordre d'affichage IHM
+    created_at = models.DateTimeField(auto_now_add=True)
+
+class TenantFunctionalService(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    tenant = models.ForeignKey(Tenant, on_delete=CASCADE, related_name='functional_services')
+    service = models.ForeignKey(FunctionalService, on_delete=PROTECT, related_name='tenant_configs')
+    enabled = models.BooleanField(default=True)
+    created_at / updated_at
+    class Meta:
+        constraints = [UniqueConstraint(fields=['tenant', 'service'], name='tenant_functional_service_unique_tenant_service')]
+```
+
+**Sémantique de l'absence de ligne** : un (tenant, service) sans ligne `TenantFunctionalService` explicite est traité comme **activé par défaut** (`enabled=True`) par la couche service (`TenantFunctionalServiceService.list_for_tenant`) — un tenant n'a pas besoin qu'on lui crée 9 lignes pour hériter d'un comportement raisonnable. Le wizard de création en crée néanmoins une ligne complète et explicite dès la création (traçabilité), via l'endpoint bulk.
+
+**Isolation stricte** : `UniqueConstraint(tenant, service)` + `tenant` en `ForeignKey(CASCADE)` — aucune configuration n'est jamais partagée entre deux tenants, vérifié par test (`TenantFunctionalServiceServiceTests::test_configuration_is_isolated_between_tenants` et son équivalent HTTP).
+
+### 14.4 Migrations
+
+| Migration | Contenu |
+|---|---|
+| `0008_functionalservice_tenant_address_tenant_email_and_more.py` | `AddField` (address/phone/email/logo_url sur Tenant, tous `blank=True, default=''` — aucune perte de données, tenants existants héritent de chaînes vides), `CreateModel` (FunctionalService, TenantFunctionalService) |
+| `0009_seed_functional_services.py` | Seed des 9 services fonctionnels (données, réversible) : MEDECINE_GENERALE(10), SOINS_INFIRMIERS(20), PHARMACIE(30), LABORATOIRE(40), CAISSE(50, "Caisse / Encaissement"), COMPTA_FINANCIERE(60), COMPTA_MATIERE(70), GESTION_PERSONNEL(80), GESTION_INFRASTRUCTURES(90) — ordre = `display_order`, les plus centraux au parcours patient en premier |
+
+### 14.5 APIs (nouvelles et étendues)
+
+| Méthode | URL | Rôle autorisé | Payload | Réponse | Erreurs | Scope |
+|---|---|---|---|---|---|---|
+| `POST` | `/tenants/` (existant, étendu) | PLATFORM_ADMIN | `{name, identifier, address?, phone?, email?, logo_url?, allow_clinical_agent_export?}` | Tenant créé (201) | 400 si `name`/`identifier` manquant ou `identifier` déjà pris | Plateforme |
+| `PATCH` | `/tenants/{id}/` (existant, étendu) | PLATFORM_ADMIN | Tout sous-ensemble de `{allow_clinical_agent_export, address, phone, email, logo_url}` (partiel) | Tenant à jour (200) | 404 tenant inconnu | Plateforme |
+| `POST` | `/tenants/{id}/provision/` (existant, inchangé) | PLATFORM_ADMIN | `{services: [codes PlatformService]}` | Résultat par service (200) | 404/409/400 sur demande invalide | Plateforme |
+| `GET` | `/functional-services/` (nouveau) | PLATFORM_ADMIN | — | Catalogue complet, ordonné (200) | — | Plateforme |
+| `GET` | `/tenants/{id}/functional-services/` (nouveau) | PLATFORM_ADMIN | — | Catalogue fusionné avec la config du tenant (200) | 404 tenant inconnu | **Scopé au tenant `{id}`** |
+| `POST` | `/tenants/{id}/functional-services/bulk/` (nouveau) | PLATFORM_ADMIN | `{services: [{code, enabled}, ...]}` | Config complète à jour (200) | 400 si un code inconnu (rien n'est écrit — tout ou rien) | **Scopé au tenant `{id}`** |
+| `PATCH` | `/tenants/{id}/functional-services/{code}/` (nouveau) | PLATFORM_ADMIN | `{enabled: bool}` | Config complète à jour (200) | 400 si `code` inconnu | **Scopé au tenant `{id}`** |
+
+Toutes réservées `IsPlatformAdmin` (même mécanisme que le reste du Tenant Management, aucun nouveau système d'autorisation). Aucune route Gateway nouvelle : le préfixe `/tenants/**` proxyait déjà tout vers ce service (vérifié en conditions réelles, voir §14.7).
+
+### 14.6 "Nombre de pools" — investigation et décision explicite
+
+Investigation demandée par la mission avant d'exposer un contrôle : inspection de `pool_registry.py` (service-personnel/Medical-Monitoring/les 3 services Phase 8 finalisation) et de `TenantDatabase`. Constat : le "pool" de connexions est en réalité `CONN_MAX_AGE` (voir §9.2, docstring de `pool_registry.py`, honnêtement documenté comme n'étant pas un vrai pool multi-connexions), configuré par la variable d'environnement **globale** `TENANT_DB_CONN_MAX_AGE` — identique pour tous les tenants d'un même service, jamais lue depuis `TenantDatabase` ni depuis aucune configuration par tenant. Le docstring du module le dit déjà explicitement : *"Point d'extension pour une configuration PAR TENANT dans une phase ultérieure : il suffirait de lire une valeur optionnelle sur la réponse du Registry ici, sans toucher au reste du mécanisme — pas construit maintenant."*
+
+**Décision : ce paramètre n'est PAS exposé dans le wizard.** Afficher un contrôle sans effet backend réel serait trompeur (règle explicite de la mission : "une configuration affichée dans l'interface doit toujours avoir un effet réel"). Ce qui serait nécessaire pour le rendre réellement configurable, si une future phase le souhaite :
+1. Ajouter un champ optionnel à `TenantDatabase` (ex: `conn_max_age_seconds`, nullable) ;
+2. L'exposer en lecture dans `TenantDatabaseResolutionSerializer` ;
+3. Faire lire cette valeur par `_build_connection_settings()` de chaque service (fallback sur `settings.TENANT_DB_CONN_MAX_AGE` si absente) ;
+4. L'exposer en écriture via `TenantDatabaseUpdateSerializer`.
+Aucune de ces 4 étapes n'existe aujourd'hui — non implémenté, documenté honnêtement plutôt que masqué.
+
+### 14.7 Vérification en conditions réelles
+
+Testé via le Gateway réel (`http://localhost:8080`), avec un vrai JWT PLATFORM_ADMIN : création d'un tenant avec profil complet, listing du catalogue de services fonctionnels pour ce nouveau tenant (tous activés par défaut, confirmé), désactivation en masse de 2 services (`bulk/`), réactivation d'un seul via `PATCH .../{code}/`, et rejet propre (400) d'un code de service inexistant — tous confirmés avec les payloads/réponses exacts documentés en §14.5.
+
+### 14.8 Frontend — architecture extensible
+
+`Fultang-Core/Frontend/src/Pages/PlatformAdmin/` : le Dashboard existant (`PlatformAdminDashboard.jsx`) est conservé tel quel (vue globale de la plateforme), seul ajout : un lien "Voir tous les établissements →" vers la nouvelle page liste — aucune restructuration, aucune action par-tenant ajoutée au Dashboard (conforme à la consigne : le Dashboard reste la vue globale, la gestion détaillée vit ailleurs).
+
+**Fichiers créés** :
+- `Establishments/EstablishmentsListPage.jsx` — liste des tenants, recherche client (nom/identifiant), badges de statut, lien vers le détail, CTA "Créer un tenant".
+- `Establishments/EstablishmentDetailPage.jsx` — en-tête tenant, "Informations générales" (name/identifier en lecture seule, address/phone/email/logo_url éditables via `updateTenant`), "Configuration technique" (case à cocher `allow_clinical_agent_export`, mise à jour optimiste avec retour arrière si échec), section "Configuration de l'établissement" pilotée par le registre de catégories.
+- `Establishments/ServicesConfigSection.jsx` — enveloppe `ServicesChecklist` pour la page de détail ; chaque bascule appelle immédiatement `toggleTenantFunctionalService` (contrairement au wizard, qui regroupe tout en un seul appel `bulk` à la fin).
+- `Establishments/configCategories.js` — **le registre d'extensibilité** : tableau `{key, label, description, icon, Component}`, une seule entrée aujourd'hui ("services"). Ajouter une future catégorie (workflows, formulaires, règles métier, paramètres UX...) consiste à ajouter une entrée ici — `EstablishmentDetailPage.jsx` n'a besoin d'aucune autre modification.
+- `CreateTenant/CreateTenantWizard.jsx` — conteneur du wizard, state unique pour les 3 étapes (aucune perte de saisie en cas de retour arrière), orchestration `createTenant → updateTenant → provisionTenant → bulkSetTenantFunctionalServices`, gestion explicite de l'état "création partiellement incomplète" (bannière d'avertissement si une étape après la création du tenant échoue), confirmation avant abandon (`window.confirm` si des données ont été saisies).
+- `CreateTenant/ProgressSteps.jsx`, `Step1BasicInfo.jsx` (auto-génération de l'identifiant depuis le nom avec dérogation manuelle, validation regex live du format slug, rendu des erreurs de champ backend), `Step2TechnicalConfig.jsx` (vraie case à cocher, libellé "Autoriser le partage des données cliniques" sans jamais mentionner Clinical Agent, aucun contrôle "nombre de pools"), `Step3ServicesConfig.jsx`, `ServicesChecklist.jsx` (partagé avec `EstablishmentDetailPage`, vraies cases à cocher, liste plate ordonnée par `display_order`, point d'extension documenté pour un futur regroupement), `ProvisioningResultsSummary.jsx` (résultat explicite par service ACTIVE/FAILED/autre, jamais un message générique).
+
+**Fichiers modifiés** : `src/services/platformAdminApi.js` (+8 fonctions : `createTenant`, `getTenant`, `updateTenant`, `provisionTenant`, `getFunctionalServiceCatalog`, `getTenantFunctionalServices`, `bulkSetTenantFunctionalServices`, `toggleTenantFunctionalService` — même style que les 2 fonctions existantes) ; `src/Router/appRouterPaths.js` (+3 routes) ; `src/Router/AppRouter.jsx` (+3 imports lazy nommés, vérifiés correspondre exactement aux exports des nouveaux fichiers) ; `src/Pages/PlatformAdmin/platformAdminNavLink.js` (+"Établissements", +"Créer un tenant") ; `src/Pages/PlatformAdmin/PlatformAdminDashboard.jsx` (ajout minimal, voir ci-dessus).
+
+**Vérification** : `npm run build` propre ; `eslint` sur tous les fichiers créés/modifiés : 6 erreurs préexistantes détectées dans `AppRouter.jsx`/`appRouterPaths.js` (imports lazy inutilisés et clés dupliquées déjà présents avant ce chantier), confirmées non liées à ce travail via `git diff` (aucune ligne concernée n'apparaît dans le diff) — zéro nouvelle erreur introduite. Routes vérifiées servies (200, fallback SPA) en conditions réelles sur le serveur de dev déjà actif (`localhost:5173`).
+
+### 14.9 Phase 2 — Cycle de vie complet du tenant et configuration effective
+
+#### AVANT
+
+Après §14.1-14.8 : un tenant se créait, se provisionnait (bases de données) et pouvait recevoir une configuration (services, partage clinique) — mais rien de tout cela n'aboutissait à un établissement RÉELLEMENT utilisable : aucun compte administrateur, aucune URL fonctionnelle, aucune application réelle de l'activation/désactivation d'un service (uniquement du CRUD dans `tenant-service`, jamais lu ailleurs), et aucune journalisation des actions du PlatformAdmin.
+
+#### PROBLÈME
+
+Le cycle "créer un tenant → l'établissement est opérationnel" s'arrêtait après la création des bases de données. Un service désactivé pour un tenant restait accessible via l'API métier (seule l'IHM le masquait, jamais vérifié côté backend) — violation directe de l'exigence "le backend doit bloquer, jamais seulement le frontend".
+
+#### MODIFICATION
+
+**1. Compte administrateur initial (`tenant-service` ↔ `service-personnel`)**
+
+Nouveau endpoint interne symétrique à `POST /api/internal/provision-database/` (Phase 7) :
+
+| Élément | Détail |
+|---|---|
+| `POST /api/internal/create-first-admin/` (service-personnel) | `IsInternalService` (même jeton partagé). Payload `{tenant_id, nom, prenom?, email}`. Établit le Tenant Context (`set_tenant_context`) puis crée un `Admin` ordinaire — mot de passe temporaire généré par `generate_temporary_password()` (extrait de la logique déjà existante dans `reset_password`, pas un nouveau mécanisme), hashé (`make_password`). Retourne `{id, email, temporary_password}`. 409 si l'email existe déjà pour ce tenant. |
+| `tenants/internal_clients.py` (nouveau, tenant-service) | Factorise l'appel HTTP interne déjà utilisé par `provisioning.py` (`_call_physical_provisioning`, refactoré pour le réutiliser) — `call_internal_service()` générique + `create_first_admin()` spécifique. |
+| `POST /tenants/{id}/provision-admin/` (tenant-service, `IsPlatformAdmin`) | Payload `{nom, prenom?, email}`. Vérifie que `TenantDatabase` PERSONNEL est ACTIVE (409 sinon) → `create_first_admin()` → `send_tenant_admin_welcome_email()` → journalisation (`AdminActionLog`). Répond TOUJOURS 200 sur une requête valide, avec le détail PAR SOUS-ÉTAPE (`admin_created`, `admin_detail`, `email_sent`, `email_detail`) — jamais un succès global si l'une des deux a échoué (vérifié par test : email jamais envoyé si la création du compte a échoué). |
+
+Le compte créé est un `Admin` (`service-personnel`) ordinaire, scopé par `tenant_id` comme tout autre compte métier — il se connecte via le flux `/auth/login` **existant, inchangé**. Isolation vérifiée par test (`test_admin_is_correctly_associated_with_its_tenant_never_cross_tenant`) : même email dans deux tenants ⇒ deux comptes distincts.
+
+**2. Email d'accès (`tenants/emails.py`, nouveau)**
+
+Aucune infrastructure d'email n'existait nulle part dans FullTang (audit complet : aucun `send_mail`, aucun SMTP configuré). `send_tenant_admin_welcome_email()` utilise l'API Django standard (`django.core.mail.send_mail`), backée par `EMAIL_BACKEND` — `django.core.mail.backends.console.EmailBackend` en développement (le contenu apparaît dans les logs du conteneur, vérifié en conditions réelles), configurable vers un vrai SMTP en production via variables d'environnement (`EMAIL_HOST`, `EMAIL_HOST_USER`, etc., voir `config/settings.py`) sans changement de code. Contenu : URL de l'établissement, email + mot de passe temporaire, renvoi vers le flux "mot de passe oublié" existant pour le changer — aucun nouveau mécanisme d'authentification.
+
+**3. URL réelle de l'établissement**
+
+La résolution hostname → tenant était déjà entièrement câblée (Gateway, `TenantResolver`, JWT cross-check — voir §5/§6) mais RIEN ne mappait `<identifier>.fulltang.com` vers l'environnement Docker local (pas de nginx/Traefik). Décision : basculer la convention de développement sur `*.localhost`, qui se résout automatiquement vers `127.0.0.1` dans les navigateurs modernes — zéro entrée `/etc/hosts` à créer (`*.fulltang.com` reste utilisable pour un environnement de démo plus proche de la production, via les mêmes variables).
+
+| Fichier | Changement |
+|---|---|
+| `backend/docker-compose.yml` | `api-gateway` : `TENANT_ROOT_DOMAIN=${TENANT_ROOT_DOMAIN:-localhost}` |
+| `Frontend/.env` | `VITE_TENANT_ROOT_DOMAIN=localhost` |
+| `Frontend/vite.config.js` | `allowedHosts` : ajout de `.localhost` (les deux blocs `server`/`preview`) |
+| `tenant-service/config/settings.py` | `TENANT_ESTABLISHMENT_URL_TEMPLATE` (env, défaut `"http://{identifier}.localhost:5173"`) |
+| `tenant-service/tenants/serializers.py` | `TenantSerializer.establishment_url` (SerializerMethodField, lecture seule, présent sur CHAQUE réponse Tenant) |
+
+Vérifié en conditions réelles (voir Tests ci-dessous) : un compte admin fraîchement créé se connecte avec succès via `POST /auth/login` avec `Host: <identifier>.localhost`, reçoit un JWT contenant le bon `tenant_id`.
+
+**4. Activation/désactivation de service — application réelle et générique**
+
+Avant ce chantier, `TenantFunctionalService` était du pur CRUD, jamais lu par aucun autre service (`grep` confirmé). Nouveau mécanisme générique, dupliqué dans chaque microservice consommateur (même principe déjà assumé pour `registry_client.py`/Phase 6 — services déployés séparément) :
+
+| Élément | Détail |
+|---|---|
+| `GET /tenants/functional-services/resolve/?tenant=&code=` (tenant-service, `IsInternalService`) | `{"enabled": bool}`. 404 si tenant ou code inconnu. |
+| `tenant_routing/functional_service_client.py` (nouveau, dupliqué dans `service-personnel` ET `Medical-Monitoring`) | Cache TTL en mémoire (`FUNCTIONAL_SERVICE_CACHE_TTL_SECONDS`, défaut 60s — volontairement plus court que le cache de résolution de base, 300s : une désactivation doit se refléter vite), même forme que `TenantDatabaseCache` (dégradation gracieuse si le Registry est momentanément injoignable et qu'une entrée existe déjà ; refus explicite sinon — jamais un accès autorisé par défaut faute de pouvoir vérifier). |
+| `permissions.py::HasFunctionalServiceEnabled` (nouveau, dupliqué dans les 2 services) | Permission DRF générique, `.for_service(code)` — factory paramétrée, UN seul mécanisme réutilisable pour n'importe quel service du catalogue. `tenant_id=None` (pool non assigné) ⇒ toujours autorisé (aucune configuration de service fonctionnel ne s'y applique). |
+| `service-personnel/api/views.py::POSTE_TO_FUNCTIONAL_SERVICE` | Table de correspondance `poste → code FunctionalService` (`pharmacien→PHARMACIE`, `laborantin→LABORATOIRE`, `infirmier→SOINS_INFIRMIERS`) — ajouter un poste au contrôle = une ligne dans cette table, jamais une règle spéciale par vue. Appliquée dans `PharmacienViewSet` (`permission_classes`) ET dans `PersonnelViewSet.create` (contrôle explicite avant création, seul point d'entrée générique par `poste`). |
+| `Medical-Monitoring/medical_workflow/views.py` | `HasFunctionalServiceEnabled.for_service('PHARMACIE')` sur `DelivranceMedicamentViewSet`/`AnomaliePrescriptionViewSet` ; `'LABORATOIRE'` sur `PrelevementViewSet`/`ValeurCritiqueViewSet` ; `'MEDECINE_GENERALE'` sur `ConsultationViewSet` (démonstration de généricité, non testée en profondeur — non requis par la mission pour ce service). |
+
+Bug annexe corrigé (bloquait le test bout-en-bout imposé) : `Frontend/src/services/prescriptionsApi.js` ciblait `/prescriptions-medicaments`, une route inexistante côté backend (la vraie route Medical-Monitoring est `/prescriptions`).
+
+**5. Fiche technique**
+
+Aucun nouvel endpoint : `GET /tenant-databases/?tenant=<id>` existait déjà (Phase 5) — seulement consommé pour la première fois côté frontend, en n'affichant que `service`/`status`/`database_name`/`updated_at` (jamais `host`/`port`/`secret_reference`, conforme à l'exigence "aucune information technique sensible").
+
+**6. Logo — upload réel**
+
+`Tenant.logo` (`ImageField`, `upload_to='tenants/logos/'`) ajouté à côté du `logo_url` existant (conservé comme repli pour une URL externe manuelle). `MEDIA_ROOT`/`MEDIA_URL` (stockage disque local — copié tel quel du seul précédent existant dans FullTang, `Medical-Monitoring/backend/patient/models/patient.py::photo` — aucun object storage S3/MinIO nulle part dans le dépôt). `MEDIA_URL = '/api/media/'` délibérément (et non `/media/`) : la Gateway reconstruit `/tenants/<sub>` → `/api/<sub>`, faire coïncider les deux évite un préfixe cassé. `POST`/`DELETE /tenants/{id}/logo/` (multipart, validation type/taille 2 Mo côté serveur — jamais uniquement côté client). `TenantSerializer.logo_display_url` : fichier uploadé prioritaire, sinon repli sur `logo_url` externe.
+
+**7. Logs d'administration (`AdminActionLog`, nouveau modèle, `tenant-service`)**
+
+| Élément | Détail |
+|---|---|
+| Modèle | `actor_id`, `actor_email`, `action` (10 valeurs, `AdminAction.choices`), `target_tenant_id`/`target_tenant_identifier` (dupliqués à plat, pas de FK — un log doit rester lisible indépendamment du cycle de vie de sa cible), `description`, `metadata` (JSON, jamais de secret), `created_at`. |
+| Écriture | `AdminActionLogService.record(...)`, appelé explicitement depuis les 7 méthodes mutantes de `TenantViewSet` (créer, modifier profil, changer statut, provisionner, provisionner l'admin, bulk-set services, toggle service) — un seul point d'appel par action, jamais de signal/middleware générique (chaque action porte un contexte métier propre, ex: quel service a été basculé). |
+| Bug de plomberie corrigé | Le Gateway envoie déjà `X-User-Email` (`_build_user_headers`) mais `tenant-service/config/authentication.py::GatewayUser` ne le lisait pas — corrigé, les logs portent maintenant un email d'acteur réel, pas seulement un id opaque. |
+| Lecture | `GET /admin-logs/` (`IsPlatformAdmin`, lecture seule), filtrable `?tenant=&actor=&action=&date_from=&date_to=`. |
+
+**8. Partage clinique (`allow_clinical_agent_export`) — vérifié, aucun nouveau code**
+
+Investigation demandée par la mission : l'application réelle de ce champ **existait déjà**, contrairement à l'activation de service. `clinical-agent/main.py::verify_export_authorization()` (appelée avant chaque synchronisation, fail-closed : 403 si désactivé, 404 si tenant inconnu, 503 si Registry injoignable) — confirmé par lecture de code ET par un test A/B réel (voir Tests). Aucune modification de ce mécanisme, conformément à la consigne "ne pas créer un deuxième mécanisme".
+
+**9. Confirmation avant modification + notifications courtes (frontend)**
+
+`EstablishmentDetailPage.jsx`/`ServicesConfigSection.jsx` : la case "partage clinique" et la liste des services passent d'un enregistrement immédiat par bascule à un flux brouillon → "Enregistrer" (visible uniquement s'il y a un changement en attente) → `ConfirmationModal` (composant existant, jusqu'ici orphelin — première réutilisation) avec un résumé court → application groupée → notification via `useFeedback()` (`showSuccess`/`showError`, système déjà utilisé ailleurs dans FullTang, jamais un nouveau système visuel). Textes de roadmap supprimés de l'IHM (`Step2TechnicalConfig.jsx` : bloc "Autres paramètres techniques" ; `EstablishmentDetailPage.jsx` : "D'autres catégories apparaîtront ici.").
+
+**10. Nouvelle page "Logs" (frontend)**
+
+`Pages/PlatformAdmin/Logs/AdminLogsPage.jsx` — page dédiée, séparée du Dashboard (qui reste une vue globale), filtre par tenant/acteur/type d'action/date. Navigation : Dashboard → Établissements → Logs → Créer un tenant.
+
+#### APRÈS
+
+Le cycle complet fonctionne réellement : créer un tenant produit une URL qui résout, un compte administrateur qui se connecte, un email visible (dev) contenant les informations d'accès ; désactiver un service bloque réellement les opérations métier correspondantes côté backend (jamais seulement l'IHM) ; chaque action du PlatformAdmin est journalisée avec un acteur identifié.
+
+#### TESTS
+
+- `tenant-service` : 155/155 (126 précédents + 29 nouveaux — `TenantProvisionAdminEndpointTests`, `FunctionalServicesResolveInternalEndpointTests`, `TenantLogoUploadEndpointTests`, `AdminActionLogEndpointTests`, `EstablishmentUrlAndLogoDisplayTests`), incluant l'échec explicite jamais maquillé en succès (email jamais envoyé si le compte n'a pas été créé ; échec d'email reporté séparément d'une création réussie).
+- `service-personnel` : 68/68 (50 précédents + 18 nouveaux — `CreateFirstAdminEndpointTests` (dont un compte créé authentifiable réellement via `check_password`, et l'isolation inter-tenant sur email identique), `HasFunctionalServiceEnabledPermissionTests` (dont la propagation de `FunctionalServiceRegistryUnavailableError`, jamais un accès silencieusement autorisé), `FunctionalServiceEnforcementEndpointTests` (blocage réel de `PharmacienViewSet` et de la création générique via `poste`, isolation totale entre deux tenants).
+- `Medical-Monitoring` : 37 tests préexistants échouaient déjà AVANT ce chantier (bug de test — `setUp()` crée un `Patient` sans établir de Tenant Context, sans rapport avec ce travail) — confirmé identique par `git stash` avant/après, zéro régression introduite.
+- Vérification en conditions réelles (Gateway, vrai JWT PLATFORM_ADMIN) : création d'un tenant → provisioning PERSONNEL → `provision-admin` → email visible dans les logs du conteneur avec mot de passe temporaire → connexion réussie de ce compte via `Host: <identifier>.localhost` avec JWT `tenant_id` correct → désactivation de PHARMACIE → 403 réel sur `POST /personnel/personnel/` (poste pharmacien) ET sur `GET /personnel/pharmaciens/` → réactivation → 201 réel après expiration du cache TTL.
+- **Partage clinique — test A/B réel, bout en bout** : deux tenants créés (`clinical-test-a`, `allow_clinical_agent_export=true` ; `clinical-test-b`, `false` explicite), MEDICAL+PERSONNEL provisionnés pour les deux, un vrai `Patient`+`Visite` créé pour chacun via la Gateway (JWT admin tenant-scopé obtenu via le flux `provision-admin`), passage en statut `TERMINE` déclenchant le signal Django réel :
+  - Tenant A : `fultang-medical-backend` notifie `clinical-agent`, qui répond 200 et synchronise — confirmé dans `tampon_clinical_cases` (tables `visites_synced` et `cas_cliniques`, âge/sexe anonymisés présents).
+  - Tenant B : `fultang-medical-backend` loggue explicitement l'échec (`HTTP Error 403: Forbidden`), `clinical-agent` confirme le 403 — **aucune ligne** n'existe dans le buffer pour ce tenant.
+  - Confirmation déterministe complémentaire via l'appel direct `POST clinical-agent:9000/sync/visite/{id}` (jeton interne) : 200 pour A, 403 explicite (`"Ce tenant n'autorise pas l'export vers clinical-agent."`) pour B.
+  - Aucune régression, aucune donnée existante touchée, mécanisme fail-closed confirmé exactement comme conçu.
+
+---
+
+### 14.10 Phase 3 — Suspension effective du tenant, désactivation effective des services, double confirmation, invalidation active du cache
+
+#### AVANT
+
+Deux failles de sécurité concrètes, découvertes par un test réel en main (§14.9 n'avait livré que le CRUD et le blocage applicatif, jamais la garantie qu'une session déjà ouverte soit coupée) :
+
+1. **Suspension de tenant non vérifiée en dehors de la résolution par sous-domaine.** `TenantResolver.resolve()` (Gateway) ne vérifie `Tenant.status` que lorsque le hostname suit la convention `<identifier>.<root_domain>`. Sur un hostname hors convention (`localhost`, la convention de développement retenue en §14.9.3), `resolve()` retourne `None` sans jamais interroger `tenant-service` — un JWT émis AVANT une suspension continuait de fonctionner indéfiniment après, quel que soit le nouveau statut du tenant.
+2. **Désactivation d'un `FunctionalService` non appliquée immédiatement.** `HasFunctionalServiceEnabled` renvoyait `False` (403 — implique "le service existe mais vous n'y avez pas droit", contraire à l'exigence produit) et le cache TTL en mémoire (`FUNCTIONAL_SERVICE_CACHE_TTL_SECONDS`, 60s) n'était jamais invalidé activement : une désactivation pouvait rester sans effet réel jusqu'à 60 secondes (`FunctionalServiceCache.invalidate()` existait déjà mais n'était appelée que par les tests).
+3. Aucune double confirmation sur les actions critiques (suspension/réactivation de tenant : aucun contrôle n'existait même en une étape ; activation/désactivation de service : un seul pop-up de résumé existait).
+4. Aucun écran dédié frontend pour ces deux cas — une suspension ou un service désactivé seraient tombés dans la gestion d'erreur générique de chaque page (jamais dans le 403 historique `AccessDenied.jsx`, qui ne se déclenche que sur un contrôle de rôle côté client, mais rien de spécifique non plus).
+
+#### MODIFICATIONS
+
+**1. Gateway — vérification du statut à chaque requête, pas seulement à la résolution hostname**
+
+| Fichier | Changement |
+|---|---|
+| `app/tenant/resolver.py` | `TenantResolver.get_tenant_status(tenant_id)` (nouveau) : `GET /api/tenants/resolve/?id=<uuid>`, **sans cache** (même philosophie que `resolve()` — un aller-retour réseau par requête proxyée est déjà accepté dans ce projet). Retourne `None` si le tenant n'existe plus, lève `TenantResolutionError` (fail-closed) si `tenant-service` est injoignable ou répond de façon inattendue. |
+| `app/main.py::proxy_catch_all` | Après la vérification existante tenant-du-token vs tenant-de-l'hostname : SI `tenant_context` est `None` (hostname hors convention) ET que le JWT porte un `tenant_id`, appel à `get_tenant_status()` — 403 structuré si le statut n'est pas `ACTIVE`, 503 (jamais un accès silencieux) si `tenant-service` est injoignable. Si `tenant_context` n'est PAS `None`, aucun appel supplémentaire : son statut `ACTIVE` est déjà garanti par `resolve()`. |
+| `app/main.py` | Corps d'erreur unifié sur les deux chemins de suspension (login existant + nouveau chemin JWT-only) : `{"detail": {"error_type": "TENANT_SUSPENDED", "message": "Vous avez été suspendu."}}`, 403 — pour une détection frontend fiable, quelle que soit la voie qui a déclenché le blocage. |
+
+**2. `FunctionalService` désactivé → HTTP 404 (pas 403), sur les deux services consommateurs**
+
+Décision produit explicite : un service désactivé doit apparaître **inexistant**, jamais "existant mais interdit". `HasFunctionalServiceEnabled.has_permission()` (`service-personnel/api/permissions.py` ET `Medical-Monitoring/core/permissions.py`, mécanisme générique dupliqué depuis §14.9, non réécrit) lève désormais `rest_framework.exceptions.NotFound(detail={"error_type": "SERVICE_UNAVAILABLE", "message": "Ce service n'existe pas pour cet établissement."})` au lieu de `return False`. Corollaire découvert en cours de route : le gestionnaire d'exceptions custom de service-personnel (`api/exceptions.py::fultang_exception_handler`) réenveloppait TOUTE exception DRF dans une forme générique `{"success": False, "error_type": exc.__class__.__name__, ...}`, ce qui aurait enterré le marqueur `SERVICE_UNAVAILABLE` — corrigé par un retour anticipé (`if 'error_type' in response.data: return response`) avant la réenveloppe générique.
+
+**3. Invalidation active du cache (push), TTL conservé comme filet de sécurité**
+
+| Fichier | Changement |
+|---|---|
+| `service-personnel/api/views.py`, `Medical-Monitoring/core/views.py` | `FunctionalServiceInvalidateView` (nouveau, un par service) : `POST /api/internal/functional-services/invalidate/` (service-personnel) / `POST /api/medical-monitoring/internal/functional-services/invalidate/` (Medical-Monitoring), protégé par `IsInternalService` (jeton interne déjà existant, aucun nouveau mécanisme d'autorisation), body `{tenant_id, code}` → `functional_service_cache.invalidate(tenant_id, code)`. |
+| `tenant-service/tenants/provisioning.py` | `invalidate_functional_service_cache(tenant_id, code)` (nouveau, placé ici plutôt que dans `internal_clients.py` pour éviter un import circulaire) : boucle sur les deux services consommateurs connus (`PERSONNEL`, `MEDICAL`, via `PROVISIONING_CAPABLE_SERVICES` déjà existant), appelle chaque endpoint via `call_internal_service` déjà existant. **Best-effort** : `except InternalServiceCallError: logger.warning(...)` — un consommateur injoignable ne fait jamais échouer l'action principale (toggle/bulk-set reste 200). |
+| `tenant-service/tenants/views.py` | Appel de `invalidate_functional_service_cache(tenant.id, code)` ajouté à la fin de `toggle_functional_service` et de `bulk_set_functional_services`, après l'écriture réussie et la journalisation. |
+
+Le TTL (60s) reste en place comme filet de sécurité (dégradation gracieuse si un consommateur est injoignable au moment du push) — l'invalidation active rend la propagation quasi immédiate dans le cas nominal, elle ne le remplace pas.
+
+**4. Gating backend concret — cas "Infirmerie" (`SOINS_INFIRMIERS`)**
+
+Contrairement à Pharmacie/Laboratoire/Médecine générale (§14.9, ViewSets dédiés), il n'existe pas de ViewSet "infirmier seul" — les pages infirmière du frontend partagent des endpoints généraux (`Patient`, `Visite`) également utilisés par les médecins ; gater ces ViewSets entiers bloquerait aussi les médecins. Seule l'action réellement propre au rôle infirmier a été identifiée et gatée : `PatientViewSet.enregistrer_soin` (`Medical-Monitoring/backend/patient/views.py`, action `POST .../soins`, crée un `SoinAdministre`) — via `get_permissions()` conditionnel sur `self.action == 'enregistrer_soin'` (pas la classe entière), avec `HasFunctionalServiceEnabled.for_service('SOINS_INFIRMIERS')`.
+
+**5. Double confirmation (Frontend)**
+
+| Élément | Changement |
+|---|---|
+| `Pages/Modals/ConfirmAction.Modal.jsx` | `ConfirmationModal` étendu avec `confirmText`/`cancelText` optionnels (défaut `"Confirm"`/`"Cancel"`, tout appelant existant inchangé) — nécessaire pour les libellés de bouton imposés ("Oui, suspendre l'établissement", etc.). |
+| `services/platformAdminApi.js` | `updateTenantStatus(id, newStatus)` (nouveau) — `PATCH /tenants/{id}/status/`. |
+| `EstablishmentDetailPage.jsx` | Bouton "Suspendre l'établissement"/"Réactiver l'établissement" à côté du badge de statut. Deux `ConfirmationModal` séquentiels pilotés par un état numérique `statusConfirmStep` (0 = aucun, 1 = premier pop-up, 2 = second) : le premier `onConfirm` avance seulement à l'étape 2 (aucun appel réseau), seul le second appelle réellement le backend. Même patron `exportConfirmStep` appliqué à la case "partage clinique" (premier pop-up existant conservé tel quel, second ajouté). |
+| `ServicesConfigSection.jsx` | Le premier pop-up existant (résumé court, "Confirmer la modification") est **conservé sans changement de comportement** ; un second pop-up est ajouté (`confirmStep` 0/1/2, même patron), avec un texte adapté au sens du changement (activation/désactivation/réactivation, voir décision ci-dessous), appelé uniquement après validation du second. |
+| `Utils/fultangErrorEvents.js` (nouveau) | `extractFultangErrorType(error)` gère les DEUX formes de corps observées empiriquement (`data.detail.error_type` — FastAPI/Gateway — et `data.error_type` directement à la racine — DRF avec un `.detail` de type dict, vérifié via `manage.py shell` avant d'écrire ce code). `dispatchFultangErrorEvent(error)` déclenche l'un des deux `CustomEvent` globaux (`fultang:tenant-suspended` / `fultang:service-unavailable`) — aucun state manager global n'existe dans l'app, c'est le mécanisme le moins intrusif. |
+| `Utils/axiosInstance.js`, `axiosInstanceCompta.js` | Nouveau contrôle, placé EN PREMIER dans le gestionnaire d'erreur de l'intercepteur de réponse (avant la logique 401/403 existante) : si `dispatchFultangErrorEvent(error)` renvoie `true`, la requête est simplement rejetée sans déclencher le refresh 401 ni aucune autre logique existante — sinon tout le comportement actuel est inchangé à l'identique. |
+| `GlobalComponents/TenantSuspendedScreen.jsx`, `ServiceUnavailableScreen.jsx`, `FultangGlobalErrorOverlay.jsx` (nouveaux) | Écrans plein écran dédiés (palette/typographie FullTang, sans bouton Login/Go Back, sans détail technique) — "Vous avez été suspendu." / "Ce service n'existe pas." L'écouteur est monté UNE FOIS dans `App.jsx`, à côté de `FeedbackProvider` — ne modifie ni ne remplace `AppRoute`, ni le 403 historique `AccessDenied.jsx` (déclenché uniquement par un contrôle de rôle côté client, jamais par ce mécanisme). |
+
+**Textes exacts appliqués** (fournis par la mission, reproduits ici pour traçabilité) :
+- Tenant — suspension : "Voulez-vous suspendre cet établissement ?" / "Continuer" puis "Voulez-vous vraiment suspendre cet établissement ?" / "Cette action désactivera immédiatement l'accès à Fultang pour tous les utilisateurs de cet établissement. Les données et les bases de données seront conservées." / "Oui, suspendre l'établissement".
+- Tenant — réactivation : "Voulez-vous réactiver cet établissement ?" / "Continuer" puis "Voulez-vous vraiment réactiver cet établissement ?" / "Cette action rétablira immédiatement l'accès à Fultang pour les utilisateurs de cet établissement." / "Oui, réactiver l'établissement".
+- Service — désactivation : "Voulez-vous vraiment désactiver ce service ?" / "Cette action rendra immédiatement ce service indisponible pour les utilisateurs de cet établissement." / "Oui, désactiver".
+- Service — réactivation : "Voulez-vous vraiment réactiver ce service ?" / "Cette action rétablira l'accès à ce service et à ses données pour les utilisateurs de cet établissement." / "Oui, réactiver".
+
+**Décision explicite — "activer" vs "réactiver" un service** : le catalogue `TenantFunctionalService` ne porte aucun historique ("jamais activé" vs "déjà activé puis désactivé"). Comme `ServicesConfigSection.jsx` n'intervient que sur un établissement déjà en production, remettre un service à `enabled=true` y est systématiquement traité comme une RÉACTIVATION (texte mentionnant la préservation des données, cohérent avec le scénario "Infirmerie" qui a motivé cette phase) plutôt qu'une activation initiale — le libellé "activer" (sans mention de données) n'a pas d'usage identifié dans cet écran.
+
+**Bug corrigé pendant l'implémentation de la double confirmation** : `ConfirmationModal` appelle inconditionnellement `onConfirm()` PUIS `onClose()` au clic sur le bouton de confirmation. Le premier pop-up de chaque flux (`statusConfirmStep`, `exportConfirmStep`, `confirmStep` dans `ServicesConfigSection.jsx`) faisait avancer l'étape à `2` dans `onConfirm`, mais `onClose={() => setStep(0)}` — appelé juste après dans le même gestionnaire d'événement — écrasait cette mise à jour avant le prochain rendu (React ne conserve que la dernière valeur directe posée sur un même setter dans un même batch), empêchant le second pop-up de jamais s'afficher. Corrigé en donnant à `onClose` du premier pop-up une forme fonctionnelle : `setStep((step) => (step === 1 ? 0 : step))` — un clic sur "Annuler" (où `onConfirm` n'est pas appelé) réinitialise toujours correctement à `0`, tandis qu'un clic sur "Continuer" (où `onConfirm` a déjà positionné `2`) laisse l'étape `2` intacte.
+
+#### APRÈS
+
+- Un JWT émis avant une suspension est bloqué (403, écran dédié) dès la requête suivante, quel que soit le hostname utilisé (convention de sous-domaine OU `localhost`) — vérifié en conditions réelles (voir Tests).
+- Un `FunctionalService` désactivé pour un tenant répond 404 (pas 403) sur les endpoints gatés, et la désactivation/réactivation/bulk-set se propage de façon quasi immédiate (pas d'attente du TTL de 60s) grâce à l'invalidation active — le TTL reste un filet de sécurité pour le cas où un consommateur était injoignable au moment du push.
+- Toute suspension/réactivation de tenant et toute activation/désactivation/réactivation de service depuis la fiche d'un établissement existant exige deux confirmations explicites avant tout appel backend.
+- Un utilisateur suspendu ou un service inexistant pour son tenant voit un écran dédié, cohérent avec l'identité FullTang, sans détail technique — jamais le 403 historique, qui continue de fonctionner à l'identique pour tous les cas déjà couverts avant cette phase.
+
+#### TESTS
+
+Tous les résultats ci-dessous ont été réexécutés le jour de la rédaction (stack Docker en conditions réelles, `docker exec` dans chaque conteneur — pas de simulation) :
+
+| Service | Résultat | Détail |
+|---|---|---|
+| `api-gateway` | 26/33 passants (`pytest tests/ -q`) | Les 7 échecs sont préexistants et sans rapport avec cette phase (confirmés identiques par `git stash` avant/après en cours de chantier) ; les 10 nouveaux tests de cette phase (5 `get_tenant_status` dans `test_tenant_resolver.py`, 5 scénarios de suspension dans `test_login_tenant_context.py`) passent tous. |
+| `service-personnel` | 77/77 ✅ | 73 précédents + 4 nouveaux (`FunctionalServiceInvalidateEndpointTests`). Tests existants mis à jour pour le changement 403→404 (`HasFunctionalServiceEnabled`). |
+| `Medical-Monitoring` | 125/131 (6 échecs) | Les 6 échecs (3 erreurs de modèle/sérialiseur `Consultation`, 3 échecs "generic endpoint removed") sont préexistants et sans rapport (confirmés identiques par `git stash` avant/après). Les 6 nouveaux tests de cette phase (`SoinsGatingTests` ×3, `FunctionalServiceInvalidateEndpointTests` ×3) passent tous. |
+| `tenant-service` | 164/164 ✅ | 161 précédents + 3 nouveaux (`FunctionalServiceCacheInvalidationWiringTests` — invalidation appelée après toggle/bulk-set, best-effort confirmé : un consommateur injoignable ne fait jamais échouer la réponse). |
+
+**Vérification bout en bout en conditions réelles (Gateway, vrais tenants, vrai JWT)**, reproduisant le scénario exact rapporté ("session déjà ouverte, l'utilisateur ne se déconnecte pas") :
+1. Tenant `hopital-general` créé, compte admin provisionné, connexion réussie via `Host: localhost` (`localhost` étant la convention de développement — voir §14.9.3) → 200, JWT obtenu.
+2. Le MÊME JWT réutilisé pour une requête via `Host: localhost` → 200 (accès normal confirmé avant toute suspension).
+3. `PATCH /tenants/tenants/{id}/status/ {"status":"INACTIVE"}` (PlatformAdmin) → 200.
+4. Le MÊME JWT (émis avant l'étape 3, jamais rafraîchi) rejoué via `Host: localhost` → **403**, corps `{"detail":{"error_type":"TENANT_SUSPENDED","message":"Vous avez été suspendu."}}` — confirme que la faille d'origine (§AVANT point 1) est bien corrigée.
+5. Nouvelle tentative de connexion (`/auth/login`) sur ce même tenant → bloquée également.
+6. Requête PlatformAdmin (liste des tenants) → 200, non affectée par la suspension d'un tenant qu'il administre.
+7. Tenant B (`chu-yaounde`, actif) → 200, non affecté par la suspension du tenant A.
+8. Réactivation (`status: ACTIVE`) → le même JWT rejoué via `Host: localhost` → 200, accès restauré.
+
+**Vérification bout en bout complémentaire — cas "Infirmerie" (le bug explicitement rapporté qui a motivé cette phase), sur un tenant fraîchement créé (`phase3-verif`, PERSONNEL+MEDICAL provisionnés)** :
+1. `SOINS_INFIRMIERS` désactivé AVANT toute création de personnel (reproduit "service jamais activé à la création") → `POST /personnel/personnel/ {poste: infirmier}` → **404** `SERVICE_UNAVAILABLE`.
+2. `SOINS_INFIRMIERS` réactivé → **immédiatement** (aucune attente) la même requête de création aboutit (201, compte + mot de passe temporaire réels) → connexion réussie de ce compte (JWT `roles: ["Infirmiere"]`, `tenant_id` correct) → `POST /medical/patients/{id}/soins/` avec ce JWT → 201 (un vrai `SoinAdministre` créé).
+3. `SOINS_INFIRMIERS` désactivé à nouveau → le MÊME JWT infirmier (déjà émis, jamais rafraîchi), immédiatement, sur le même `POST .../soins/` → **404** `SERVICE_UNAVAILABLE` (confirme que l'invalidation active fonctionne réellement, pas seulement en théorie) ; une lecture générale du patient (`GET /medical/patients/{id}/`) avec ce même JWT reste accessible (200) — confirme la limitation documentée ci-dessous.
+4. `SOINS_INFIRMIERS` réactivé une seconde fois → le MÊME JWT infirmier, immédiatement, refait `POST .../soins/` → 201 (accès restauré sans nouvelle connexion).
+5. Vérification directe en base (`SoinAdministre.objects.filter(patient_id=...)`) : **2 lignes présentes** — le soin créé à l'étape 2 ET celui de l'étape 4 — aucune donnée supprimée ni dupliquée pendant tout le cycle désactivation/réactivation.
+
+#### LIMITATIONS
+
+- **Invalidation de cache mono-instance.** `invalidate_functional_service_cache` pousse vers le cache en mémoire du processus courant de chaque service consommateur. Un déploiement à plusieurs instances par service nécessiterait un mécanisme distribué (pub/sub, ex. Redis) pour propager l'invalidation à toutes les instances — non construit ici, le TTL de 60s reste alors le seul filet de sécurité pour les instances non notifiées.
+- **Seuls deux consommateurs connus.** L'invalidation ne cible que `PERSONNEL` et `MEDICAL` (les deux seuls services ayant un consommateur `HasFunctionalServiceEnabled` réellement câblé à ce jour) — cohérent avec l'état actuel du gating, pas une limite de l'architecture elle-même (`_FUNCTIONAL_SERVICE_CACHE_CONSUMERS` est une simple liste à étendre si un nouveau consommateur apparaît).
+- **"Infirmerie" — gating partiel, assumé et documenté dans le code.** Seule l'action `enregistrer_soin` est gatée par `SOINS_INFIRMIERS`. Les endpoints généraux partagés (liste/détail des patients, des visites) restent accessibles même si ce service est désactivé, faute d'un moyen propre de distinguer "un infirmier les utilise" de "un médecin les utilise" au niveau actuel du modèle de données. La création du rôle infirmier reste, elle, entièrement bloquée par `POSTE_TO_FUNCTIONAL_SERVICE` (§14.9, inchangé).
+- **Catalogue de services partiellement gaté.** Seuls PHARMACIE, LABORATOIRE, MEDECINE_GENERALE (§14.9) et SOINS_INFIRMIERS (partiel, ci-dessus) ont un point d'application backend réel. Les autres entrées du catalogue (Caisse, Comptabilité financière, Comptabilité matière, Gestion du personnel, Gestion des infrastructures) restent au stade CRUD pur — l'architecture générique (`HasFunctionalServiceEnabled.for_service(code)`) le permettrait sans nouveau mécanisme, mais câbler ces services n'était pas dans le périmètre explicite de cette phase.
+- **Suite de tests d'isolation dédiée non construite comme fichier unique.** ~~Les scénarios croisés... n'a pas été réorganisée en une nomenclature de tests séparée pour cette phase.~~ **Résolu (finalisation, ci-dessous, §14.10.1) : une suite dédiée `backend/tests/isolation/` existe désormais**, avec une correspondance directe aux scénarios A-G de suspension et aux cycles FunctionalService de la mission.
+
+#### 14.10.1 Finalisation — suite dédiée `backend/tests/isolation/`
+
+Suite indépendante des suites unitaires de chaque service (voir son `README.md`) : elle parle en HTTP réel à la Gateway (`http://localhost:8080`) de la stack Docker déjà démarrée, sans mocker ni le Tenant Service, ni le Database Router, ni le cache FunctionalService — vrais tenants créés via l'API, vrais JWT, vrai routage physique.
+
+Placée hors de tout service en particulier (`backend/tests/`, pas `backend/<service>/`) car un scénario cross-tenant traverse par nature quatre projets (Gateway, tenant-service, service-personnel, Medical-Monitoring) qui n'ont pas de venv commun — dupliquer ces tests dans chacun aurait recréé un mécanisme qui n'existe pas plutôt que d'en réutiliser un.
+
+**Fichiers créés :**
+- `backend/tests/isolation/conftest.py` — helpers réels : création de tenant, provisioning, création du compte admin initial (via `provision-admin`, le vrai mécanisme interne), connexion, bascule de statut/service, requête `docker exec ... psql` directe.
+- `backend/tests/isolation/test_authentication_isolation.py` — mismatch JWT/hostname (`<identifier>.localhost`, convention réelle confirmée par `docker exec fultang-gateway env`), non-fuite de données cross-tenant, falsification du header `X-Tenant-ID`.
+- `backend/tests/isolation/test_multitenant_isolation.py` — lecture/modification/suppression/création de relation cross-tenant, bidirectionnel A↔B, sur `MedecinViewSet` (service-personnel) et `PatientViewSet` (Medical-Monitoring, données nommément identifiables `PATIENT_TENANT_A`/`PATIENT_TENANT_B`).
+- `backend/tests/isolation/test_tenant_suspension_isolation.py` — scénarios A à G de la mission, chacun avec sa propre paire de tenants (indépendance totale entre tests).
+- `backend/tests/isolation/test_functional_service_isolation.py` — mécanisme générique testé sur PHARMACIE, LABORATOIRE, MEDECINE_GENERALE, SOINS_INFIRMIERS ; invalidation immédiate du cache ; préservation des données ; activation tardive d'un service jamais activé à la création.
+- `backend/tests/isolation/test_database_routing_isolation.py` — vérification physique directe (requête SQL dans le conteneur Postgres de chaque service) que les données de chaque tenant vivent uniquement dans SA base.
+- `backend/tests/isolation/requirements.txt`, `pytest.ini`, `README.md`, `.gitignore`.
+
+**Correction méthodologique importante (postérieure à la rédaction initiale de cette sous-section) :** la première version de cette suite neutralisait le cas `LaborantinViewSet` par un `pytest.skip()` au motif que ce point d'entrée n'était « pas encore protégé ». C'est une erreur de méthode — un SKIP ne doit JAMAIS servir à transformer une non-conformité fonctionnelle en résultat neutre. Le test a été réécrit en assertion normale (comportement attendu défini par l'exigence, indépendamment de ce que le code actuel permet) et **échoue désormais explicitement**, ce qui est le résultat correct et recherché. Un second cas du même type a été découvert par cette correction (`ConciliationMedicamenteuseViewSet`, PHARMACIE) et traité de la même façon. Aucun test n'a été assoupli pour les faire passer — ce n'était pas l'objet de cette tâche.
+
+**Résultat réel (`python -m pytest . -v`, stack Docker déjà démarrée) :**
+
+```
+2 failed, 37 passed in 595.45s (0:09:55)
+```
+
+**100 % des tests qui passent ne signifierait PAS que l'isolation est garantie à 100 %** — seulement que les scénarios écrits sont conformes. Ici, 2 scénarios réels sur 39 démontrent explicitement le contraire, ce qui est précisément le rôle de cette suite : les rendre visibles plutôt que de les masquer.
+
+**Tests en échec (défauts d'isolation réels, non corrigés dans cette tâche — voir consigne « ne pas corriger les défauts de production ») :**
+
+| Test | Comportement attendu | Comportement obtenu |
+|---|---|---|
+| `TestLaboratoireGenericCreationOnly::test_laborantin_viewset_listing_is_blocked_when_laboratoire_disabled` | `GET /personnel/laborantins/` → 404 `SERVICE_UNAVAILABLE` quand LABORATOIRE est désactivé pour le tenant | 200 — la liste reste pleinement accessible |
+| `TestPharmacieViaMedicalMonitoring::test_conciliation_medicamenteuse_viewset_is_blocked_when_pharmacie_disabled` | `GET /medical/pharmacie/conciliations/{id}/` → 404 `SERVICE_UNAVAILABLE` quand PHARMACIE est désactivé pour le tenant | 200 — la conciliation reste pleinement accessible |
+
+Cause identique dans les deux cas : `LaborantinViewSet` et `ConciliationMedicamenteuseViewSet` n'ont aucun `HasFunctionalServiceEnabled.for_service(...)` câblé dans leur `permission_classes`, contrairement aux autres ViewSets du même service fonctionnel.
+
+**Couverture réellement exercée (37 PASS, à travers 8 points d'application backend distincts sur 4 services fonctionnels) :**
+
+```
+[PASS] lecture cross-tenant (2 ressources, 2 services : Medecin, Patient)
+[PASS] modification cross-tenant (idem)
+[PASS] suppression cross-tenant (idem)
+[PASS] création de relation cross-tenant (Consultation -> Patient d'un autre tenant)
+[PASS] JWT mismatch (A+hostname B, B+hostname A)
+[PASS] hostname mismatch (convention réelle <identifier>.localhost)
+[PASS] falsification du header X-Tenant-ID (lecture et écriture)
+[PASS] database routing (vérification physique directe par requête SQL, 2 serveurs Postgres)
+[PASS] cache / invalidation immédiate (PHARMACIE, MEDECINE_GENERALE, SOINS_INFIRMIERS)
+[PASS] suspension avec JWT préexistant (scénarios A-G)
+[PASS] réactivation tenant (même JWT, sans nouvelle connexion)
+[FAIL] FunctionalService — LaborantinViewSet (LABORATOIRE) non protégé
+[FAIL] FunctionalService — ConciliationMedicamenteuseViewSet (PHARMACIE) non protégé
+[PASS] FunctionalService — 8 autres points d'application (Pharmacien, création générique
+       pharmacien/laborantin, AnomaliePrescription, DelivranceMedicament, Prelevement,
+       ValeurCritique, Consultation, enregistrer_soin)
+[PASS] désactivation immédiate (pas d'attente du TTL 60s) sur les points d'application protégés
+[PASS] réactivation FunctionalService (même JWT) sur les points d'application protégés
+[PASS] préservation des données (personnel, patients, soins — avant/après désactivation)
+[PASS] service jamais activé à la création, activé plus tard (rôle créable, connexion, action métier)
+```
+
+**Services/endpoints non couverts par cette suite** (absence de scénario, distincte des FAIL ci-dessus — voir `backend/tests/isolation/README.md` pour le détail et la justification de chaque cas) : CAISSE, COMPTA_FINANCIERE, COMPTA_MATIERE, GESTION_PERSONNEL, GESTION_INFRASTRUCTURES (aucun point d'entrée HTTP n'existe pour ces codes — rien à requêter, différent d'un défaut constaté) ; `ExamenViewSet`, `MedicamentPrescritViewSet`, `VisiteViewSet`, `HospitalisationViewSet` et les endpoints `patient/*` annexes de Medical-Monitoring ; ComptaMatiere, fultang-compta-financiere, Gestion-Infrastructures, clinical-agent.
+
+**Correction ultérieure (postérieure à la publication du tableau ci-dessus) : les deux `[FAIL]` (`LaborantinViewSet`, `ConciliationMedicamenteuseViewSet`) ont été corrigés — voir §14.10.2 ci-dessous, qui documente également plusieurs autres chemins parallèles découverts et corrigés dans le même effort.**
+
+#### 14.10.2 Désactivation effective des FunctionalService — chemins parallèles non gatés
+
+**Contexte.** Un test réel (deux hôpitaux, Infirmerie) a révélé que la salle d'attente d'un hôpital où Infirmerie avait été désactivée puis réactivée restait vide/désynchronisée. L'investigation a montré que cette désynchronisation précise vient d'un mécanisme **sans rapport avec l'activation/désactivation** : `Frontend/src/Pages/Nurse/WaitingRoom.jsx` masque côté client les visites dont l'id figure dans `localStorage['treated_visits']` (une liste qui ne s'invalide et n'expire jamais) — un patient déjà "pris en charge" une fois par une infirmière reste filtré indéfiniment, réactivation ou non. **Non corrigé dans cette tâche** (explicitement hors périmètre : la réactivation sera traitée séparément, et ce mécanisme est une fonctionnalité métier existante, pas un défaut d'isolation) — documenté ici pour que la cause exacte soit connue avant la phase réactivation.
+
+En creusant en revanche pourquoi la désactivation elle-même ne bloquait pas fiablement l'usage réel du service, l'audit a trouvé un défaut structurel bien réel, présent pour PHARMACIE, LABORATOIRE **et** MEDECINE_GENERALE (pas seulement Infirmerie) : pour chacun de ces services, un ViewSet dédié était déjà correctement gaté (`PharmacienViewSet`, `AnomaliePrescriptionViewSet`/`DelivranceMedicamentViewSet`, `PrelevementViewSet`/`ValeurCritiqueViewSet`, `ConsultationViewSet`) — **mais le frontend réel n'utilise pas toujours ces endpoints-là**. Il existe des actions parallèles, sur d'autres ViewSets non gatés, qui créent exactement les mêmes objets métier et que le frontend appelle réellement.
+
+**AVANT — cartographie FunctionalService → pages → endpoints (état constaté)**
+
+| FunctionalService | Pages/rôle | Endpoint gaté existant | Endpoint réellement appelé par le frontend | Gaté avant correction ? |
+|---|---|---|---|---|
+| MEDECINE_GENERALE | Doctor (consultation) | `POST /consultations/` (`ConsultationViewSet`) | `POST /visites/{id}/consultations/` — `doctorApi.js:326`, action `VisiteViewSet.ouvrir_consultation` | **NON** |
+| PHARMACIE | Pharmacist (délivrance) | `POST /pharmacie/delivrances/` (`DelivranceMedicamentViewSet`) | `POST /prescriptions/{id}/delivrer/` — `pharmacistApi.js:51`, action `MedicamentPrescritViewSet.delivrer` | **NON** |
+| PHARMACIE | Pharmacist (anomalie) | `POST /pharmacie/anomalies/` (`AnomaliePrescriptionViewSet`) | `POST /prescriptions/{id}/anomalie/` — action `MedicamentPrescritViewSet.signaler_anomalie` | **NON** |
+| PHARMACIE | Pharmacist (conciliation) | — (aucun autre ViewSet équivalent) | `POST /pharmacie/conciliations/` (`ConciliationMedicamenteuseViewSet`) | **NON — aucun contrôle du tout** |
+| PHARMACIE | Admin (personnel pharmacien) | `PharmacienViewSet` (classe) | `GET/POST /personnel/pharmaciens/` | déjà OUI |
+| LABORATOIRE | Laboratory (prélèvement) | `POST /laboratoire/prelevements/` (`PrelevementViewSet`) | `POST /examens/{id}/prelevement/` — `laboratoryApi.js:50`, action `ExamenViewSet.prelevement` | **NON** |
+| LABORATOIRE | Laboratory (résultat) | — (aucun autre ViewSet équivalent) | `POST/GET /examens/{id}/resultat/` — `laboratoryApi.js:71`, action `ExamenViewSet.resultat` | **NON — aucun contrôle du tout** |
+| LABORATOIRE | Laboratory (validation) | — | `POST /examens/{id}/valider/` — `laboratoryApi.js:84`, action `ExamenViewSet.valider` | **NON — aucun contrôle du tout** |
+| LABORATOIRE | Laboratory (valeur critique) | `POST /laboratoire/valeurs-critiques/` (`ValeurCritiqueViewSet`) | `POST /examens/{id}/signaler-critique/` — `laboratoryApi.js:105`, action `ExamenViewSet.signaler_critique` | **NON** |
+| LABORATOIRE | Admin (personnel laborantin) | — | `GET/POST /personnel/laborantins/` (`LaborantinViewSet`) | **NON — aucun contrôle du tout** (seule la création générique via `POSTE_TO_FUNCTIONAL_SERVICE` l'était) |
+| SOINS_INFIRMIERS | Nurse (salle d'attente, soins) | `POST /patients/{id}/soins/` (`PatientViewSet.enregistrer_soin`) | `POST /patients/{id}/soins/` — `nurseApi.js:584` | déjà OUI — **seul service dont le frontend utilise directement l'endpoint gaté** |
+
+Endpoints partagés, délibérément **non gatés** (analysés, décision documentée, pas un oubli) : `HospitalisationViewSet`/`VisiteViewSet.hospitaliser` (lu par médecin, infirmier ET pharmacien — aucun FunctionalService ne le possède exclusivement) ; le CRUD de base de `MedicamentPrescritViewSet`/`ExamenViewSet`/`VisiteViewSet` (list/detail/create standard — prescrit par le médecin via les actions déjà gatées de `ConsultationViewSet`, consulté par plusieurs rôles).
+
+**MODIFICATIONS effectuées** (backend, aucun nouvel endpoint créé — uniquement des `permission_classes`/`get_permissions()` ajoutés à des ViewSets/actions déjà existants) :
+
+- `backend/service-personnel/service_personnel/api/views.py::LaborantinViewSet` — ajout `permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('LABORATOIRE')]` (classe entière, comme `PharmacienViewSet`).
+- `backend/Medical-Monitoring/backend/medical_workflow/views.py` :
+  - `ConciliationMedicamenteuseViewSet` — ajout du même `permission_classes` pour PHARMACIE.
+  - `MedicamentPrescritViewSet` — ajout de `get_permissions()` gatant uniquement les actions `signaler_anomalie` et `delivrer` (PHARMACIE) ; le CRUD de base reste inchangé.
+  - `ExamenViewSet` — ajout de `get_permissions()` gatant les actions `resultat`, `prelevement`, `valider`, `signaler_critique` (LABORATOIRE) ; le CRUD de base reste inchangé.
+  - `VisiteViewSet` — ajout de `get_permissions()` gatant uniquement l'action `ouvrir_consultation` (MEDECINE_GENERALE) ; le reste du ViewSet (liste des visites, partagée médecin/infirmier) reste inchangé.
+- Frontend (nouveau mécanisme, générique, réutilisant l'existant — voir §14.10.3) : `Frontend/src/hooks/useFunctionalServiceGate.js` (nouveau hook, réutilise `GET /tenants/tenants/functional-services/mine/`, déjà existant), appliqué via un prop optionnel `requiredFunctionalService` sur `CustomDashboard.jsx`, `Pages/Pharmacist/Components/PharmacistDashboard.jsx`, `Pages/Laboratory/Components/LaboratoryDashboard.jsx` — bloque la PAGE entière (menu, navigation compris, puisque c'est le même composant de layout qui les affiche) pour les 8 pages Nurse, 10 pages Pharmacist et 5 pages Laboratory concernées.
+
+**Aucune modification** : aucun endpoint supprimé, aucun modèle métier touché, aucune donnée supprimée, wizard de création non touché (`Step3ServicesConfig.jsx` intact), workflows hospitaliers (consultations, prescriptions, soins, salles d'attente) strictement identiques quand le service reste activé — confirmé par la non-régression ci-dessous.
+
+**APRÈS.** Désactiver PHARMACIE, LABORATOIRE, MEDECINE_GENERALE ou SOINS_INFIRMIERS pour un tenant bloque désormais réellement, immédiatement (même cache déjà invalidé par le mécanisme de la Phase 3 précédente), à travers TOUS les points d'entrée réellement utilisés par le frontend — pas seulement le point d'entrée "canonique" testé isolément. Réactivé, le même mécanisme s'applique symétriquement (le contrôle est un simple `enabled == True/False`, jamais un état à sens unique) — la réactivation proprement dite (synchronisation de l'UI après un cycle désactivation/réactivation, cache `treated_visits`) reste néanmoins hors périmètre de cette tâche, comme demandé.
+
+**TESTS — non-régression**
+
+| Suite | Résultat |
+|---|---|
+| `service-personnel` (`python manage.py test`) | **77/77 OK** |
+| `Medical-Monitoring` (`python manage.py test`, suite complète) | **131 tests, 3 failures + 3 errors** — identiques à la baseline déjà documentée (tests "generic endpoint removed", sans rapport) |
+
+**TESTS — bout en bout réel, deux tenants réels créés pour l'occasion**
+
+Séquence complète (script Python + `requests`, contre la Gateway réelle, deux tenants provisionnés PERSONNEL+MEDICAL, comptes admin réels, JWT réels) :
+
+1. **Tenant A, tout activé** : ouverture d'une consultation depuis une visite, délivrance + signalement d'anomalie d'une prescription, conciliation médicamenteuse, création d'un pharmacien, prélèvement + résultat + validation + valeur critique d'un examen, création d'un laborantin, enregistrement d'un soin infirmier, salle d'attente correctement peuplée — **12/12 PASS**.
+2. **Tenant A, désactivation de MEDECINE_GENERALE + PHARMACIE + LABORATOIRE + SOINS_INFIRMIERS**, puis nouvelle tentative de CHAQUE action ci-dessus avec la session déjà ouverte (JWT jamais rafraîchi), plus une nouvelle connexion et une tentative de création d'un nouvel infirmier : **17/17 PASS**, tous 404 `SERVICE_UNAVAILABLE`. Vérifié en plus : la lecture générale des patients/visites reste accessible (limitation assumée) et aucune donnée déjà créée n'a disparu (**3/3 PASS**).
+3. **Tenant B, jamais touché** : les mêmes actions (consultation, délivrance, création + connexion d'un infirmier, enregistrement d'un soin, listes pharmacien/laborantin) continuent de fonctionner normalement — **6/6 PASS**.
+
+**Total : 35/35 PASS, 0 FAIL.**
+
+Vérifié également : `GET /tenants/tenants/functional-services/mine/` (consommé par le nouveau hook frontend) reflète bien `enabled: false` pour les 4 services désactivés du Tenant A immédiatement après le test 2, confirmant que le garde-fou frontend recevrait la bonne information.
+
+**LIMITATIONS (honnêtes, non corrigées dans cette tâche par choix explicite de périmètre)**
+
+- **Réactivation non traitée.** Le désynchronisme de la salle d'attente d'infirmerie observé par l'utilisateur après un cycle désactivation/réactivation vient du filtre `localStorage['treated_visits']` de `WaitingRoom.jsx` (nurse), sans lien avec le mécanisme de FunctionalService — identifié, non corrigé (hors périmètre : logique métier existante + réactivation explicitement différée).
+- **Garde frontend au montage, pas en continu.** `useFunctionalServiceGate` vérifie l'état du service à l'ouverture de la page (nouvelle navigation, rechargement, ancienne URL) — un onglet resté ouvert sans aucune navigation ni rechargement ne sera pas basculé vers l'écran dédié tant qu'aucune action réellement protégée côté backend n'est tentée (celle-ci restera, elle, bloquée immédiatement).
+- **`HospitalisationViewSet`/`VisiteViewSet.hospitaliser`** restent volontairement non gatés (partagés par plusieurs rôles, aucun FunctionalService ne les possède exclusivement dans le catalogue actuel).
+- **CAISSE, COMPTA_FINANCIERE, COMPTA_MATIERE, GESTION_PERSONNEL, GESTION_INFRASTRUCTURES** restent sans aucun point d'application backend (inchangé par rapport à §14.10.1) — ces FunctionalService appartiennent à des microservices (fultang-compta-financiere, ComptaMatiere, Gestion-Infrastructures) qui n'ont aucune infrastructure de gating FunctionalService à ce jour ; l'étendre représenterait un chantier propre, plus large que la correction de chemins parallèles traitée ici.
+- Les pages Doctor ne sont pas gatées frontend par MEDECINE_GENERALE (contrairement à Nurse/Pharmacist/Laboratory) — le docteur utilise de très nombreuses pages, et cette extension représenterait une décision de périmètre plus large que la correction ciblée demandée ; la protection backend (`ConsultationViewSet`, `VisiteViewSet.ouvrir_consultation`) reste, elle, pleinement effective indépendamment du frontend.
+
+#### 14.10.3 Mécanisme frontend générique de blocage de page par FunctionalService
+
+Nouveau : `Frontend/src/hooks/useFunctionalServiceGate.js` — hook réutilisable, un seul point de vérité, consommé par trois composants de layout (un par rôle : `CustomDashboard.jsx` pour Nurse, `PharmacistDashBoard.jsx`, `LaboratoryDashboard.jsx`), chacun étendu d'un prop optionnel `requiredFunctionalService` (rétrocompatible : absent = comportement inchangé pour tous les autres rôles). Réutilise l'endpoint déjà existant (`getMyFunctionalServices()`, Phase 2) et l'écran déjà existant (`ServiceUnavailableScreen.jsx`, Phase 3) — aucun nouvel endpoint, aucun nouveau composant visuel créé.
+
+#### 14.10.4 Finalisation — extension à CAISSE/COMPTA_FINANCIERE/COMPTA_MATIERE/GESTION_INFRASTRUCTURES, GESTION_PERSONNEL non désactivable
+
+**AVANT.** Seuls PHARMACIE, LABORATOIRE, MEDECINE_GENERALE et SOINS_INFIRMIERS (les FunctionalService portés par service-personnel/Medical-Monitoring) avaient un mécanisme de désactivation effective. CAISSE, COMPTA_FINANCIERE, COMPTA_MATIERE et GESTION_INFRASTRUCTURES — portés par trois AUTRES microservices (`fultang-compta-financiere`, `ComptaMatiere`, `Gestion-Infrastructures`) — n'avaient strictement aucun point d'application (`grep -rn "for_service("` : zéro occurrence), documenté honnêtement comme limitation en §14.10.1/14.10.2. `GESTION_PERSONNEL` pouvait, comme n'importe quel autre service, être désactivé via le même endpoint — alors qu'il s'agit d'une fonctionnalité d'administration du tenant, pas d'un service métier optionnel.
+
+**MODIFICATIONS.** Les trois microservices disposaient déjà de toute l'infrastructure de routage par tenant (`tenant_routing/{context,router,cache,pool_registry,registry_client}.py`, `IsInternalService`, `TENANT_SERVICE_URL`/`TENANT_SERVICE_INTERNAL_TOKEN` déjà configurés — chantier "rendre tout les services tenant-aware" antérieur à cette tâche) — seule la couche FunctionalService manquait. Ajoutée à l'identique du modèle déjà utilisé par service-personnel/Medical-Monitoring/fultang-compta-financiere, sans réinventer de mécanisme :
+
+- **`fultang-compta-financiere`** : `config/tenant_routing/functional_service_client.py` (nouveau, copie conforme), `config/permissions.py::HasFunctionalServiceEnabled` (nouveau), `config/views.py::FunctionalServiceInvalidateView` + route (nouveau endpoint interne, nécessaire pour l'invalidation active — même famille que les 3 endpoints internes déjà existants dans ce projet). Gating class-level appliqué à :
+  - CAISSE → les 6 ViewSets de `apps/caisse/` (`QuittanceViewSet`, `ChequeViewSet`, `CaisseJournaliereViewSet`, `InventaireCaisseViewSet`, `DepenseMenueViewSet`, et `CaissierViewSet` — le BFF `/api/caissier/*` réellement consommé par `Frontend/src/services/caissierApi.js`) ;
+  - COMPTA_FINANCIERE → les 17 ViewSets de `apps/comptabilite/` (9) et `apps/sorties/` (8).
+- **`ComptaMatiere`** : mêmes ajouts sous `core/`. COMPTA_MATIERE → les 13 ViewSets de `apps/comptabilite_matiere/views/` (répartis sur 8 fichiers).
+- **`Gestion-Infrastructures`** : mêmes ajouts sous `config/`. GESTION_INFRASTRUCTURES → les 5 ViewSets de `infrastructures/views.py`.
+- **`tenant-service/tenants/provisioning.py`** : `_FUNCTIONAL_SERVICE_CACHE_CONSUMERS` étendu de `("PERSONNEL", "MEDICAL")` à `("PERSONNEL", "MEDICAL", "COMPTA", "COMPTA_MATIERE", "INFRASTRUCTURE")` — invalidation active désormais poussée aux 5 services consommateurs après chaque toggle/bulk-set.
+- **`GESTION_PERSONNEL` non désactivable** : `tenant-service/tenants/services.py` — nouvelle constante `NON_DISABLEABLE_FUNCTIONAL_SERVICES = frozenset({"GESTION_PERSONNEL"})` et exception `ImmutableFunctionalServiceError`, vérifiées dans `TenantFunctionalServiceService.set_service` ET `.bulk_set` (donc PATCH comme wizard de création, un seul point de vérité) — toute tentative de désactivation renvoie 400, jamais un état partiellement appliqué (le `bulk_set` reste tout-ou-rien : une tentative incluant GESTION_PERSONNEL=false rejette la requête ENTIÈRE, y compris les autres services qu'elle contenait). Frontend : `ServicesChecklist.jsx` verrouille visuellement la case (icône cadenas, toujours cochée, `disabled`) pour éviter une erreur 400 déroutante — la garantie réelle reste le 400 backend, jamais ce verrouillage visuel seul.
+
+**Défaut réel découvert et corrigé pendant la vérification (pas un oubli silencieux)** : trois fichiers de `ComptaMatiere` (`besoin.py`, `livraison_sortie.py`, `materiel.py`, 6 classes) avaient déjà une ligne `permission_classes = [DevelopmentOrAuthenticated]` PLUS BAS dans le corps de la classe, qui écrasait silencieusement le `permission_classes` nouvellement inséré (Python ne garde que la dernière affectation d'un attribut de classe). `DevelopmentOrAuthenticated` s'est avéré être un simple alias historique d'`IsAuthenticated` (`apps/comptabilite_matiere/permissions.py`) — les deux lignes ont été fusionnées (`[DevelopmentOrAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_MATIERE')]`) plutôt que supprimées, pour ne rien retirer d'existant. Détecté par un test réel qui échouait (`materiels` restait accessible après désactivation), pas par relecture — voir TESTS ci-dessous.
+
+**APRÈS.** Les 4 services suivent désormais exactement le même contrat que PHARMACIE/LABORATOIRE/MEDECINE_GENERALE/SOINS_INFIRMIERS : désactivé → 404 `SERVICE_UNAVAILABLE` immédiat (cache invalidé activement), réactivé → accès restauré immédiatement, données jamais supprimées. GESTION_PERSONNEL ne peut plus jamais être désactivé, ni seul ni via un bulk-set qui l'inclurait.
+
+**TESTS — non-régression (`python manage.py test` dans chaque conteneur, comparaison par `git stash` avant/après)**
+
+| Service | Résultat | Régression ? |
+|---|---|---|
+| tenant-service | 164/164 OK | Aucune |
+| fultang-compta-financiere | 104 tests, 38 failures + 7 errors | **Identique** avant/après (baseline pré-existante, confirmée par stash) |
+| ComptaMatiere | Erreur de découverte des tests (`ImportError` sur le module `tests`) | **Identique** avant/après (baseline pré-existante, confirmée par stash) |
+| Gestion-Infrastructures | 52 tests, 7 failures | **Identique** avant/après (baseline pré-existante, confirmée par stash) |
+
+**TESTS — bout en bout réel (script Python + `requests`, Gateway réelle)**
+
+*Preuve d'appel backend réel (§2 de la mission) :*
+```
+PATCH /tenants/tenants/{id}/functional-services/SOINS_INFIRMIERS/  {"enabled": false}
+→ HTTP 200, 122 ms de round-trip réel
+→ ligne TenantFunctionalService en base : enabled=False (vérifié directement, hors du chemin HTTP)
+```
+Cas d'échec réel : tenter de désactiver GESTION_PERSONNEL → **400**, jamais 200 — le bloc `try/await/catch` de `ServicesConfigSection.jsx::handleConfirm` ne peut physiquement appeler `showSuccess()` que sur la ligne suivant un `await` qui a réussi ; un rejet HTTP y lève une exception JS interceptée par le `catch`, qui appelle `showError()`. Le popup de succès n'est donc pas atteignable indépendamment d'une vraie réponse 2xx du backend.
+
+*Résultats détaillés :*
+
+| Test | Résultat |
+|---|---|
+| SOINS_INFIRMIERS activé avant toute action | PASS |
+| PATCH toggle → 200 + service désactivé dans la réponse | PASS |
+| Persistance en base (hors chemin HTTP) | PASS |
+| GESTION_PERSONNEL : désactivation seule → 400 | PASS |
+| Persistance après nouveau login Platform Admin (rechargement simulé) | PASS |
+| Session déjà ouverte (JWT jamais rafraîchi) : `enregistrer_soin` → 404 | PASS |
+| Nouvelle connexion : `enregistrer_soin` → 404 | PASS |
+| Création d'un nouveau rôle infirmier → 404 | PASS |
+| Tenant B (jamais touché) : `enregistrer_soin` → 201, fonctionne normalement | PASS |
+| PHARMACIE désactivée : listing bloqué, compte pharmacien PAS supprimé en base | PASS |
+| Pharmacien toujours visible dans la gestion générale du personnel | PASS |
+| CAISSE actif → désactivé (404) → réactivé (200) | PASS ×3 |
+| CAISSE désactivé n'affecte pas COMPTA_FINANCIERE (même microservice) | PASS |
+| COMPTA_FINANCIERE désactivé : `comptabilite` ET `sorties` bloqués | PASS ×2 |
+| COMPTA_MATIERE actif → désactivé (404) | PASS ×2 (après correction du défaut ci-dessus) |
+| GESTION_INFRASTRUCTURES actif → désactivé (404) | PASS ×2 |
+| GESTION_PERSONNEL : bulk-set incluant `enabled=false` → 400, tout-ou-rien réellement respecté | PASS ×2 |
+| GESTION_PERSONNEL : personnel jamais impacté | PASS |
+
+**Total : 26/26 PASS.**
+
+**LIMITATIONS / points restants**
+
+- Les baselines de tests pré-existantes de `fultang-compta-financiere` (38 failures + 7 erreurs), `ComptaMatiere` (erreur de découverte de tests) et `Gestion-Infrastructures` (7 failures) restent en l'état — confirmées sans rapport avec cette tâche (identiques par `git stash`), mais non corrigées (hors périmètre explicite : "ne corrige pas ce qui n'est pas nécessaire").
+- Comme pour Medical-Monitoring (§14.10.2), les ViewSets de ces 3 microservices n'ont pas fait l'objet d'une chasse exhaustive aux actions personnalisées (`@action`) dupliquant une opération d'un autre ViewSet non gaté — le gating appliqué est class-level, systématique, sur TOUS les ViewSets routés de chaque app concernée (pas seulement un sous-ensemble choisi), ce qui réduit fortement ce risque par rapport à Medical-Monitoring, mais un audit ligne à ligne comparable à celui de Medical-Monitoring n'a pas été refait ici faute de temps.
+- **Réactivation** : cette tâche ne corrige toujours pas la synchronisation de l'UI après un cycle désactivation/réactivation (voir §14.10.2, filtre `localStorage['treated_visits']`) — explicitement différée.
 
 ---
 
@@ -1577,15 +2083,34 @@ FAIT
                                                           chaque tenant ne voit jamais l'enregistrement de
                                                           l'autre, y compris avec des PK identiques dans des
                                                           bases physiques distinctes.
-
+├── Configuration des tenants — cycle de vie et services (§14, Phases 9/2/3 de ce chantier) ... CLÔTURÉE :
+│                                                         compte admin réel, URL fonctionnelle, activation/
+│                                                         désactivation de service RÉELLEMENT appliquée côté
+│                                                         backend (jamais seulement l'IHM), journalisation
+│                                                         (§14.9) ; suspension de tenant vérifiée à CHAQUE
+│                                                         requête (pas seulement à la résolution hostname —
+│                                                         faille corrigée en §14.10), désactivation de service
+│                                                         → 404 immédiat (invalidation active du cache, plus
+│                                                         d'attente du TTL), double confirmation sur les actions
+│                                                         critiques, écrans dédiés frontend (§14.10).
+│
 À FAIRE
-├── Verrou de création de pool distribué (si passage à plusieurs instances par service)
+├── Verrou de création de pool distribué (si passage à plusieurs instances par service — même limite
+│    pour l'invalidation active du cache FunctionalService introduite en §14.10 : mono-instance)
 ├── Reprise automatique d'un provisioning bloqué en PROVISIONING (processus crashé après création physique
 │    réussie mais avant confirmation) — voir §10.2.7, non résolu
-├── Provisioning des comptes utilisateurs .............. non implémenté (§10.1)
+├── Provisioning des comptes utilisateurs .............. réalisé pour le premier compte admin uniquement
+│                                                          (§14.9) ; la création des comptes suivants reste
+│                                                          manuelle par l'admin du tenant (hors périmètre)
 ├── Migration des comptes existants (tenant_id NULL) .. non implémenté
-├── Configuration complète des tenants (Phase 9 : modules, feature flags, activation/
-│                                        désactivation fonctionnelle d'un service par tenant)
+├── Gating backend étendu au reste du catalogue FunctionalService (Caisse, Comptabilité financière,
+│    Comptabilité matière, Gestion du personnel, Gestion des infrastructures) — architecture générique déjà
+│    prête (HasFunctionalServiceEnabled.for_service), non câblée sur ces services (voir §14.10, LIMITATIONS)
+├── "Infirmerie" (SOINS_INFIRMIERS) — gating limité à l'action `soins` ; les endpoints généraux partagés
+│    (liste/détail patients, visites) restent accessibles même désactivé, faute de distinction propre
+│    infirmier/médecin dans le modèle de données actuel (voir §14.10, LIMITATIONS)
+├── Suite de tests d'isolation dédiée et nommée 1:1 selon un scénario de test formel — la couverture réelle
+│    existe (Phases 5/6, §14.10) mais n'est pas regroupée dans un fichier unique par scénario
 ├── Sécurisation approfondie service-to-service ....... non implémenté (accès direct à un service en
 │                                                          contournant la Gateway = confiance aveugle aux
 │                                                          headers, y compris X-Tenant-ID — vérifié explicitement
@@ -1613,4 +2138,4 @@ FAIT
 
 ---
 
-*Document maintenu à jour à chaque phase du projet multitenant. Dernière mise à jour : Phase 8 (finalisation) — fultang-compta-financiere, ComptaMatiere et Gestion-Infrastructures tenant-aware. Les 5 services métier persistants de FullTang (service-personnel, Medical-Monitoring, fultang-compta-financiere, ComptaMatiere, Gestion-Infrastructures) partagent désormais le même mécanisme Database-per-Tenant ; Clinical Agent reste l'exception architecturale volontaire. Prochaine étape : Phase 9 (couche de configuration des établissements), non commencée.*
+*Document maintenu à jour à chaque phase du projet multitenant. Dernière mise à jour : §14.10 — suspension de tenant vérifiée à chaque requête (plus seulement à la résolution hostname), désactivation de FunctionalService appliquée en HTTP 404 avec invalidation active du cache, double confirmation sur les actions critiques (suspension/réactivation de tenant, activation/désactivation/réactivation de service), écrans frontend dédiés. Les 5 services métier persistants de FullTang partagent le même mécanisme Database-per-Tenant depuis la Phase 8 (finalisation) ; Clinical Agent reste l'exception architecturale volontaire. Limitations connues et périmètre restant : voir §14.10 (LIMITATIONS) et §19.*

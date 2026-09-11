@@ -2,6 +2,8 @@
 ViewSet pour le modèle LigneSortie.
 """
 from rest_framework import viewsets
+from rest_framework.permissions import IsAuthenticated
+from core.permissions import HasFunctionalServiceEnabled
 from apps.comptabilite_matiere.models import LigneSortie
 from apps.comptabilite_matiere.serializers import (
     LigneSortieSerializer,
@@ -13,6 +15,7 @@ class LigneSortieViewSet(viewsets.ModelViewSet):
     """
     ViewSet pour les opérations CRUD sur LigneSortie.
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_MATIERE')]
     queryset = LigneSortie.objects.all()
     serializer_class = LigneSortieSerializer
     

@@ -50,8 +50,13 @@ def _decode(token: str) -> dict:
 
 
 async def _fake_tenant_resolve_get(url, params=None, headers=None, **kwargs):
-    identifier = (params or {}).get("identifier")
-    tenant = TENANTS.get(identifier)
+    params = params or {}
+    if "id" in params:
+        # Résolution PAR ID (Cycle de vie du tenant, Phase 3 — vérification
+        # de suspension hors convention hostname) : voir get_tenant_status().
+        tenant = next((t for t in TENANTS.values() if t["id"] == params["id"]), None)
+    else:
+        tenant = TENANTS.get(params.get("identifier"))
     if tenant is None:
         return httpx.Response(404)
     return httpx.Response(200, json=tenant)
@@ -203,7 +208,13 @@ def test_invalid_token_is_not_treated_as_tenant_mismatch():
 
 
 def test_request_without_resolved_tenant_skips_mismatch_check():
-    """localhost (CAS D) : aucun tenant demandé → pas de comparaison possible, comportement inchangé."""
+    """
+    localhost (CAS D) : aucun tenant demandé par hostname → pas de comparaison
+    de mismatch possible. La requête reste néanmoins autorisée ici car le
+    tenant porté par le token (Tenant A) est bien vérifié ACTIVE par la
+    résolution PAR ID (Cycle de vie du tenant, Phase 3) — voir la classe
+    de tests dédiée ci-dessous pour le cas symétrique (tenant suspendu).
+    """
     token = _login("hopital-central.fulltang.com")
 
     with patch.object(client, "get", new=AsyncMock(side_effect=_fake_tenant_resolve_get)), \
@@ -214,6 +225,116 @@ def test_request_without_resolved_tenant_skips_mismatch_check():
         )
 
     assert response.status_code == 200
+
+
+# --- Suspension effective (Cycle de vie du tenant, Phase 3) -----------------
+#
+# AVANT ce correctif : un JWT émis avant la suspension d'un tenant restait
+# valide indéfiniment dès lors que l'appelant utilisait un hostname hors
+# convention (localhost en développement) — la résolution par hostname ne
+# se déclenchait jamais, donc `TenantInactiveError` n'était jamais levée.
+# Ces tests couvrent le correctif : le statut du tenant PORTÉ PAR LE TOKEN
+# est désormais revérifié, même quand le hostname ne permet aucune
+# résolution.
+
+def test_already_issued_token_is_blocked_after_tenant_suspended_via_offconvention_hostname():
+    """Le scénario central de cette phase : suspension après coup, JWT déjà émis, hostname localhost."""
+    token = _login("hopital-central.fulltang.com")
+
+    # Le tenant est suspendu ENTRE l'émission du token et cette requête.
+    TENANTS["hopital-central"]["status"] = "INACTIVE"
+    try:
+        with patch.object(client, "get", new=AsyncMock(side_effect=_fake_tenant_resolve_get)), \
+             patch.object(client, "request", new=AsyncMock(side_effect=_fake_downstream_request)) as downstream_mock:
+            response = test_client.get(
+                "/personnel/medecins/",
+                headers={"Host": "localhost:8080", "Authorization": f"Bearer {token}"},
+            )
+    finally:
+        TENANTS["hopital-central"]["status"] = "ACTIVE"  # jamais laisser fuiter cet état vers un autre test
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["error_type"] == "TENANT_SUSPENDED"
+    downstream_mock.assert_not_awaited()  # jamais transmis au microservice métier
+
+
+def test_suspending_tenant_a_never_affects_tenant_b_via_offconvention_hostname():
+    """Isolation stricte : la suspension du Tenant A ne doit jamais affecter le Tenant B."""
+    token_b = _login("clinique-paix.fulltang.com")
+
+    TENANTS["hopital-central"]["status"] = "INACTIVE"
+    try:
+        with patch.object(client, "get", new=AsyncMock(side_effect=_fake_tenant_resolve_get)), \
+             patch.object(client, "request", new=AsyncMock(side_effect=_fake_downstream_request)):
+            response = test_client.get(
+                "/personnel/medecins/",
+                headers={"Host": "localhost:8080", "Authorization": f"Bearer {token_b}"},
+            )
+    finally:
+        TENANTS["hopital-central"]["status"] = "ACTIVE"
+
+    assert response.status_code == 200
+
+
+def test_request_without_any_token_is_unaffected_by_suspension_check():
+    """Requête anonyme (pas de Bearer token) : aucun tenant_id à vérifier, comportement inchangé."""
+    with patch.object(client, "get", new=AsyncMock(side_effect=_fake_tenant_resolve_get)), \
+         patch.object(client, "request", new=AsyncMock(side_effect=_fake_downstream_request)):
+        response = test_client.get(
+            "/personnel/medecins/",
+            headers={"Host": "localhost:8080"},
+        )
+
+    assert response.status_code == 200
+
+
+def test_platform_admin_token_is_unaffected_by_suspension_check():
+    """
+    Un PLATFORM_ADMIN n'a jamais de tenant_id dans son JWT (voir
+    app.main::PlatformAdminAuthVerifyView docstring — "n'a et n'aura
+    jamais de tenant_id") — le nouveau contrôle de suspension ne doit
+    jamais se déclencher pour lui, quel que soit le hostname utilisé.
+    """
+    from app.auth.jwt_handler import create_access_token
+
+    platform_admin_token = create_access_token(data={
+        "sub": "platform-admin-id", "tenant_id": None, "roles": ["PLATFORM_ADMIN"], "email": "admin@platform.example",
+    })
+
+    get_mock = AsyncMock(side_effect=_fake_tenant_resolve_get)
+    with patch.object(client, "get", new=get_mock), \
+         patch.object(client, "request", new=AsyncMock(side_effect=_fake_downstream_request)):
+        response = test_client.get(
+            "/tenants/tenants/",
+            headers={"Host": "localhost:8080", "Authorization": f"Bearer {platform_admin_token}"},
+        )
+
+    assert response.status_code == 200
+    # Aucun appel de résolution PAR ID n'a dû être tenté (tenant_id absent) —
+    # seul un appel `params={"identifier": ...}` serait légitime ici, et le
+    # hostname "localhost:8080" ne le déclenche même pas.
+    for call in get_mock.await_args_list:
+        assert "id" not in (call.kwargs.get("params") or {})
+
+
+def test_tenant_service_unreachable_for_status_check_returns_503_not_silent_allow():
+    """Fail-closed : jamais un accès silencieusement autorisé si le Tenant Service est injoignable."""
+    token = _login("hopital-central.fulltang.com")
+
+    async def _unreachable(url, params=None, headers=None, **kwargs):
+        if "id" in (params or {}):
+            raise httpx.ConnectError("boom")
+        return await _fake_tenant_resolve_get(url, params=params, headers=headers, **kwargs)
+
+    with patch.object(client, "get", new=AsyncMock(side_effect=_unreachable)), \
+         patch.object(client, "request", new=AsyncMock(side_effect=_fake_downstream_request)) as downstream_mock:
+        response = test_client.get(
+            "/personnel/medecins/",
+            headers={"Host": "localhost:8080", "Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 503
+    downstream_mock.assert_not_awaited()
 
 
 def test_refresh_token_preserves_tenant_context():

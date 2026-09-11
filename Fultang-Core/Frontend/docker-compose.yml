@@ -3,7 +3,7 @@ services:
     build: .
     container_name: fultang-frontend
     ports:
-      - "3000:80"
+      - "5173:80"
     networks:
       - fultang_shared_network
     restart: always

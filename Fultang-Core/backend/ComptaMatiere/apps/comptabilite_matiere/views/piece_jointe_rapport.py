@@ -2,6 +2,8 @@
 ViewSet pour le modèle PieceJointeRapport.
 """
 from rest_framework import viewsets
+from rest_framework.permissions import IsAuthenticated
+from core.permissions import HasFunctionalServiceEnabled
 from apps.comptabilite_matiere.models import PieceJointeRapport
 from apps.comptabilite_matiere.serializers import (
     PieceJointeRapportSerializer,
@@ -13,6 +15,7 @@ class PieceJointeRapportViewSet(viewsets.ModelViewSet):
     """
     ViewSet pour les opérations CRUD sur PieceJointeRapport.
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_MATIERE')]
     queryset = PieceJointeRapport.objects.all()
     serializer_class = PieceJointeRapportSerializer
     

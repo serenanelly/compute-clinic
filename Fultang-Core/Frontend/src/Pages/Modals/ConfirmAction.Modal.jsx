@@ -1,7 +1,14 @@
 import { AlertCircle, X } from 'lucide-react';
 import PropTypes from "prop-types";
 
-export function ConfirmationModal ({ isOpen, onClose, onConfirm, title, message }) {
+/**
+ * `confirmText`/`cancelText` sont optionnels (défaut : "Confirm"/"Cancel",
+ * comportement inchangé pour tout appelant existant) — ajoutés pour la
+ * double confirmation du Cycle de vie du tenant (Phase 3), qui impose des
+ * libellés de bouton précis ("Oui, suspendre l'établissement", etc.) plutôt
+ * que le texte générique.
+ */
+export function ConfirmationModal ({ isOpen, onClose, onConfirm, title, message, confirmText = "Confirm", cancelText = "Cancel" }) {
 
 
     ConfirmationModal.propTypes = {
@@ -9,7 +16,9 @@ export function ConfirmationModal ({ isOpen, onClose, onConfirm, title, message 
         onClose: PropTypes.func.isRequired,
         onConfirm: PropTypes.func.isRequired,
         title: PropTypes.string.isRequired,
-        message: PropTypes.string.isRequired
+        message: PropTypes.string.isRequired,
+        confirmText: PropTypes.string,
+        cancelText: PropTypes.string,
     }
 
     if (!isOpen) return null;
@@ -32,13 +41,13 @@ export function ConfirmationModal ({ isOpen, onClose, onConfirm, title, message 
                         }}
                         className="px-4 py-2 bg-primary-end text-white rounded-lg text-md hover:text-xl font-bold transition-all duration-300"
                     >
-                        Confirm
+                        {confirmText}
                     </button>
                     <button
                         onClick={onClose}
                         className="px-4 py-2 bg-red-400 text-white  rounded-lg font-bold hover:bg-red-500 transition-all duration-300"
                     >
-                        Cancel
+                        {cancelText}
                     </button>
                 </div>
             </div>

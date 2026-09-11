@@ -84,11 +84,105 @@ class Tenant(models.Model):
         help_text="Date de création de l'enregistrement du tenant.",
     )
 
+    # Champs d'identité descriptifs (Tenant Management — Phase "Configuration
+    # des établissements"). Volontairement minimal et tous facultatifs :
+    # seuls `name`/`identifier` sont obligatoires à la création. `logo_url`
+    # est une référence (URL), pas un champ d'upload de fichier — ce service
+    # n'a aucune infrastructure de stockage de médias à ce stade ; brancher
+    # un vrai upload est une extension future, pas construite ici.
+    address = models.TextField(
+        blank=True, default='',
+        help_text="Adresse postale de l'établissement (facultatif).",
+    )
+    phone = models.CharField(
+        max_length=30, blank=True, default='',
+        help_text="Numéro de téléphone principal de l'établissement (facultatif).",
+    )
+    email = models.EmailField(
+        blank=True, default='',
+        help_text="Email de contact principal de l'établissement (facultatif).",
+    )
+    logo_url = models.URLField(
+        blank=True, default='',
+        help_text=(
+            "URL externe de secours pour le logo (facultatif). Si `logo` "
+            "(fichier uploadé, voir ci-dessous) est renseigné, il prime "
+            "toujours sur ce champ pour l'affichage — voir "
+            "TenantSerializer.get_logo_display_url."
+        ),
+    )
+    logo = models.ImageField(
+        upload_to='tenants/logos/',
+        blank=True, null=True,
+        help_text=(
+            "Logo de l'établissement, uploadé par le PlatformAdmin (Cycle "
+            "de vie du tenant — Phase 2). Stockage disque local classique "
+            "(FileSystemStorage, MEDIA_ROOT/MEDIA_URL), aucun object "
+            "storage (S3/MinIO) n'existe encore dans FullTang — voir "
+            "MULTITENANT_ARCHITECTURE.md pour la limite documentée "
+            "(non partagé entre plusieurs instances du service)."
+        ),
+    )
+
     class Meta:
         ordering = ['-created_at']
 
     def __str__(self):
         return f"{self.name} ({self.identifier})"
+
+
+class AdminAction(models.TextChoices):
+    """Types d'actions journalisées par AdminActionLog (Logs d'administration)."""
+    TENANT_CREATED = 'TENANT_CREATED', 'Établissement créé'
+    TENANT_PROFILE_UPDATED = 'TENANT_PROFILE_UPDATED', 'Profil de l\'établissement modifié'
+    TENANT_TECHNICAL_CONFIG_UPDATED = 'TENANT_TECHNICAL_CONFIG_UPDATED', 'Configuration technique modifiée'
+    TENANT_STATUS_CHANGED = 'TENANT_STATUS_CHANGED', 'Statut de l\'établissement modifié'
+    TENANT_PROVISIONED = 'TENANT_PROVISIONED', 'Provisioning déclenché'
+    TENANT_ADMIN_PROVISIONED = 'TENANT_ADMIN_PROVISIONED', 'Compte administrateur provisionné'
+    TENANT_LOGO_UPDATED = 'TENANT_LOGO_UPDATED', 'Logo mis à jour'
+    TENANT_LOGO_REMOVED = 'TENANT_LOGO_REMOVED', 'Logo supprimé'
+    FUNCTIONAL_SERVICES_BULK_SET = 'FUNCTIONAL_SERVICES_BULK_SET', 'Services configurés en masse'
+    FUNCTIONAL_SERVICE_TOGGLED = 'FUNCTIONAL_SERVICE_TOGGLED', 'Service activé/désactivé'
+
+
+class AdminActionLog(models.Model):
+    """
+    Journal d'administration (Logs — Tenant Management, cycle de vie
+    complet du tenant).
+
+    Une ligne = une action mutante effectuée par un PLATFORM_ADMIN sur le
+    Tenant Registry. Vit dans tenant-service comme le reste des données
+    non-tenant-scopées de la plateforme (Tenant, FunctionalService,
+    PlatformAdmin) — pas un nouveau service.
+
+    `target_tenant_id`/`target_tenant_identifier` sont dupliqués à plat
+    (pas de ForeignKey) : un log d'audit doit rester lisible même si le
+    tenant visé disparaissait un jour (aucune suppression de Tenant
+    n'existe dans cette phase, mais un log ne doit structurellement
+    jamais dépendre du cycle de vie de sa cible). `identifier` est un
+    instantané au moment de l'action — stable par construction (voir
+    Tenant.identifier : "ne doit pas changer une fois attribué").
+
+    Ne contient jamais de secret : `metadata` ne doit recevoir que des
+    valeurs déjà sûres à afficher (codes de service, booléens, noms) —
+    jamais un mot de passe, même temporaire (voir emails.py).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    actor_id = models.CharField(max_length=100, blank=True, default='')
+    actor_email = models.CharField(max_length=255, blank=True, default='')
+    action = models.CharField(max_length=50, choices=AdminAction.choices)
+    target_tenant_id = models.UUIDField(null=True, blank=True)
+    target_tenant_identifier = models.CharField(max_length=100, blank=True, default='')
+    description = models.CharField(max_length=500)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.created_at:%Y-%m-%d %H:%M} — {self.actor_email or self.actor_id} — {self.action}"
 
 
 class PlatformServiceStatus(models.TextChoices):
@@ -303,3 +397,121 @@ class PlatformAdmin(models.Model):
 
     def __str__(self):
         return self.email
+
+
+class FunctionalServiceStatus(models.TextChoices):
+    """États possibles d'un service fonctionnel dans le catalogue produit."""
+    ACTIVE = 'ACTIVE', 'Actif'
+    INACTIVE = 'INACTIVE', 'Inactif'
+
+
+class FunctionalService(models.Model):
+    """
+    Catalogue des SERVICES FONCTIONNELS de FullTang (Tenant Configuration
+    — couche établissement).
+
+    À NE JAMAIS CONFONDRE avec `PlatformService` : `PlatformService` est
+    la liste des MICROSERVICES TECHNIQUES de la plateforme (PERSONNEL,
+    MEDICAL, COMPTA...), utilisée pour le provisioning et le routage de
+    bases de données. `FunctionalService` est la liste des CAPACITÉS
+    PRODUIT qu'un établissement peut proposer (Pharmacie, Laboratoire,
+    Médecine générale...) — une notion strictement métier/fonctionnelle,
+    sans rapport avec le découpage en microservices : par exemple
+    "Pharmacie" et "Laboratoire" sont deux entrées distinctes de ce
+    catalogue alors qu'elles vivent techniquement toutes les deux dans le
+    microservice Medical-Monitoring (`PlatformService` MEDICAL).
+
+    Ce catalogue représente les fonctionnalités RÉELLEMENT développées et
+    maintenues dans le code de FullTang (rôles Medecin/Infirmiere/
+    Pharmacien/Laborantin/Caissier/Comptable dans service-personnel, apps
+    métier de Medical-Monitoring/fultang-compta-financiere/ComptaMatiere/
+    Gestion-Infrastructures) — pas une liste inventée. Il ne représente
+    PAS quels services sont activés pour un tenant donné (voir
+    `TenantFunctionalService` ci-dessous), et n'est PAS géré depuis
+    service-personnel (qui gère aujourd'hui des `Service` organisationnels
+    — services hospitaliers/services analytiques d'un établissement,
+    ex: "Cardiologie" — une notion complètement différente, propre à
+    chaque base tenant ; voir la documentation de Tenant Management).
+
+    `display_order` contrôle l'ordre d'affichage dans l'IHM — les
+    fonctionnalités les plus importantes doivent porter la valeur la plus
+    basse, pas un ordre alphabétique ou d'insertion.
+    """
+
+    code = models.CharField(
+        max_length=50,
+        primary_key=True,
+        validators=[RegexValidator(
+            regex=r'^[A-Z][A-Z0-9_]*$',
+            message="Le code doit être en MAJUSCULES_SNAKE_CASE (ex: PHARMACIE, COMPTA_FINANCIERE).",
+        )],
+        help_text="Identifiant technique stable du service fonctionnel (ex: PHARMACIE).",
+    )
+    name = models.CharField(
+        max_length=100,
+        help_text="Nom lisible du service fonctionnel (ex: Pharmacie).",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=FunctionalServiceStatus.choices,
+        default=FunctionalServiceStatus.ACTIVE,
+        help_text="Statut du service dans le catalogue produit (ACTIVE = proposable aux tenants).",
+    )
+    display_order = models.PositiveIntegerField(
+        default=0,
+        help_text="Ordre d'affichage dans l'IHM (valeur la plus basse = affiché en premier).",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['display_order', 'name']
+
+    def __str__(self):
+        return self.name
+
+
+class TenantFunctionalService(models.Model):
+    """
+    Configuration PAR TENANT de l'activation d'un service fonctionnel
+    (Tenant Configuration — couche établissement, catégorie "Services").
+
+    Une ligne = un tenant a explicitement configuré un service fonctionnel
+    du catalogue (`FunctionalService`) comme activé ou désactivé.
+    L'ABSENCE de ligne pour un (tenant, service) donné est traitée par la
+    couche service (voir `services.py`) comme "activé par défaut" — un
+    nouvel établissement n'a pas besoin qu'on lui crée explicitement 9
+    lignes pour hériter d'un comportement raisonnable ; le wizard de
+    création en crée cependant une complète dès la création (voir
+    `views.py::bulk_set_functional_services`), pour que la configuration
+    initiale soit explicite et traçable plutôt qu'implicite.
+
+    Strictement scopée par tenant : `UniqueConstraint(tenant, service)`
+    empêche toute ambiguïté, et aucune ligne n'est jamais partagée entre
+    deux tenants (chaque ligne pointe vers un seul `Tenant` par `CASCADE`).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        Tenant, on_delete=models.CASCADE, related_name='functional_services',
+    )
+    service = models.ForeignKey(
+        FunctionalService, on_delete=models.PROTECT, related_name='tenant_configs',
+    )
+    enabled = models.BooleanField(
+        default=True,
+        help_text="True si ce service fonctionnel est disponible pour ce tenant.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['tenant_id', 'service_id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'service'],
+                name='tenant_functional_service_unique_tenant_service',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.tenant.identifier} / {self.service.code} = {self.enabled}"

@@ -193,6 +193,14 @@ TENANT_SERVICE_TIMEOUT_SECONDS = int(os.environ.get('TENANT_SERVICE_TIMEOUT_SECO
 # Cache TTL du mapping tenant → base (voir api/tenant_routing/cache.py).
 TENANT_DB_CACHE_TTL_SECONDS = int(os.environ.get('TENANT_DB_CACHE_TTL_SECONDS', '300'))
 
+# Cache TTL de l'état activé/désactivé d'un service fonctionnel (cycle de
+# vie du tenant, Phase 2 — voir api/tenant_routing/functional_service_client.py).
+# Volontairement plus court que TENANT_DB_CACHE_TTL_SECONDS : une
+# désactivation de service doit se refléter rapidement (le PlatformAdmin
+# s'attend à un effet quasi immédiat, contrairement à une information de
+# connexion réseau qui change rarement).
+FUNCTIONAL_SERVICE_CACHE_TTL_SECONDS = int(os.environ.get('FUNCTIONAL_SERVICE_CACHE_TTL_SECONDS', '60'))
+
 # Connexions persistantes par tenant (voir api/tenant_routing/pool_registry.py
 # pour la distinction avec un vrai pool multi-connexions). Configurable
 # par environnement — jamais une valeur unique figée dans le code ;

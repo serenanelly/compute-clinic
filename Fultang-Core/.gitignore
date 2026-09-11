@@ -22,3 +22,6 @@ yarn-error.log*
 .env.development.local
 .env.test.local
 .env.production.local
+
+# Test-upload artifacts (manual testing of tenant logo upload), never real assets
+backend/tenant-service/media/tenants/logos/

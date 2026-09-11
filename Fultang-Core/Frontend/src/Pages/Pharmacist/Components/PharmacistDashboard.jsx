@@ -2,16 +2,19 @@ import { useState, useEffect } from "react";
 import { Link, Navigate, useLocation } from "react-router-dom";
 import PropTypes from "prop-types";
 import { AccessDenied } from "../../../GlobalComponents/AccessDenied.jsx";
+import { ServiceUnavailableScreen } from "../../../GlobalComponents/ServiceUnavailableScreen.jsx";
 import { useAuthentication } from "../../../Utils/Provider.jsx";
+import { useFunctionalServiceGate } from "../../../hooks/useFunctionalServiceGate.js";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { Loading } from "../../../GlobalComponents/Loading.jsx";
 import { PharmacistNavBar } from "./PharmacistNavBar.jsx";
 
-export function PharmacistDashBoard({ children, linkList, requiredRole }) {
+export function PharmacistDashBoard({ children, linkList, requiredRole, requiredFunctionalService }) {
     PharmacistDashBoard.propTypes = {
         children: PropTypes.node.isRequired,
         linkList: PropTypes.array.isRequired,
         requiredRole: PropTypes.string.isRequired,
+        requiredFunctionalService: PropTypes.string,
     };
 
     const location = useLocation();
@@ -24,6 +27,7 @@ export function PharmacistDashBoard({ children, linkList, requiredRole }) {
     const { isAuthenticated, hasRole } = useAuthentication();
     const [expandedLinks, setExpandedLinks] = useState({});
     const [isNavigating, setIsNavigating] = useState(true);
+    const { checking: checkingService, blocked: serviceBlocked } = useFunctionalServiceGate(requiredFunctionalService);
 
     useEffect(() => {
         setIsNavigating(true);
@@ -130,6 +134,14 @@ export function PharmacistDashBoard({ children, linkList, requiredRole }) {
 
     if (!hasRole(requiredRole)) {
         return <AccessDenied Role={requiredRole} />;
+    }
+
+    if (checkingService) {
+        return <Loading />;
+    }
+
+    if (serviceBlocked) {
+        return <ServiceUnavailableScreen />;
     }
 
     if (isNavigating) {

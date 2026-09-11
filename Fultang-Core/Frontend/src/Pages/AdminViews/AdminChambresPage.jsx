@@ -273,7 +273,7 @@ export function AdminChambresPage() {
     ];
 
     return (
-        <CustomDashboard linkList={newAdminNavLink} requiredRole={"Admin"}>
+        <CustomDashboard linkList={newAdminNavLink} requiredRole={"Admin"} requiredFunctionalService="GESTION_INFRASTRUCTURES">
             <AdminNavBar />
             <div className="p-6 bg-gray-50 min-h-screen">
                 {/* Header */}

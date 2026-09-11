@@ -716,3 +716,399 @@ class DatabaseProvisioningUnitTests(TestCase):
 
         # L'alias a bien été retiré après l'échec (jamais laissé en place).
         self.assertNotIn(self.alias, mock_connections.databases)
+
+
+# =============================================================================
+# Cycle de vie complet du tenant (Phase 2) — compte administrateur initial,
+# activation/désactivation de service réellement effective.
+# =============================================================================
+
+from .models import Admin, Infirmiere, Pharmacien  # noqa: E402
+from rest_framework.exceptions import NotFound  # noqa: E402
+from .permissions import HasFunctionalServiceEnabled  # noqa: E402
+from .tenant_routing.functional_service_client import (  # noqa: E402
+    FunctionalServiceRegistryUnavailableError,
+    functional_service_cache,
+)
+from .views import generate_temporary_password  # noqa: E402
+
+CREATE_ADMIN_TENANT = str(uuid.uuid4())
+
+
+class CreateFirstAdminEndpointTests(APITestCase):
+    """
+    POST /api/internal/create-first-admin/ — création du compte
+    administrateur initial d'un tenant (Cycle de vie du tenant, Phase 2,
+    §2/§4). Même protection `IsInternalService` que
+    ProvisionDatabaseView ; le routage réel vers une base tenant est
+    contourné ici via `ensure_connection_alias` mocké (même technique
+    déjà utilisée ailleurs dans FullTang pour tester du code tenant-scopé
+    sans registre réel — voir fultang-compta-financiere/apps/messaging/tests.py).
+    """
+
+    def setUp(self):
+        self.url = '/api/internal/create-first-admin/'
+        self.token_patch = override_settings(TENANT_SERVICE_INTERNAL_TOKEN='test-internal-token')
+        self.token_patch.enable()
+        self.addCleanup(self.token_patch.disable)
+        self.alias_patch = patch('api.tenant_routing.router.ensure_connection_alias', return_value='default')
+        self.alias_patch.start()
+        self.addCleanup(self.alias_patch.stop)
+
+    def _post(self, payload, token='test-internal-token'):
+        headers = {'HTTP_X_INTERNAL_SERVICE_TOKEN': token} if token is not None else {}
+        return self.client.post(self.url, payload, format='json', **headers)
+
+    def test_missing_token_is_rejected(self):
+        response = self._post({'tenant_id': CREATE_ADMIN_TENANT, 'nom': 'Dupont', 'email': 'a@b.test'}, token=None)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_missing_required_fields_returns_400(self):
+        response = self._post({'tenant_id': CREATE_ADMIN_TENANT, 'nom': 'Dupont'})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_successful_creation_returns_temporary_password(self):
+        response = self._post({
+            'tenant_id': CREATE_ADMIN_TENANT, 'nom': 'Dupont', 'prenom': 'Jean', 'email': 'jean.dupont@example.test',
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['email'], 'jean.dupont@example.test')
+        self.assertTrue(response.data['temporary_password'])
+
+        created = Admin.objects.using('default').get(email='jean.dupont@example.test')
+        self.assertEqual(str(created.tenant_id), CREATE_ADMIN_TENANT)
+        self.assertNotEqual(created.mot_de_passe, response.data['temporary_password'])  # hashé, jamais en clair
+
+    def test_created_admin_can_authenticate_with_the_temporary_password(self):
+        """Le compte créé est un compte RÉELLEMENT utilisable, pas seulement une ligne en base."""
+        from django.contrib.auth.hashers import check_password
+        response = self._post({
+            'tenant_id': CREATE_ADMIN_TENANT, 'nom': 'Dupont', 'prenom': 'Jean', 'email': 'auth-check@example.test',
+        })
+        created = Admin.objects.using('default').get(email='auth-check@example.test')
+        self.assertTrue(check_password(response.data['temporary_password'], created.mot_de_passe))
+
+    def test_duplicate_email_in_same_tenant_returns_409(self):
+        self._post({'tenant_id': CREATE_ADMIN_TENANT, 'nom': 'Dupont', 'email': 'dup@example.test'})
+        response = self._post({'tenant_id': CREATE_ADMIN_TENANT, 'nom': 'Autre', 'email': 'dup@example.test'})
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+
+    def test_admin_is_correctly_associated_with_its_tenant_never_cross_tenant(self):
+        other_tenant = str(uuid.uuid4())
+        self._post({'tenant_id': CREATE_ADMIN_TENANT, 'nom': 'A', 'email': 'iso@example.test'})
+        response_other = self._post({'tenant_id': other_tenant, 'nom': 'B', 'email': 'iso@example.test'})
+        # Même email, deux tenants différents : deux comptes distincts (voir
+        # UniqueConstraint(tenant_id, email)), jamais une collision inter-tenant.
+        self.assertEqual(response_other.status_code, status.HTTP_201_CREATED)
+        admins = list(Admin.objects.using('default').filter(email='iso@example.test'))
+        self.assertEqual(len(admins), 2)
+        self.assertNotEqual(admins[0].tenant_id, admins[1].tenant_id)
+
+
+class GenerateTemporaryPasswordTests(TestCase):
+    def test_password_has_expected_style_and_is_random(self):
+        first = generate_temporary_password()
+        second = generate_temporary_password()
+        self.assertTrue(first.startswith('Fultang@'))
+        # Extrêmement improbable que deux tirages aléatoires coïncident —
+        # pas une garantie absolue, mais suffisante pour détecter une
+        # régression qui figerait la valeur.
+        self.assertNotEqual(first, second)
+
+
+class HasFunctionalServiceEnabledPermissionTests(TestCase):
+    """
+    Permission générique d'activation/désactivation de service (Cycle de
+    vie du tenant, Phase 2, §12-15) — testée directement, indépendamment
+    de toute vue, via `functional_service_cache` mocké.
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.addCleanup(functional_service_cache.clear)
+
+    def _request_with_tenant(self, tenant_id):
+        request = self.factory.get('/pharmaciens/')
+        set_tenant_context(tenant_id)
+        self.addCleanup(lambda: set_tenant_context(None))
+        return request
+
+    def test_enabled_service_grants_access(self):
+        permission = HasFunctionalServiceEnabled.for_service('PHARMACIE')()
+        request = self._request_with_tenant('tenant-a')
+        with patch.object(functional_service_cache, 'get', return_value=True):
+            self.assertTrue(permission.has_permission(request, None))
+
+    def test_disabled_service_denies_access(self):
+        """Phase 3 : un service désactivé lève NotFound (404), plus un simple `return False` (403)."""
+        permission = HasFunctionalServiceEnabled.for_service('PHARMACIE')()
+        request = self._request_with_tenant('tenant-a')
+        with patch.object(functional_service_cache, 'get', return_value=False):
+            with self.assertRaises(NotFound) as ctx:
+                permission.has_permission(request, None)
+        self.assertEqual(ctx.exception.detail['error_type'], 'SERVICE_UNAVAILABLE')
+
+    def test_unassigned_pool_tenant_none_is_always_granted(self):
+        """§3 : le pool non assigné n'a aucune configuration de service fonctionnel applicable."""
+        permission = HasFunctionalServiceEnabled.for_service('PHARMACIE')()
+        request = self._request_with_tenant(None)
+        with patch.object(functional_service_cache, 'get', side_effect=AssertionError("ne doit pas être appelé")):
+            self.assertTrue(permission.has_permission(request, None))
+
+    def test_registry_unavailable_error_propagates_never_silently_allows(self):
+        permission = HasFunctionalServiceEnabled.for_service('PHARMACIE')()
+        request = self._request_with_tenant('tenant-a')
+        with patch.object(functional_service_cache, 'get', side_effect=FunctionalServiceRegistryUnavailableError("down")):
+            with self.assertRaises(FunctionalServiceRegistryUnavailableError):
+                permission.has_permission(request, None)
+
+    def test_two_service_instances_are_independent(self):
+        """Générique par construction : PHARMACIE désactivé n'affecte jamais LABORATOIRE."""
+        pharmacie_permission = HasFunctionalServiceEnabled.for_service('PHARMACIE')()
+        labo_permission = HasFunctionalServiceEnabled.for_service('LABORATOIRE')()
+        request = self._request_with_tenant('tenant-a')
+
+        def fake_get(tenant_id, code):
+            return code != 'PHARMACIE'
+
+        with patch.object(functional_service_cache, 'get', side_effect=fake_get):
+            with self.assertRaises(NotFound):
+                pharmacie_permission.has_permission(request, None)
+            self.assertTrue(labo_permission.has_permission(request, None))
+
+
+TENANT_A_UUID = str(uuid.uuid4())
+TENANT_DISABLED_UUID = str(uuid.uuid4())
+TENANT_ENABLED_UUID = str(uuid.uuid4())
+
+
+class FunctionalServiceEnforcementEndpointTests(APITestCase):
+    """
+    Application réelle (pas seulement masquage frontend) de
+    l'activation/désactivation de service — PharmacienViewSet (contrôle
+    de classe) et PersonnelViewSet.create (contrôle générique par poste),
+    cycle de vie du tenant Phase 2, §12-15.
+
+    Utilise de vrais UUID pour `tenant_id` (et non des chaînes libres
+    comme "tenant-a") : depuis le correctif qui fait persister `tenant_id`
+    sur chaque personnel créé (voir PersonnelViewSet.create), une valeur
+    non-UUID ferait échouer l'écriture en base (colonne UUIDField).
+    """
+
+    def setUp(self):
+        self.addCleanup(functional_service_cache.clear)
+        self.addCleanup(lambda: set_tenant_context(None))
+        # Une requête AUTORISÉE va jusqu'à toucher l'ORM (Pharmacien.objects...),
+        # ce qui déclenche le Database Router — mocké vers 'default' ici, car
+        # ces tests utilisent des tenant_id fictifs non enregistrés dans le
+        # vrai Tenant Registry (même technique que CreateFirstAdminEndpointTests).
+        # Une requête BLOQUÉE (403) n'atteint jamais l'ORM : la permission est
+        # évaluée avant, donc ce mock n'a alors aucun effet à vérifier.
+        self.alias_patch = patch('api.tenant_routing.router.ensure_connection_alias', return_value='default')
+        self.alias_patch.start()
+        self.addCleanup(self.alias_patch.stop)
+
+    def _authenticated(self, tenant_id):
+        set_tenant_context(tenant_id)
+        return {'HTTP_X_USER_ID': 'admin-test', 'HTTP_X_USER_ROLES': 'Admin', 'HTTP_X_TENANT_ID': tenant_id or ''}
+
+    def test_pharmacien_listing_blocked_when_pharmacie_disabled(self):
+        """Phase 3 : 404 (« n'existe pas »), plus 403 — jamais révéler qu'un mécanisme d'autorisation a bloqué l'accès."""
+        headers = self._authenticated(TENANT_A_UUID)
+        with patch.object(functional_service_cache, 'get', return_value=False):
+            response = self.client.get('/api/pharmaciens/', **headers)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data['error_type'], 'SERVICE_UNAVAILABLE')
+
+    def test_pharmacien_listing_allowed_when_pharmacie_enabled(self):
+        headers = self._authenticated(TENANT_A_UUID)
+        with patch.object(functional_service_cache, 'get', return_value=True):
+            response = self.client.get('/api/pharmaciens/', **headers)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_generic_personnel_create_blocked_for_pharmacien_poste_when_disabled(self):
+        headers = self._authenticated(TENANT_A_UUID)
+        payload = {
+            'poste': 'pharmacien', 'nom': 'Kamga', 'prenom': 'Alice',
+            'email': 'alice@example.test', 'date_naissance': '1990-01-01',
+        }
+        with patch.object(functional_service_cache, 'get', return_value=False):
+            response = self.client.post('/api/personnel/', payload, format='json', **headers)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_generic_personnel_create_allowed_for_pharmacien_poste_when_enabled(self):
+        headers = self._authenticated(TENANT_A_UUID)
+        payload = {
+            'poste': 'pharmacien', 'nom': 'Kamga', 'prenom': 'Alice',
+            'email': 'alice2@example.test', 'date_naissance': '1990-01-01',
+        }
+        with patch.object(functional_service_cache, 'get', return_value=True):
+            response = self.client.post('/api/personnel/', payload, format='json', **headers)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_generic_personnel_create_unaffected_for_poste_without_functional_mapping(self):
+        """Un poste absent de POSTE_TO_FUNCTIONAL_SERVICE (ex: 'directeur') n'est soumis à aucun contrôle."""
+        headers = self._authenticated(TENANT_A_UUID)
+        payload = {
+            'poste': 'directeur', 'nom': 'Mballa', 'prenom': 'Paul',
+            'email': 'paul@example.test', 'date_naissance': '1975-01-01',
+        }
+        with patch.object(functional_service_cache, 'get', side_effect=AssertionError("ne doit pas être appelé")):
+            response = self.client.post('/api/personnel/', payload, format='json', **headers)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_isolation_between_tenants_disabling_for_one_never_affects_the_other(self):
+        """§21 de la mission : l'isolation entre tenants doit être maintenue."""
+        def fake_get(tenant_id, code):
+            return tenant_id != TENANT_DISABLED_UUID
+
+        headers_disabled = self._authenticated(TENANT_DISABLED_UUID)
+        with patch.object(functional_service_cache, 'get', side_effect=fake_get):
+            response_disabled = self.client.get('/api/pharmaciens/', **headers_disabled)
+
+        headers_enabled = self._authenticated(TENANT_ENABLED_UUID)
+        with patch.object(functional_service_cache, 'get', side_effect=fake_get):
+            response_enabled = self.client.get('/api/pharmaciens/', **headers_enabled)
+
+        self.assertEqual(response_disabled.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response_enabled.status_code, status.HTTP_200_OK)
+
+
+# =============================================================================
+# Mot de passe des comptes créés — correctif : avant ce correctif,
+# BasePersonnelSerializer ne hashait jamais mot_de_passe (compte créé via
+# MedecinViewSet/PharmacienViewSet/etc. avec un mot de passe en clair ou
+# vide, donc inutilisable), et PersonnelViewSet.create() attribuait la
+# même valeur fixe ('Fultang@123') à tout le monde sans jamais la
+# communiquer à l'administrateur.
+# =============================================================================
+
+from django.contrib.auth.hashers import check_password, is_password_usable  # noqa: E402
+
+
+class PersonnelPasswordHashingTests(APITestCase):
+    """ModelViewSet génériques (Medecin, Pharmacien...) — via BasePersonnelSerializer."""
+
+    def setUp(self):
+        self.client.credentials(**{'HTTP_X_USER_ID': 'admin-test', 'HTTP_X_USER_ROLES': 'Admin'})
+
+    def _medecin_payload(self, **overrides):
+        payload = {
+            'nom': 'Dupont', 'prenom': 'Jean', 'date_naissance': '1980-01-01',
+            'adresse': 'Yaoundé', 'email': 'jean.dupont.hash@example.test',
+            'contact': '+237600000000', 'matricule': f'MED-{uuid.uuid4().hex[:8]}',
+            'date_embauche': '2020-01-01', 'specialite': 'Cardiologie', 'numero_ordre': 'ONMC-0001',
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_create_without_password_generates_a_real_usable_one(self):
+        response = self.client.post('/api/medecins/', self._medecin_payload(), format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIn('temporary_password', response.data)
+        self.assertTrue(response.data['temporary_password'])
+
+        created = Medecin.objects.using('default').get(email='jean.dupont.hash@example.test')
+        self.assertTrue(is_password_usable(created.mot_de_passe))
+        self.assertTrue(check_password(response.data['temporary_password'], created.mot_de_passe))
+
+    def test_temporary_password_is_never_returned_on_list_or_retrieve(self):
+        create_response = self.client.post('/api/medecins/', self._medecin_payload(email='no-leak@example.test'), format='json')
+        personnel_id = create_response.data['id_personnel']
+
+        list_response = self.client.get('/api/medecins/')
+        for item in list_response.data.get('results', list_response.data):
+            self.assertNotIn('temporary_password', item)
+
+        retrieve_response = self.client.get(f'/api/medecins/{personnel_id}/')
+        self.assertNotIn('temporary_password', retrieve_response.data)
+
+    def test_explicit_password_is_still_hashed_not_stored_in_clear(self):
+        response = self.client.post(
+            '/api/medecins/', self._medecin_payload(email='explicit-pw@example.test', mot_de_passe='MonMotDePasse!'),
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        created = Medecin.objects.using('default').get(email='explicit-pw@example.test')
+        self.assertNotEqual(created.mot_de_passe, 'MonMotDePasse!')
+        self.assertTrue(check_password('MonMotDePasse!', created.mot_de_passe))
+
+
+class PersonnelViewSetPasswordTests(APITestCase):
+    """Endpoint générique polymorphe /api/personnel/ (PersonnelViewSet.create)."""
+
+    def setUp(self):
+        self.client.credentials(**{'HTTP_X_USER_ID': 'admin-test', 'HTTP_X_USER_ROLES': 'Admin'})
+
+    def _personnel_payload(self, **overrides):
+        payload = {
+            'poste': 'infirmier', 'nom': 'Ateba', 'prenom': 'Marie', 'date_naissance': '1990-01-01',
+            'email': 'marie.ateba.hash@example.test', 'contact': '+237611111111',
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_two_created_accounts_never_share_the_same_password(self):
+        """§ régression directe du bug 'Fultang@123' fixe pour tout le monde."""
+        response_a = self.client.post('/api/personnel/', self._personnel_payload(email='a@example.test'), format='json')
+        response_b = self.client.post('/api/personnel/', self._personnel_payload(email='b@example.test'), format='json')
+
+        self.assertEqual(response_a.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response_b.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(response_a.data['temporary_password'], response_b.data['temporary_password'])
+
+    def test_created_account_can_authenticate_with_the_returned_password(self):
+        response = self.client.post('/api/personnel/', self._personnel_payload(email='auth-check@example.test'), format='json')
+        created = Infirmiere.objects.using('default').get(email='auth-check@example.test')
+        self.assertTrue(check_password(response.data['temporary_password'], created.mot_de_passe))
+
+
+# =============================================================================
+# Invalidation active du cache FunctionalService (Cycle de vie du tenant,
+# Phase 3) — endpoint interne poussé par tenant-service après un
+# toggle/bulk-set réussi, pour ne plus dépendre uniquement du TTL.
+# =============================================================================
+
+class FunctionalServiceInvalidateEndpointTests(APITestCase):
+
+    def setUp(self):
+        self.url = '/api/internal/functional-services/invalidate/'
+        self.addCleanup(functional_service_cache.clear)
+
+    @override_settings(TENANT_SERVICE_INTERNAL_TOKEN='test-internal-token')
+    def test_missing_token_is_rejected(self):
+        response = self.client.post(self.url, {'tenant_id': 'x', 'code': 'PHARMACIE'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @override_settings(TENANT_SERVICE_INTERNAL_TOKEN='test-internal-token')
+    def test_missing_fields_returns_400(self):
+        response = self.client.post(
+            self.url, {'tenant_id': 'x'}, format='json', HTTP_X_INTERNAL_SERVICE_TOKEN='test-internal-token',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @override_settings(TENANT_SERVICE_INTERNAL_TOKEN='test-internal-token')
+    def test_invalidate_actually_clears_the_cache_entry(self):
+        """Le cœur du correctif : une entrée en cache doit disparaître immédiatement, sans attendre le TTL."""
+        with patch.object(functional_service_cache, 'get', return_value=True):
+            self.assertTrue(functional_service_cache.get(TENANT_A_UUID, 'PHARMACIE'))  # peuple le cache
+
+        # Sans invalidation, la valeur EN CACHE (True) serait réutilisée même
+        # si le Registry répond maintenant False — c'est justement ce que
+        # l'invalidation doit court-circuiter.
+        response = self.client.post(
+            self.url, {'tenant_id': TENANT_A_UUID, 'code': 'PHARMACIE'}, format='json',
+            HTTP_X_INTERNAL_SERVICE_TOKEN='test-internal-token',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        with patch('api.tenant_routing.functional_service_client.resolve_functional_service_enabled', return_value=False):
+            self.assertFalse(functional_service_cache.get(TENANT_A_UUID, 'PHARMACIE'))
+
+    @override_settings(TENANT_SERVICE_INTERNAL_TOKEN='test-internal-token')
+    def test_invalidate_unknown_entry_is_a_harmless_noop(self):
+        response = self.client.post(
+            self.url, {'tenant_id': 'never-cached', 'code': 'PHARMACIE'}, format='json',
+            HTTP_X_INTERNAL_SERVICE_TOKEN='test-internal-token',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)

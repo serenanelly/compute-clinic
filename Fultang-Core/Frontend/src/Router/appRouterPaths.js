@@ -13,6 +13,10 @@ export const AppRoutesPaths = {
     // Platform Admin (back-office plateforme, distinct des tenants)
     platformAdminLoginPage: "/platform-admin/login",
     platformAdminDashboardPage: "/platform-admin/dashboard",
+    platformAdminEstablishmentsPage: "/platform-admin/establishments",
+    platformAdminCreateTenantPage: "/platform-admin/establishments/new",
+    platformAdminTenantDetailPage: "/platform-admin/establishments/:tenantId",
+    platformAdminLogsPage: "/platform-admin/logs",
 
     doctorPage: "/doctor/waiting-room",
     laboratoryAssistantPage: "/laboratory-assistant/analyse",

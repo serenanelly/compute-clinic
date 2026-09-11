@@ -215,3 +215,58 @@ async def test_resolve_uses_tenant_service_as_source_of_truth():
     mock_get.assert_awaited_once()
     called_url = mock_get.call_args.args[0]
     assert called_url == f"{TENANT_SERVICE_URL}/api/tenants/resolve/"
+
+
+# --- get_tenant_status (Cycle de vie du tenant, Phase 3 — suspension) -------
+#
+# Contrairement à resolve() (hostname → tenant), get_tenant_status()
+# résout PAR ID — utilisé quand le hostname est hors convention (ex.
+# localhost) mais qu'un JWT porte déjà un tenant_id, pour détecter une
+# suspension survenue APRÈS l'émission de ce JWT (stateless, jamais
+# révoqué automatiquement autrement).
+
+async def test_get_tenant_status_returns_active():
+    resolver = make_resolver()
+    mock_response = httpx.Response(200, json={"id": "t1", "identifier": "hopital-central", "status": "ACTIVE"})
+    with patch.object(resolver._client, "get", new=AsyncMock(return_value=mock_response)) as mocked_get:
+        status = await resolver.get_tenant_status("t1")
+
+    assert status == "ACTIVE"
+    assert mocked_get.call_args.kwargs["params"] == {"id": "t1"}
+    assert mocked_get.call_args.kwargs["headers"][INTERNAL_SERVICE_TOKEN_HEADER] == INTERNAL_TOKEN
+
+
+async def test_get_tenant_status_returns_inactive_for_suspended_tenant():
+    """Le cœur du correctif : un tenant suspendu APRÈS l'émission d'un JWT doit être détecté."""
+    resolver = make_resolver()
+    mock_response = httpx.Response(200, json={"id": "t1", "identifier": "hopital-central", "status": "INACTIVE"})
+    with patch.object(resolver._client, "get", new=AsyncMock(return_value=mock_response)):
+        status = await resolver.get_tenant_status("t1")
+
+    assert status == "INACTIVE"
+
+
+async def test_get_tenant_status_returns_none_for_unknown_tenant_id():
+    """Un tenant qui n'existe plus dans le Registre : jamais un statut deviné."""
+    resolver = make_resolver()
+    mock_response = httpx.Response(404, json={})
+    with patch.object(resolver._client, "get", new=AsyncMock(return_value=mock_response)):
+        status = await resolver.get_tenant_status("does-not-exist")
+
+    assert status is None
+
+
+async def test_get_tenant_status_raises_resolution_error_when_unreachable():
+    """Fail-closed : jamais un accès silencieusement autorisé faute de pouvoir vérifier."""
+    resolver = make_resolver()
+    with patch.object(resolver._client, "get", new=AsyncMock(side_effect=httpx.ConnectError("boom"))):
+        with pytest.raises(TenantResolutionError):
+            await resolver.get_tenant_status("t1")
+
+
+async def test_get_tenant_status_raises_resolution_error_on_unexpected_status():
+    resolver = make_resolver()
+    mock_response = httpx.Response(500, json={})
+    with patch.object(resolver._client, "get", new=AsyncMock(return_value=mock_response)):
+        with pytest.raises(TenantResolutionError):
+            await resolver.get_tenant_status("t1")

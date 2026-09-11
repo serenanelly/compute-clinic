@@ -19,30 +19,53 @@ Sera réutilisé tel quel par les phases futures qui ont besoin d'un accès
 bas niveau aux tenants sans passer par l'API HTTP (ex: Dynamic Database
 Routing en Phase 6, Tenant Provisioning en Phase 7).
 """
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 from uuid import UUID
 
 from django.db import IntegrityError, transaction
-from django.db.models import QuerySet
+from django.db.models import Q, QuerySet
 
-from .models import PlatformService, Tenant, TenantDatabase, TenantDatabaseStatus, TenantStatus
+from .models import (
+    AdminActionLog,
+    FunctionalService,
+    PlatformService,
+    Tenant,
+    TenantDatabase,
+    TenantDatabaseStatus,
+    TenantFunctionalService,
+    TenantStatus,
+)
+
+# Champs de profil facultatifs — voir Tenant.Meta et serializers.py::TENANT_PROFILE_FIELDS.
+_TENANT_PROFILE_FIELDS = ('address', 'phone', 'email', 'logo_url')
 
 
 class TenantRepository:
     """Encapsule les opérations de lecture/écriture sur le modèle Tenant."""
 
-    def create(self, *, name: str, identifier: str, allow_clinical_agent_export: Optional[bool] = None) -> Tenant:
+    def create(
+        self, *, name: str, identifier: str,
+        allow_clinical_agent_export: Optional[bool] = None,
+        **profile_fields,
+    ) -> Tenant:
         """
         Persiste un nouveau tenant avec le statut par défaut (ACTIVE).
 
         `allow_clinical_agent_export` est optionnel : si non fourni, le
         défaut du modèle (`True`) s'applique — un appelant qui ne connaît
         pas encore ce champ (scripts existants, tests plus anciens)
-        continue de fonctionner sans modification.
+        continue de fonctionner sans modification. `profile_fields` ne
+        retient que les clés reconnues (`address`/`phone`/`email`/
+        `logo_url`) — toute autre clé est silencieusement ignorée plutôt
+        que de lever une erreur, pour rester tolérant à un appelant qui
+        passerait un dict plus large (ex: `serializer.validated_data`).
         """
         kwargs = {'name': name, 'identifier': identifier}
         if allow_clinical_agent_export is not None:
             kwargs['allow_clinical_agent_export'] = allow_clinical_agent_export
+        for field in _TENANT_PROFILE_FIELDS:
+            if field in profile_fields and profile_fields[field] is not None:
+                kwargs[field] = profile_fields[field]
         return Tenant.objects.create(**kwargs)
 
     def update_allow_clinical_agent_export(self, tenant_id: UUID, value: bool) -> Tenant:
@@ -50,6 +73,18 @@ class TenantRepository:
         tenant = self.get_by_id(tenant_id)
         tenant.allow_clinical_agent_export = value
         tenant.save(update_fields=['allow_clinical_agent_export'])
+        return tenant
+
+    def update_profile(self, tenant_id: UUID, **profile_fields) -> Tenant:
+        """Met à jour un sous-ensemble des champs de profil descriptifs."""
+        tenant = self.get_by_id(tenant_id)
+        updated = []
+        for field in _TENANT_PROFILE_FIELDS:
+            if field in profile_fields:
+                setattr(tenant, field, profile_fields[field])
+                updated.append(field)
+        if updated:
+            tenant.save(update_fields=updated)
         return tenant
 
     def get_by_id(self, tenant_id: UUID) -> Tenant:
@@ -75,6 +110,24 @@ class TenantRepository:
         tenant = self.get_by_id(tenant_id)
         tenant.status = status
         tenant.save(update_fields=['status'])
+        return tenant
+
+    def set_logo(self, tenant_id: UUID, uploaded_file) -> Tenant:
+        """Remplace le logo uploadé d'un tenant (écrase l'ancien fichier s'il existe)."""
+        tenant = self.get_by_id(tenant_id)
+        if tenant.logo:
+            tenant.logo.delete(save=False)
+        tenant.logo = uploaded_file
+        tenant.save(update_fields=['logo'])
+        return tenant
+
+    def remove_logo(self, tenant_id: UUID) -> Tenant:
+        """Supprime le logo uploadé d'un tenant (le fichier disque est effacé)."""
+        tenant = self.get_by_id(tenant_id)
+        if tenant.logo:
+            tenant.logo.delete(save=False)
+        tenant.logo = None
+        tenant.save(update_fields=['logo'])
         return tenant
 
 
@@ -239,3 +292,130 @@ class TenantDatabaseRepository:
         return self.update_fields(
             tenant_database_id, status=TenantDatabaseStatus.FAILED, last_error=error[:500],
         )
+
+
+class FunctionalServiceRepository:
+    """
+    Encapsule les opérations de lecture sur le catalogue FunctionalService
+    (Tenant Configuration — voir modèle pour la distinction avec
+    `PlatformService`).
+
+    Aucune écriture exposée dans cette phase : le catalogue est seedé par
+    migration (`0009_seed_functional_services.py`), pas géré via l'API —
+    l'ajouter viendrait avec la future gestion complète du catalogue,
+    hors périmètre ici.
+    """
+
+    def list(self, *, status: Optional[str] = None) -> QuerySet[FunctionalService]:
+        """Retourne le catalogue, ordonné par `display_order`, filtré par statut si fourni."""
+        queryset = FunctionalService.objects.all()
+        if status is not None:
+            queryset = queryset.filter(status=status)
+        return queryset
+
+    def get_by_code(self, code: str) -> FunctionalService:
+        """Retourne le service correspondant à `code`.
+
+        Lève FunctionalService.DoesNotExist si aucun service ne correspond.
+        """
+        return FunctionalService.objects.get(code=code)
+
+
+class TenantFunctionalServiceRepository:
+    """
+    Encapsule les opérations de lecture/écriture sur la configuration par
+    tenant des services fonctionnels (`TenantFunctionalService`).
+
+    Ne réimplémente aucune logique de catalogue : `FunctionalServiceRepository`
+    reste l'unique source de vérité sur les services qui EXISTENT ; celui-ci
+    ne gère que l'activation/désactivation PAR TENANT.
+    """
+
+    def list_for_tenant(self, tenant_id: UUID) -> QuerySet[TenantFunctionalService]:
+        """
+        Retourne les lignes de configuration EXISTANTES pour ce tenant
+        (peut être un sous-ensemble du catalogue complet — voir
+        `TenantFunctionalService.__doc__` pour la sémantique de l'absence
+        de ligne : "activé par défaut", gérée par la couche service, pas
+        ici).
+        """
+        return TenantFunctionalService.objects.filter(tenant_id=tenant_id).select_related('service')
+
+    def upsert(self, tenant_id: UUID, service_code: str, enabled: bool) -> TenantFunctionalService:
+        """Crée ou met à jour la configuration d'UN service pour UN tenant."""
+        instance, created = TenantFunctionalService.objects.update_or_create(
+            tenant_id=tenant_id, service_id=service_code,
+            defaults={'enabled': enabled},
+        )
+        return instance
+
+    def bulk_upsert(self, tenant_id: UUID, service_enabled_pairs: Iterable[Tuple[str, bool]]) -> None:
+        """
+        Crée ou met à jour la configuration de PLUSIEURS services pour UN
+        tenant en une seule opération logique.
+
+        Utilisé par le wizard de création de tenant (Étape 3 — Services) :
+        chaque paire est traitée par `upsert`, qui gère déjà l'idempotence
+        (`update_or_create`) — pas de transaction explicite ici, un échec
+        partiel laisserait certaines lignes déjà à jour et d'autres non,
+        ce qui reste un état cohérent et re-jouable (rappeler ce même
+        endpoint corrige les lignes manquantes, jamais un état incohérent
+        au sens métier).
+        """
+        for service_code, enabled in service_enabled_pairs:
+            self.upsert(tenant_id, service_code, enabled)
+
+
+class AdminActionLogRepository:
+    """
+    Encapsule les opérations de lecture/écriture du journal
+    d'administration (Logs — cycle de vie complet du tenant, Phase 2).
+    """
+
+    def create(
+        self, *, action: str, actor_id: str = '', actor_email: str = '',
+        target_tenant_id: Optional[UUID] = None, target_tenant_identifier: str = '',
+        description: str = '', metadata: Optional[dict] = None,
+    ) -> AdminActionLog:
+        return AdminActionLog.objects.create(
+            action=action,
+            actor_id=actor_id or '',
+            actor_email=actor_email or '',
+            target_tenant_id=target_tenant_id,
+            target_tenant_identifier=target_tenant_identifier or '',
+            description=description,
+            metadata=metadata or {},
+        )
+
+    def list(
+        self, *, tenant_id: Optional[UUID] = None, actor: Optional[str] = None,
+        action: Optional[str] = None, date_from=None, date_to=None,
+    ) -> QuerySet[AdminActionLog]:
+        """Liste le journal, filtré par tenant/acteur/type d'action/période si fournis.
+
+        `actor` filtre par correspondance partielle sur l'id OU l'email de
+        l'acteur (un PLATFORM_ADMIN se souvient rarement d'un UUID exact).
+        """
+        queryset = AdminActionLog.objects.all()
+        if tenant_id is not None:
+            queryset = queryset.filter(target_tenant_id=tenant_id)
+        if actor:
+            queryset = queryset.filter(
+                Q(actor_email__icontains=actor) | Q(actor_id__icontains=actor)
+            )
+        if action:
+            queryset = queryset.filter(action=action)
+        if date_from:
+            queryset = queryset.filter(created_at__date__gte=date_from)
+        if date_to:
+            # `__date__lte` compare la PARTIE DATE de created_at (convertie
+            # dans le fuseau courant par Django) à date_to — inclut donc
+            # naturellement toute la journée de date_to, sans avoir besoin
+            # de calculer une borne "lendemain minuit" à la main. Avant ce
+            # correctif, `created_at__lte=date_to` comparait un datetime à
+            # une simple chaîne de date (minuit UTC) : tout événement du
+            # jour choisi lui-même — pas seulement les jours suivants —
+            # était exclu, ce qui pouvait facilement ressembler à "le
+            # filtre ne renvoie rien" pour l'utilisateur.
+            queryset = queryset.filter(created_at__date__lte=date_to)
+        return queryset

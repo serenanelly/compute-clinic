@@ -216,7 +216,7 @@ export function DeliveryList() {
 
     if (loading) {
         return (
-            <AccountantDashBoard linkList={AccountantNavLink} requiredRole={"compta_matiere"}>
+            <AccountantDashBoard linkList={AccountantNavLink} requiredRole={"compta_matiere"} requiredFunctionalService="COMPTA_MATIERE">
                 <AccountantNavBar />
                 <div className="flex items-center justify-center h-96">
                     <div className="text-center">
@@ -229,7 +229,7 @@ export function DeliveryList() {
     }
 
     return (
-        <AccountantDashBoard linkList={AccountantNavLink} requiredRole={"compta_matiere"}>
+        <AccountantDashBoard linkList={AccountantNavLink} requiredRole={"compta_matiere"} requiredFunctionalService="COMPTA_MATIERE">
             <AccountantNavBar />
             <div className="p-6 space-y-6">
                 <div className="flex justify-between items-center">

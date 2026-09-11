@@ -1,6 +1,9 @@
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+
+from core.permissions import HasFunctionalServiceEnabled
 from .models import (
     Consultation, Symptome, Diagnostic, MedicamentPrescrit,
     Examen, ResultatExamen,
@@ -22,9 +25,24 @@ class VisiteViewSet(viewsets.ModelViewSet):
     """
     Dossier de visite regroupant toutes les prestations.
     Permet d'ouvrir une consultation liée via /visites/{id}/consultations/
+
+    `ouvrir_consultation` crée directement un `Consultation` (le même
+    modèle que `ConsultationViewSet.create`, déjà gaté pour
+    MEDECINE_GENERALE) — sans le contrôle équivalent, cette action
+    contournait entièrement la désactivation de ce service. Seule cette
+    action précise est gatée (via `get_permissions`) : le reste de ce
+    ViewSet (liste/détail des visites) est partagé par plusieurs rôles
+    (médecin ET infirmier, entre autres) et doit rester accessible
+    indépendamment de MEDECINE_GENERALE.
     """
     queryset = Visite.objects.all()
     serializer_class = VisiteSerializer
+
+    def get_permissions(self):
+        permissions = super().get_permissions()
+        if self.action == 'ouvrir_consultation':
+            permissions = list(permissions) + [HasFunctionalServiceEnabled.for_service('MEDECINE_GENERALE')()]
+        return permissions
 
     @action(detail=True, methods=['post'], url_path='consultations')
     def ouvrir_consultation(self, request, pk=None):
@@ -63,9 +81,18 @@ class VisiteViewSet(viewsets.ModelViewSet):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class ConsultationViewSet(viewsets.ModelViewSet):
-    """Accès aux consultations (inclut les symptômes/diagnostics en lecture)."""
+    """
+    Accès aux consultations (inclut les symptômes/diagnostics en lecture).
+
+    Activation/désactivation de service réellement effective (MEDECINE_GENERALE)
+    — même mécanisme générique que Pharmacie/Laboratoire, appliqué ici à
+    titre d'exemple supplémentaire (architecture générique, voir
+    core/permissions.py::HasFunctionalServiceEnabled) : cette phase ne
+    requiert pas un test approfondi de ce service en particulier.
+    """
     queryset = Consultation.objects.all()
     serializer_class = ConsultationSerializer
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('MEDECINE_GENERALE')]
 
     def perform_create(self, serializer):
         user_id = self.request.META.get('HTTP_X_USER_ID') or self.request.headers.get('X-User-Id')
@@ -133,9 +160,29 @@ from .models import Examen
 from .models.choices import StatutExamen
 
 class ExamenViewSet(viewsets.ModelViewSet):
-    """Gestion des examens et de leurs résultats."""
+    """
+    Gestion des examens et de leurs résultats.
+
+    `resultat`, `prelevement`, `valider` et `signaler_critique` créent ou
+    modifient directement les mêmes modèles que `PrelevementViewSet`/
+    `ValeurCritiqueViewSet` (déjà gatés pour LABORATOIRE) — sans le
+    contrôle équivalent ici, ces actions contournaient entièrement la
+    désactivation de ce service. Seules ces actions sont gatées (via
+    `get_permissions`) : le CRUD de base d'`Examen` (list/create/detail)
+    reste accessible — utilisé par `ConsultationViewSet.prescrire_examen`
+    (déjà gaté pour MEDECINE_GENERALE) côté médecin, une préoccupation
+    distincte de LABORATOIRE.
+    """
     queryset = Examen.objects.all()
     serializer_class = ExamenSerializer
+
+    _LABORATOIRE_ACTIONS = {'resultat', 'prelevement', 'valider', 'signaler_critique'}
+
+    def get_permissions(self):
+        permissions = super().get_permissions()
+        if self.action in self._LABORATOIRE_ACTIONS:
+            permissions = list(permissions) + [HasFunctionalServiceEnabled.for_service('LABORATOIRE')()]
+        return permissions
 
     @action(detail=True, methods=['get', 'post'], url_path='resultat')
     def resultat(self, request, pk=None):
@@ -235,9 +282,29 @@ class HospitalisationViewSet(viewsets.ModelViewSet):
 
 
 class MedicamentPrescritViewSet(viewsets.ModelViewSet):
-    """Accès aux médicaments prescrits lors des consultations."""
+    """
+    Accès aux médicaments prescrits lors des consultations.
+
+    `signaler_anomalie` et `delivrer` créent directement les mêmes
+    modèles que `AnomaliePrescriptionViewSet`/`DelivranceMedicamentViewSet`
+    (déjà gatés pour PHARMACIE) — sans le contrôle équivalent ici, ces
+    actions contournaient entièrement la désactivation de ce service.
+    Seules ces deux actions (réellement pharmacien) sont gatées (via
+    `get_permissions`) : le CRUD de base (list/detail/statut) reste
+    accessible — prescrit par le médecin (`ConsultationViewSet.prescrire_
+    prescription`, déjà gaté MEDECINE_GENERALE) et consulté par plusieurs
+    rôles.
+    """
     queryset = MedicamentPrescrit.objects.all()
     serializer_class = MedicamentPrescritSerializer
+
+    _PHARMACIE_ACTIONS = {'signaler_anomalie', 'delivrer'}
+
+    def get_permissions(self):
+        permissions = super().get_permissions()
+        if self.action in self._PHARMACIE_ACTIONS:
+            permissions = list(permissions) + [HasFunctionalServiceEnabled.for_service('PHARMACIE')()]
+        return permissions
 
     def get_queryset(self):
         """Permet de filtrer par patient ou par statut."""
@@ -283,8 +350,14 @@ class MedicamentPrescritViewSet(viewsets.ModelViewSet):
 # --- ViewSets pour la Pharmacie ---
 
 class AnomaliePrescriptionViewSet(viewsets.ModelViewSet):
+    """
+    Activation/désactivation de service réellement effective (cycle de vie
+    du tenant, Phase 2, §12-15) : bloqué si PHARMACIE est désactivé pour
+    le tenant courant — jamais un simple masquage frontend.
+    """
     queryset = AnomaliePrescription.objects.all()
     serializer_class = AnomaliePrescriptionSerializer
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('PHARMACIE')]
 
     def perform_create(self, serializer):
         # Mettre à jour le statut du médicament
@@ -294,8 +367,10 @@ class AnomaliePrescriptionViewSet(viewsets.ModelViewSet):
         med.save()
 
 class DelivranceMedicamentViewSet(viewsets.ModelViewSet):
+    """Même contrôle que AnomaliePrescriptionViewSet (voir sa docstring)."""
     queryset = DelivranceMedicament.objects.all()
     serializer_class = DelivranceMedicamentSerializer
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('PHARMACIE')]
 
     def perform_create(self, serializer):
         # Mettre à jour le statut du médicament
@@ -305,14 +380,18 @@ class DelivranceMedicamentViewSet(viewsets.ModelViewSet):
         med.save()
 
 class ConciliationMedicamenteuseViewSet(viewsets.ModelViewSet):
+    """Même contrôle que AnomaliePrescriptionViewSet (PHARMACIE) — n'avait aucun contrôle jusqu'ici."""
     queryset = ConciliationMedicamenteuse.objects.all()
     serializer_class = ConciliationMedicamenteuseSerializer
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('PHARMACIE')]
 
 # --- ViewSets pour le Laboratoire ---
 
 class PrelevementViewSet(viewsets.ModelViewSet):
+    """Activation/désactivation de service réellement effective (LABORATOIRE) — voir AnomaliePrescriptionViewSet."""
     queryset = Prelevement.objects.all()
     serializer_class = PrelevementSerializer
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('LABORATOIRE')]
 
     def perform_create(self, serializer):
         prelevement = serializer.save()
@@ -321,8 +400,10 @@ class PrelevementViewSet(viewsets.ModelViewSet):
         examen.save()
 
 class ValeurCritiqueViewSet(viewsets.ModelViewSet):
+    """Même contrôle que PrelevementViewSet (LABORATOIRE)."""
     queryset = ValeurCritique.objects.all()
     serializer_class = ValeurCritiqueSerializer
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('LABORATOIRE')]
 
 
 

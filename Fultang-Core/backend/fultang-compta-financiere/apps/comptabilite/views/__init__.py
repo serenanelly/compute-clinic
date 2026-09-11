@@ -7,9 +7,12 @@ from django.utils import timezone
 from django.db.models import Sum, Q, Count
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
+
+from config.permissions import HasFunctionalServiceEnabled
 
 from apps.comptabilite.models import (
     CompteComptable, Journal, EcritureComptable, LigneEcriture,
@@ -52,6 +55,7 @@ class CompteComptableViewSet(viewsets.ModelViewSet):
     - GET       /api/comptes-comptables/arborescence/
     - GET       /api/comptes-comptables/statistiques/
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
     queryset = CompteComptable.objects.all()
     serializer_class = CompteComptableSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -129,6 +133,7 @@ class JournalViewSet(viewsets.ModelViewSet):
     - GET       /api/journaux/{code}/ecritures/
     - GET       /api/journaux/statistiques/
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
     queryset = Journal.objects.all()
     serializer_class = JournalSerializer
     lookup_field = 'code'
@@ -188,6 +193,7 @@ class EcritureComptableViewSet(viewsets.ModelViewSet):
     - GET       /api/ecritures/balance/            — Balance Générale
     - GET       /api/ecritures/statistiques/       — Stats
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
     queryset = EcritureComptable.objects.prefetch_related('lignes', 'lignes__compte', 'journal')
     serializer_class = EcritureComptableSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -501,6 +507,7 @@ class ExerciceComptableViewSet(viewsets.ModelViewSet):
     - POST      /api/exercices/{id}/cloturer/
     - POST      /api/exercices/{id}/report-nouveau/
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
     queryset = ExerciceComptable.objects.all()
     serializer_class = ExerciceComptableSerializer
     filter_backends = [DjangoFilterBackend, OrderingFilter]
@@ -743,6 +750,7 @@ class BudgetPrevisionnelViewSet(viewsets.ModelViewSet):
     - GET       /api/budgets/par-service/{id}/
     - GET       /api/budgets/evaluation/
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
     queryset = BudgetPrevisionnel.objects.select_related('exercice', 'categorie')
     serializer_class = BudgetPrevisionnelSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -836,6 +844,7 @@ class PrestationDeServiceViewSet(viewsets.ModelViewSet):
     - GET/POST  /api/prestations-de-service/
     - GET       /api/prestations-de-service/by-service/{id}/
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
     queryset = PrestationDeService.objects.select_related('compte_comptable')
     serializer_class = PrestationDeServiceSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -872,6 +881,7 @@ class EtatsFinanciersViewSet(viewsets.ViewSet):
     - GET  /api/etats-financiers/flux-tresorerie/
     - GET  /api/etats-financiers/resultat-par-service/
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
 
     def _get_date_filters(self, request):
         """Extraire les filtres de date communs."""
@@ -1110,6 +1120,7 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     - GET  /api/audit-log/
     - GET  /api/audit-log/par-utilisateur/{id}/
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
     queryset = AuditLog.objects.all()
     serializer_class = AuditLogSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -1150,6 +1161,7 @@ class TableauDeBordViewSet(viewsets.ViewSet):
     - GET  /api/tableau-de-bord/
     - GET  /api/tableau-de-bord/evolution-mensuelle/
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_FINANCIERE')]
 
     @action(detail=False, methods=['get'], url_path='dashboard')
     def dashboard(self, request):

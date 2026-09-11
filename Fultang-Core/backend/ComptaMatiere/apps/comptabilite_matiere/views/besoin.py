@@ -6,6 +6,8 @@ Organization: ENSPY
 Date: 2025-12-18
 """
 from rest_framework import viewsets, status
+from rest_framework.permissions import IsAuthenticated
+from core.permissions import HasFunctionalServiceEnabled
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from apps.comptabilite_matiere.permissions import DevelopmentOrAuthenticated
@@ -37,7 +39,7 @@ class BesoinViewSet(viewsets.ModelViewSet):
     """
     
     queryset = Besoin.objects.all()
-    permission_classes = [DevelopmentOrAuthenticated]
+    permission_classes = [DevelopmentOrAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_MATIERE')]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     
     # Filtres

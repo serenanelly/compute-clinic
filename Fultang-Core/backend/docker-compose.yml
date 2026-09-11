@@ -14,6 +14,14 @@ services:
       # Dev uniquement : à surcharger via un .env / secret en production.
       # Doit être identique à la valeur utilisée par tenant-service.
       - TENANT_SERVICE_INTERNAL_TOKEN=${TENANT_SERVICE_INTERNAL_TOKEN:-dev-local-only-shared-secret-change-me}
+      # Cycle de vie du tenant (Phase 2) : convention de développement
+      # local pour l'URL réelle d'un établissement — un sous-domaine
+      # `*.localhost` se résout automatiquement vers 127.0.0.1 dans les
+      # navigateurs modernes, aucune entrée /etc/hosts à créer (à la
+      # différence de `*.fulltang.com`, qui reste utilisable en
+      # surchargeant cette variable pour un environnement de démo plus
+      # proche de la production).
+      - TENANT_ROOT_DOMAIN=${TENANT_ROOT_DOMAIN:-localhost}
     depends_on:
       - service-personnel
     networks:

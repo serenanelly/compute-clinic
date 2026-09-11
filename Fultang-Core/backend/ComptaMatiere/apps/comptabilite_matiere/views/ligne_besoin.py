@@ -2,6 +2,8 @@
 ViewSet pour le modèle LigneBesoin.
 """
 from rest_framework import viewsets, status
+from rest_framework.permissions import IsAuthenticated
+from core.permissions import HasFunctionalServiceEnabled
 from rest_framework.response import Response
 from apps.comptabilite_matiere.models import LigneBesoin
 from apps.comptabilite_matiere.serializers import (
@@ -14,6 +16,7 @@ class LigneBesoinViewSet(viewsets.ModelViewSet):
     """
     ViewSet pour les opérations CRUD sur LigneBesoin.
     """
+    permission_classes = [IsAuthenticated, HasFunctionalServiceEnabled.for_service('COMPTA_MATIERE')]
     queryset = LigneBesoin.objects.all()
     serializer_class = LigneBesoinSerializer
     

@@ -2,20 +2,24 @@ import { useState } from "react";
 import { Link, Navigate, useLocation } from "react-router-dom";
 import PropTypes from "prop-types";
 import { AccessDenied } from "../../../GlobalComponents/AccessDenied.jsx";
+import { ServiceUnavailableScreen } from "../../../GlobalComponents/ServiceUnavailableScreen.jsx";
 import { Loading } from "../../../GlobalComponents/Loading.jsx";
 import { useAuthentication } from "../../../Utils/Provider.jsx";
+import { useFunctionalServiceGate } from "../../../hooks/useFunctionalServiceGate.js";
 import { ChevronDown, ChevronUp } from "lucide-react";
 
-export function AccountantDashBoard({ children, linkList, requiredRole }) {
+export function AccountantDashBoard({ children, linkList, requiredRole, requiredFunctionalService }) {
   AccountantDashBoard.propTypes = {
     children: PropTypes.node.isRequired,
     linkList: PropTypes.array.isRequired,
     requiredRole: PropTypes.string.isRequired,
+    requiredFunctionalService: PropTypes.string,
   };
 
   const location = useLocation();
   const activeLink = location.pathname;
   const { isAuthenticated, hasRole } = useAuthentication();
+  const { checking: checkingService, blocked: serviceBlocked } = useFunctionalServiceGate(requiredFunctionalService);
   const [expandedLinks, setExpandedLinks] = useState({});
 
   function toggleSubMenu(linkName) {
@@ -123,6 +127,14 @@ export function AccountantDashBoard({ children, linkList, requiredRole }) {
       return <Loading />;
     }
     return <AccessDenied Role={requiredRole} />;
+  }
+
+  if (checkingService) {
+    return <Loading />;
+  }
+
+  if (serviceBlocked) {
+    return <ServiceUnavailableScreen />;
   }
 
   return (

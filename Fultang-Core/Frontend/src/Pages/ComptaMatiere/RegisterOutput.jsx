@@ -246,7 +246,7 @@ export function RegisterOutput() {
 
     if (loading) {
         return (
-            <AccountantDashBoard linkList={AccountantNavLink} requiredRole={"compta_matiere"}>
+            <AccountantDashBoard linkList={AccountantNavLink} requiredRole={"compta_matiere"} requiredFunctionalService="COMPTA_MATIERE">
                 <AccountantNavBar />
                 <div className="flex items-center justify-center h-96">
                     <div className="text-center">
@@ -261,7 +261,7 @@ export function RegisterOutput() {
     return (
         <AccountantDashBoard
             linkList={AccountantNavLink}
-            requiredRole={"compta_matiere"}
+            requiredRole={"compta_matiere"} requiredFunctionalService="COMPTA_MATIERE"
         >
             <AccountantNavBar />
             <div className="p-6 space-y-6">

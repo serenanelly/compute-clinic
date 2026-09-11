@@ -285,7 +285,7 @@ export function PharmacistReports() {
 
     if (loading) {
         return (
-            <PharmacistDashBoard linkList={PharmacistNavLink} requiredRole={"pharmacien"}>
+            <PharmacistDashBoard linkList={PharmacistNavLink} requiredRole={"pharmacien"} requiredFunctionalService="PHARMACIE">
                 <div className="flex items-center justify-center h-96">
                     <div className="text-center">
                         <FaSpinner className="animate-spin text-4xl text-primary-start mx-auto mb-4" />
@@ -299,7 +299,7 @@ export function PharmacistReports() {
     return (
         <PharmacistDashBoard
             linkList={PharmacistNavLink}
-            requiredRole={"pharmacien"}
+            requiredRole={"pharmacien"} requiredFunctionalService="PHARMACIE"
         >
             <div className="p-6 space-y-6">
                 <div className="flex justify-between items-center">

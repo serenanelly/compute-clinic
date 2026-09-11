@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react';
 import { Link, Navigate, useLocation } from "react-router-dom";
 import PropTypes from "prop-types";
 import { AccessDenied } from "./AccessDenied.jsx";
+import { ServiceUnavailableScreen } from "./ServiceUnavailableScreen.jsx";
 import { useAuthentication } from "../Utils/Provider.jsx";
+import { useFunctionalServiceGate } from "../hooks/useFunctionalServiceGate.js";
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { Loading } from "./Loading.jsx";
 
-export function CustomDashboard({ children, linkList, requiredRole, brandLabel = "Fultang Clinic" }) {
+export function CustomDashboard({ children, linkList, requiredRole, brandLabel = "Fultang Clinic", requiredFunctionalService }) {
 
 
     CustomDashboard.propTypes = {
@@ -14,6 +16,9 @@ export function CustomDashboard({ children, linkList, requiredRole, brandLabel =
         linkList: PropTypes.array.isRequired,
         requiredRole: PropTypes.string.isRequired,
         brandLabel: PropTypes.string,
+        // Code FunctionalService (ex. "SOINS_INFIRMIERS") dont dépend cette
+        // page — optionnel, voir hooks/useFunctionalServiceGate.js.
+        requiredFunctionalService: PropTypes.string,
     }
 
 
@@ -22,6 +27,7 @@ export function CustomDashboard({ children, linkList, requiredRole, brandLabel =
     const { isAuthenticated, hasRole } = useAuthentication();
     const [isLoading, setIsLoading] = useState(true);
     const [expandedLinks, setExpandedLinks] = useState({});
+    const { checking: checkingService, blocked: serviceBlocked } = useFunctionalServiceGate(requiredFunctionalService);
 
 
 
@@ -107,7 +113,7 @@ export function CustomDashboard({ children, linkList, requiredRole, brandLabel =
 
 
 
-    if (isLoading) {
+    if (isLoading || checkingService) {
         return <Loading />
     }
 
@@ -117,6 +123,10 @@ export function CustomDashboard({ children, linkList, requiredRole, brandLabel =
 
     if (!hasRole(requiredRole)) {
         return <AccessDenied Role={requiredRole} />;
+    }
+
+    if (serviceBlocked) {
+        return <ServiceUnavailableScreen />;
     }
 
     return (

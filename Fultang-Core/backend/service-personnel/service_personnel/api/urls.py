@@ -4,7 +4,7 @@ from .views import (
     ServiceViewSet, MedecinViewSet, MedecinGeneralisteViewSet, InfirmiereViewSet, ReceptionnisteViewSet,
     ComptableFinancierViewSet, ComptableMatiereViewSet, LaborantinViewSet,
     PharmacienViewSet, DirecteurViewSet, AdminViewSet, AuthVerifyView, PersonnelViewSet,
-    ProvisionDatabaseView,
+    ProvisionDatabaseView, CreateFirstAdminView, FunctionalServiceInvalidateView,
 )
 
 router = DefaultRouter()
@@ -24,5 +24,10 @@ router.register(r'personnel', PersonnelViewSet, basename='personnel')
 urlpatterns = [
     path('auth/verify/', AuthVerifyView.as_view(), name='auth-verify'),
     path('internal/provision-database/', ProvisionDatabaseView.as_view(), name='internal-provision-database'),
+    path('internal/create-first-admin/', CreateFirstAdminView.as_view(), name='internal-create-first-admin'),
+    path(
+        'internal/functional-services/invalidate/', FunctionalServiceInvalidateView.as_view(),
+        name='internal-functional-services-invalidate',
+    ),
     path('', include(router.urls)),
 ]

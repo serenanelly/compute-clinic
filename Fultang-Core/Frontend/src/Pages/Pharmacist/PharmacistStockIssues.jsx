@@ -61,7 +61,7 @@ export const PharmacistStockIssues = () => {
   });
 
   return (
-    <PharmacistDashBoard linkList={PharmacistNavLink} requiredRole="pharmacien">
+    <PharmacistDashBoard linkList={PharmacistNavLink} requiredRole="pharmacien" requiredFunctionalService="PHARMACIE">
       <div className="bg-slate-50 text-slate-800 min-h-screen p-8 flex flex-col gap-8 overflow-y-auto scrollbar">
         
         <div className="flex justify-between items-center mb-6">

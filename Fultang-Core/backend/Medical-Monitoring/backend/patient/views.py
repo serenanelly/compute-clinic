@@ -3,6 +3,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework import viewsets, filters, status
 from django_filters.rest_framework import DjangoFilterBackend
+from core.permissions import HasFunctionalServiceEnabled
 from .models import (
     Patient, Adresse, Contact, Nationalite, 
     PersonneAPrevenir, LienParente
@@ -25,6 +26,32 @@ class PatientViewSet(viewsets.ModelViewSet):
         if self.action == 'list':
             return PatientListSerializer
         return super().get_serializer_class()
+
+    def get_permissions(self):
+        """
+        Cycle de vie du tenant, Phase 3 (§12-15, cas "Infirmerie") : ce
+        ViewSet est partagé par plusieurs rôles (médecins, infirmiers...)
+        pour des opérations générales (lecture/écriture d'un Patient) —
+        le gater dans son ensemble avec SOINS_INFIRMIERS bloquerait aussi
+        les médecins, ce qui serait une erreur. Seule l'action
+        `enregistrer_soin` (POST .../soins/) est un geste métier
+        RÉELLEMENT propre au rôle infirmier (elle crée un
+        `SoinAdministre`) — c'est la seule à porter ce contrôle
+        supplémentaire, via l'architecture générique déjà en place
+        (`HasFunctionalServiceEnabled.for_service`), jamais une règle
+        codée en dur spécifique à ce ViewSet.
+
+        Limite documentée honnêtement : les endpoints généraux partagés
+        de ce ViewSet (liste/lecture d'un patient, dossier, examens...)
+        restent accessibles même si SOINS_INFIRMIERS est désactivé pour
+        le tenant, faute d'un moyen propre de distinguer "un infirmier
+        les utilise" de "un médecin les utilise" au niveau actuel du
+        modèle de données.
+        """
+        permissions = super().get_permissions()
+        if self.action == 'enregistrer_soin':
+            permissions = list(permissions) + [HasFunctionalServiceEnabled.for_service('SOINS_INFIRMIERS')()]
+        return permissions
 
     @action(detail=False, methods=['get'], url_path='prochain-matricule')
     def prochain_matricule(self, request):

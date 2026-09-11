@@ -488,3 +488,46 @@ class ProvisionDatabaseEndpointTests(APITestCase):
                 self.url, {'tenant_id': PROVISION_TENANT}, format='json', HTTP_X_INTERNAL_SERVICE_TOKEN='test-token',
             )
         self.assertEqual(response.status_code, status.HTTP_502_BAD_GATEWAY)
+
+
+# =============================================================================
+# Invalidation active du cache FunctionalService (Cycle de vie du tenant,
+# Phase 3) — copie fidèle des tests service-personnel équivalents.
+# =============================================================================
+
+from core.tenant_routing.functional_service_client import functional_service_cache  # noqa: E402
+
+FS_TENANT = str(uuid.uuid4())
+
+
+class FunctionalServiceInvalidateEndpointTests(APITestCase):
+
+    def setUp(self):
+        self.url = '/api/medical-monitoring/internal/functional-services/invalidate/'
+        self.addCleanup(functional_service_cache.clear)
+
+    @override_settings(TENANT_SERVICE_INTERNAL_TOKEN='test-token')
+    def test_missing_token_is_rejected(self):
+        response = self.client.post(self.url, {'tenant_id': 'x', 'code': 'PHARMACIE'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @override_settings(TENANT_SERVICE_INTERNAL_TOKEN='test-token')
+    def test_missing_fields_returns_400(self):
+        response = self.client.post(
+            self.url, {'tenant_id': 'x'}, format='json', HTTP_X_INTERNAL_SERVICE_TOKEN='test-token',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @override_settings(TENANT_SERVICE_INTERNAL_TOKEN='test-token')
+    def test_invalidate_actually_clears_the_cache_entry(self):
+        with patch.object(functional_service_cache, 'get', return_value=True):
+            self.assertTrue(functional_service_cache.get(FS_TENANT, 'PHARMACIE'))
+
+        response = self.client.post(
+            self.url, {'tenant_id': FS_TENANT, 'code': 'PHARMACIE'}, format='json',
+            HTTP_X_INTERNAL_SERVICE_TOKEN='test-token',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        with patch('core.tenant_routing.functional_service_client.resolve_functional_service_enabled', return_value=False):
+            self.assertFalse(functional_service_cache.get(FS_TENANT, 'PHARMACIE'))
