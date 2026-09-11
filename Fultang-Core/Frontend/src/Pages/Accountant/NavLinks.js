@@ -10,7 +10,7 @@ import { AppRoutesPaths as appRoutes } from "../../Router/appRouterPaths.js";
 
 export const accountantNavLink = [
     {
-        name: 'Dashboard',
+        name: 'Tableau de bord',
         icon: MdDashboard,
         link: appRoutes.accountantHome,
     },
@@ -36,7 +36,7 @@ export const accountantNavLink = [
         ],
     },
     {
-        name: 'Balance',
+        name: 'Balance générale',
         icon: FaBalanceScale,
         link: '/accountant/balance',
     },

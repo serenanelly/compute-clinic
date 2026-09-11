@@ -62,7 +62,10 @@ export const PharmacistDelivery = () => {
   const handleDeliver = async (prescriptionId, quantite) => {
     try {
       setDelivering(prev => ({ ...prev, [prescriptionId]: true }));
-      await delivrerMedicament(prescriptionId, quantite ?? 1);
+      const result = await delivrerMedicament(prescriptionId, quantite ?? 1);
+      if (result?.circuit_financier?.message) {
+        alert(`${result.circuit_financier.message}\nPatient : ${result.circuit_financier.patient_id || '—'}`);
+      }
 
       // Mettre à jour localement le statut du médicament
       setDeliveryData(prev =>

@@ -4,7 +4,8 @@ from .models import (
     Examen, ResultatExamen,
     Hospitalisation, SoinAdministre, Visite,
     AnomaliePrescription, DelivranceMedicament, ConciliationMedicamenteuse,
-    Prelevement, ValeurCritique
+    Prelevement, ValeurCritique, OrientationSpecialiste,
+    InterventionChirurgicale, MembreEquipeOperatoire,
 )
 
 # --- Serializers Enfants ---
@@ -20,7 +21,10 @@ class SymptomeSerializer(serializers.ModelSerializer):
 class DiagnosticSerializer(serializers.ModelSerializer):
     class Meta:
         model = Diagnostic
-        fields = ['id', 'consultation', 'libelle', 'description', 'conclusion', 'niveau_certitude']
+        fields = [
+            'id', 'consultation', 'libelle', 'description', 'conclusion',
+            'niveau_certitude', 'type_diagnostic',
+        ]
 
 class PrelevementSerializer(serializers.ModelSerializer):
     class Meta:
@@ -121,9 +125,26 @@ class ResultatExamenSerializer(serializers.ModelSerializer):
         fields = ['id', 'examen', 'doctor_id', 'observations', 'resultats', 'interpretation', 'valeurs_critiques']
 
 class VisiteSerializer(serializers.ModelSerializer):
+    paiement_actif = serializers.SerializerMethodField()
+    paiement_expire_le = serializers.SerializerMethodField()
+
     class Meta:
         model = Visite
         fields = '__all__'
+        read_only_fields = ('id', 'date_heure')
+
+    def get_paiement_actif(self, obj):
+        return obj.paiement_est_actif()
+
+    def get_paiement_expire_le(self, obj):
+        exp = obj.paiement_expire_le
+        return exp.isoformat() if exp else None
+
+
+class OrientationSpecialisteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrientationSpecialiste
+        fields = ['id', 'consultation', 'specialite', 'motif', 'date_heure']
         read_only_fields = ('id', 'date_heure')
 
 
@@ -133,23 +154,43 @@ class VisiteSerializer(serializers.ModelSerializer):
 class ExamenSerializer(serializers.ModelSerializer):
     resultat = ResultatExamenSerializer(read_only=True)
     prelevements = PrelevementSerializer(many=True, read_only=True)
+    medecin_prescripteur_id = serializers.SerializerMethodField()
+    date_prescription = serializers.SerializerMethodField()
 
     class Meta:
         model = Examen
-        fields = ['id', 'consultation', 'nom', 'motif', 'anatomie', 'statut', 'resultat', 'prelevements']
+        fields = [
+            'id', 'consultation', 'nom', 'categorie', 'motif', 'anatomie', 'statut',
+            'resultat', 'prelevements', 'medecin_prescripteur_id', 'date_prescription',
+        ]
         read_only_fields = ('id',)
+        extra_kwargs = {'categorie': {'required': True}}
+
+    def get_medecin_prescripteur_id(self, obj):
+        try:
+            return obj.consultation.medecin_charge
+        except Exception:
+            return None
+
+    def get_date_prescription(self, obj):
+        try:
+            return obj.consultation.date_heure.isoformat()
+        except Exception:
+            return None
 
 class ConsultationSerializer(serializers.ModelSerializer):
     symptomes = SymptomeSerializer(many=True, read_only=True)
     diagnostics = DiagnosticSerializer(many=True, read_only=True)
     prescriptions = MedicamentPrescritSerializer(many=True, read_only=True)
     examens = ExamenSerializer(many=True, read_only=True)
+    orientations = OrientationSpecialisteSerializer(many=True, read_only=True)
 
     class Meta:
         model = Consultation
         fields = [
-            'id', 'patient', 'visite', 'medecin_charge', 'date_heure', 'motif', 
-            'symptomes', 'diagnostics', 'prescriptions', 'examens'
+            'id', 'patient', 'visite', 'medecin_charge', 'date_heure', 'motif',
+            'examen_physique', 'champs_specialite',
+            'symptomes', 'diagnostics', 'prescriptions', 'examens', 'orientations',
         ]
         read_only_fields = ('id', 'date_heure')
 
@@ -161,10 +202,21 @@ class HospitalisationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Hospitalisation
         fields = [
-            'id', 'patient', 'visite', 'room_id', 'doctor_id', 'motif', 
-            'service', 'duree_prevue', 'statut', 'patient_details', 'medecin_details'
+            'id', 'patient', 'visite', 'room_id', 'numero_lit', 'doctor_id', 'motif',
+            'service', 'duree_prevue', 'statut',
+            'validation_medicale', 'date_validation_medicale',
+            'validation_financiere', 'date_validation_financiere',
+            'type_sortie', 'notes_sortie',
+            'patient_details', 'medecin_details',
         ]
-        read_only_fields = ('id', 'date_admission')
+        read_only_fields = ('id',)
+
+    def validate(self, attrs):
+        from .models.choices import StatutHospitalisation
+        if self.instance is None:
+            attrs.pop('room_id', None)
+            attrs['statut'] = StatutHospitalisation.EN_ATTENTE_LIT
+        return attrs
 
     def get_patient_details(self, obj):
         try:
@@ -266,3 +318,23 @@ class SoinAdministreSerializer(serializers.ModelSerializer):
         model = SoinAdministre
         fields = '__all__'
         read_only_fields = ('id', 'date_heure')
+
+
+class MembreEquipeOperatoireSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MembreEquipeOperatoire
+        fields = ['id', 'intervention', 'personnel_id', 'role']
+        read_only_fields = ('id',)
+
+
+class InterventionChirurgicaleSerializer(serializers.ModelSerializer):
+    equipe = MembreEquipeOperatoireSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = InterventionChirurgicale
+        fields = [
+            'id', 'patient', 'visite', 'medecin_chirurgien_id', 'libelle', 'urgence',
+            'statut', 'acompte_montant', 'dette_restante', 'date_intervention',
+            'notes', 'date_creation', 'equipe',
+        ]
+        read_only_fields = ('id', 'date_creation')

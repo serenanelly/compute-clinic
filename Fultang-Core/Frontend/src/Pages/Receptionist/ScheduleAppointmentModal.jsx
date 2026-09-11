@@ -165,6 +165,12 @@ export function ScheduleAppointmentModal({ isOpen, onClose, patient, appointment
 
                     <form onSubmit={handleSubmit} className="p-10 space-y-8 overflow-y-auto max-h-[70vh] relative">
                         {error && <Alert message={error} type="error" showIcon className="rounded-2xl font-bold" />}
+                        <Alert
+                            type="info"
+                            showIcon
+                            className="rounded-2xl"
+                            message="CORR-A3-005 : la réception et l'infirmier peuvent programmer un RDV. Le médecin consulte son planning ; seule la réception ouvre le dossier de visite et encaisse à la caisse."
+                        />
 
                         {/* Success Overlay */}
                         {showLocalSuccess && (

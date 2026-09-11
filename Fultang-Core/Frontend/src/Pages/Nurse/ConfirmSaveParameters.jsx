@@ -1,7 +1,7 @@
 import React from 'react';
 import { X, CheckCircle, AlertTriangle } from 'lucide-react';
 
-export const ConfirmSaveParameters = ({ isOpen, onClose, onConfirm, parameters, patientName }) => {
+export const ConfirmSaveParameters = ({ isOpen, onClose, onConfirm, parameters, patientName, isSaving = false }) => {
     if (!isOpen) return null;
 
     const formatValue = (key, value) => {
@@ -79,16 +79,20 @@ export const ConfirmSaveParameters = ({ isOpen, onClose, onConfirm, parameters, 
                 {/* Footer */}
                 <div className="px-6 py-4 bg-gray-50 border-t border-gray-200 flex justify-end space-x-3">
                     <button
+                        type="button"
                         onClick={onClose}
-                        className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 bg-white hover:bg-gray-50 font-medium transition-colors"
+                        disabled={isSaving}
+                        className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 bg-white hover:bg-gray-50 font-medium transition-colors disabled:opacity-50"
                     >
                         Corriger
                     </button>
                     <button
+                        type="button"
                         onClick={onConfirm}
-                        className="px-6 py-2 bg-gradient-to-r from-primary-start to-primary-end text-white rounded-lg font-bold hover:opacity-90 shadow-sm hover:shadow-md transition-all duration-300"
+                        disabled={isSaving}
+                        className="px-6 py-2 bg-gradient-to-r from-primary-start to-primary-end text-white rounded-lg font-bold hover:opacity-90 shadow-sm hover:shadow-md transition-all duration-300 disabled:opacity-60"
                     >
-                        Confirmer
+                        {isSaving ? 'Enregistrement…' : 'Confirmer'}
                     </button>
                 </div>
             </div>

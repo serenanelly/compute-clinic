@@ -13,6 +13,8 @@ import { useFeedback } from '../../contexts/FeedbackContext.jsx';
 import { useAuthentication } from '../../Utils/Provider.jsx';
 import Loader from '../../GlobalComponents/Loader';
 import { MOTIFS_QUITTANCE } from '../../constants/motifsCaisse.js';
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
+import { getVisiteEnCoursNonPayee, confirmVisitePaiement } from '../../services/visiteApi.js';
 
 const formatFcfa = (value) =>
     new Intl.NumberFormat('fr-FR').format(Number(value) || 0);
@@ -54,6 +56,7 @@ export default function PatientInvoiceModal({
     const [ficheLoading, setFicheLoading] = useState(false);
     const [caisseOuverte, setCaisseOuverte] = useState(null);
     const [caisseLoading, setCaisseLoading] = useState(false);
+    const [visiteCible, setVisiteCible] = useState(null);
 
     const prestations = fiche?.prestations_a_payer || patient?.prestations_a_payer || [];
     const montantSuggere =
@@ -117,6 +120,9 @@ export default function PatientInvoiceModal({
             loadQuittances();
             loadFiche();
             if (mode === 'facturer') loadCaisse();
+            getVisiteEnCoursNonPayee(patient.id)
+                .then(setVisiteCible)
+                .catch(() => setVisiteCible(null));
             const prest = patient.prestations_a_payer || [];
             const montant =
                 patient.montant_restant_total ??
@@ -284,6 +290,19 @@ export default function PatientInvoiceModal({
                 : 'Reçu créé — en attente de validation.';
             showSuccess(msg, 'Quittance');
 
+            const typeRecette = inferTypeRecette(prestations);
+            if (validerImmediatement && visiteCible?.id && (typeRecette === 'consultation' || payload.type_recette === 'consultation')) {
+                try {
+                    await confirmVisitePaiement(visiteCible.id);
+                } catch (payErr) {
+                    console.warn('Confirmation paiement visite:', payErr);
+                    showWarning(
+                        'Quittance enregistrée, mais la visite n\'a pas pu être marquée payée. Réessayez ou contactez l\'administrateur.',
+                        'Synchronisation visite',
+                    );
+                }
+            }
+
             setNewlyCreatedQuittance({
                 numero: finalQuittance?.numero || created?.numero,
                 numero_quittance: finalQuittance?.numero || created?.numero,
@@ -322,7 +341,7 @@ export default function PatientInvoiceModal({
                 h1{color:#1e40af;text-align:center;}
                 .amount{font-size:28px;font-weight:bold;color:#059669;text-align:center;margin:20px 0;}
             </style></head><body>
-            <h1>POLYCLINIQUE FULTANG</h1>
+            <h1>${APP_NAME}</h1>
             <h2 style="text-align:center;">QUITTANCE N° ${numero}</h2>
             <p><strong>Patient:</strong> ${patient?.prenom || ''} ${patient?.nom || ''} (${patient?.matricule || ''})</p>
             <p><strong>Motif:</strong> ${motif}</p>

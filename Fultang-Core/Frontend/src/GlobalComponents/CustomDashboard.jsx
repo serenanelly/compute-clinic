@@ -7,8 +7,9 @@ import { useAuthentication } from "../Utils/Provider.jsx";
 import { useFunctionalServiceGate } from "../hooks/useFunctionalServiceGate.js";
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { Loading } from "./Loading.jsx";
+import { APP_NAME } from "../constants/branding.js";
 
-export function CustomDashboard({ children, linkList, requiredRole, brandLabel = "Fultang Clinic", requiredFunctionalService }) {
+export function CustomDashboard({ children, linkList, requiredRole, brandLabel = APP_NAME, requiredFunctionalService }) {
 
 
     CustomDashboard.propTypes = {

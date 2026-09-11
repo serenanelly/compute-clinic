@@ -32,6 +32,14 @@ class DelivranceMedicament(models.Model):
     pharmacien_id = models.UUIDField(verbose_name=_("ID du Pharmacien"))
     quantite_delivree = models.CharField(max_length=100, verbose_name=_("Quantité délivrée"))
     date_delivrance = models.DateTimeField(auto_now_add=True)
+    montant_fcfa = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        verbose_name=_("Montant estimé (FCFA)"),
+    )
+    quittance_reference = models.CharField(
+        max_length=64, blank=True, default='',
+        verbose_name=_("Référence quittance caisse"),
+    )
     mode_delivrance = models.CharField(
         max_length=50, 
         choices=[('NOMINATIF', 'Nominatif (Dose par dose)'), ('GLOBAL', 'Global (Dotation service)')],

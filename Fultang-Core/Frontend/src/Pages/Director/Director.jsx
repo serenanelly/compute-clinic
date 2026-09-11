@@ -277,7 +277,7 @@ export function Director() {
             setActionLoading(true);
 
             await besoinApi.patch(confirmBesoin.id, {
-                statut: 'EN_COURS',
+                statut: 'APPROUVE',
                 date_traitement_directeur: new Date().toISOString()
             });
 

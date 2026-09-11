@@ -5,7 +5,7 @@ import { User, Mail, Phone, Briefcase, Building2, Calendar } from 'lucide-react'
 /**
  * Modal affichant les details complets d'un personnel.
  */
-export function PersonnelDetailsModal({ isOpen, onClose, personnel }) {
+export function PersonnelDetailsModal({ isOpen, onClose, personnel, onManagePrimes }) {
     const { t } = useTranslation();
 
     if (!personnel) return null;
@@ -19,12 +19,17 @@ export function PersonnelDetailsModal({ isOpen, onClose, personnel }) {
     );
 
     const getStatusColor = (status) => {
-        switch (status) {
-            case 'actif': return 'bg-green-100 text-green-800';
-            case 'licencie': return 'bg-red-100 text-red-800';
-            case 'retraite': return 'bg-gray-100 text-gray-800';
-            default: return 'bg-gray-100 text-gray-800';
-        }
+        const map = {
+            Actif: 'bg-green-100 text-green-800',
+            'Congé': 'bg-orange-100 text-orange-800',
+            Suspendu: 'bg-red-100 text-red-800',
+        };
+        return map[status] || 'bg-gray-100 text-gray-800';
+    };
+
+    const getStatusLabel = (status) => {
+        const map = { Actif: 'Actif', 'Congé': 'Congé', Suspendu: 'Suspendu', Autre: 'Autre' };
+        return map[status] || status;
     };
 
     return (
@@ -50,7 +55,7 @@ export function PersonnelDetailsModal({ isOpen, onClose, personnel }) {
                         <h3 className="text-xl font-bold">{personnel.nom} {personnel.prenom}</h3>
                         <p className="text-white/80">{personnel.matricule}</p>
                         <span className={`inline-block mt-1 px-2 py-0.5 rounded text-xs font-medium ${getStatusColor(personnel.statut)}`}>
-                            {t(`personnel.statuses.${personnel.statut}`)}
+                            {getStatusLabel(personnel.statut)}
                         </span>
                     </div>
                 </div>
@@ -66,10 +71,18 @@ export function PersonnelDetailsModal({ isOpen, onClose, personnel }) {
                     {personnel.adresse && (
                         <InfoRow icon={User} label={t('personnel.address')} value={personnel.adresse} />
                     )}
-                    {personnel.salaire && (
-                        <InfoRow icon={Briefcase} label={t('personnel.salary')} value={`${personnel.salaire} FCFA`} />
+                    {personnel.specialite && (
+                        <InfoRow icon={Briefcase} label="Spécialité" value={personnel.specialite} />
                     )}
                 </div>
+                {onManagePrimes && (
+                    <div className="mt-4 pt-4 border-t">
+                        <button type="button" onClick={() => onManagePrimes(personnel)}
+                            className="text-sm text-primary-end font-medium hover:underline">
+                            Gérer les primes multi-services
+                        </button>
+                    </div>
+                )}
             </div>
         </Modal>
     );

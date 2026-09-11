@@ -6,6 +6,7 @@ import axiosInstance from "../../Utils/axiosInstance.js";
 import loginBackground from "../../assets/logIn.png";
 import axios from "axios";
 import { getGatewayBaseUrl } from "../../Utils/gatewayUrls";
+import { APP_NAME } from "../../constants/branding.js";
 
 export function ForgottenPassword() {
     const [email, setEmail] = useState("");
@@ -75,7 +76,7 @@ export function ForgottenPassword() {
             }}
         >
             <Link to="/" className="text-3xl text-white font-bold mt-6 ml-8">
-                FullTang
+                {APP_NAME}
             </Link>
             <div className="flex-1 flex items-center justify-center px-4">
                 <div className="bg-white bg-opacity-95 shadow-2xl border-2 w-full max-w-5xl rounded-lg overflow-hidden flex">

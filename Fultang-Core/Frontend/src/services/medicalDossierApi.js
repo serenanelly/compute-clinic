@@ -11,30 +11,60 @@ export const getPatientDossier = async (patientId) => {
 const findCliniqueForPatient = async (patientId) => {
     const response = await axiosInstance.get('/patient/clinique/');
     const list = response.data.results || response.data;
-    return list.find((c) => c.patient === patientId) || null;
+    const pid = String(patientId);
+    return list.find((c) => String(c.patient) === pid) || null;
 };
 
-/** Valeurs par défaut : le modèle backend exige tous les champs cliniques. */
-export const buildClinicalPayload = (patientId, raw = {}) => ({
-    patient: patientId,
-    groupe_sanguin: raw.groupe_sanguin || 'O',
-    facteur_rhesus: raw.facteur_rhesus || 'POSITIF',
-    electrophorese_hb: raw.electrophorese_hb || 'Non renseignée',
-    poids: String(raw.poids ?? '').trim() || '0',
-    taille: String(raw.taille ?? '').trim() || '0',
-    pouls: String(raw.pouls ?? '').trim() || '0',
-    taux_oxygene: String(raw.taux_oxygene ?? '').trim() || '0',
-    temperature: String(raw.temperature ?? '').trim(),
-    tension_arterielle: String(raw.tension_arterielle ?? '').trim(),
-});
+/** Payload clinique — n'envoie pas de 0 fictif pour les champs laissés vides. */
+export const buildClinicalPayload = (patientId, raw = {}) => {
+    const payload = { patient: patientId };
+    const setIfFilled = (key, value) => {
+        const trimmed = String(value ?? '').trim();
+        if (trimmed) payload[key] = trimmed;
+    };
+
+    setIfFilled('poids', raw.poids);
+    setIfFilled('taille', raw.taille);
+    setIfFilled('pouls', raw.pouls);
+    setIfFilled('taux_oxygene', raw.taux_oxygene);
+    setIfFilled('groupe_sanguin', raw.groupe_sanguin);
+    setIfFilled('facteur_rhesus', raw.facteur_rhesus);
+    setIfFilled('electrophorese_hb', raw.electrophorese_hb);
+    setIfFilled('temperature', raw.temperature);
+    setIfFilled('tension_arterielle', raw.tension_arterielle);
+    setIfFilled('frequence_respiratoire', raw.frequence_respiratoire);
+    setIfFilled('glycemie', raw.glycemie);
+    return payload;
+};
 
 export const upsertDonneesCliniques = async (patientId, raw) => {
-    const payload = buildClinicalPayload(patientId, raw);
     const existing = await findCliniqueForPatient(patientId);
+    const merged = existing
+        ? {
+            poids: existing.poids,
+            taille: existing.taille,
+            pouls: existing.pouls,
+            taux_oxygene: existing.taux_oxygene,
+            groupe_sanguin: existing.groupe_sanguin,
+            facteur_rhesus: existing.facteur_rhesus,
+            electrophorese_hb: existing.electrophorese_hb,
+            temperature: existing.temperature,
+            tension_arterielle: existing.tension_arterielle,
+            frequence_respiratoire: existing.frequence_respiratoire,
+            glycemie: existing.glycemie,
+            ...raw,
+        }
+        : raw;
+    const payload = buildClinicalPayload(patientId, merged);
+    const { patient: _pid, ...fields } = payload;
+    const hasClinicalData = Object.values(fields).some((v) => String(v ?? '').trim() !== '');
+
     if (existing) {
-        const response = await axiosInstance.put(`/patient/clinique/${existing.id}/`, payload);
+        if (!hasClinicalData) return existing;
+        const response = await axiosInstance.patch(`/patient/clinique/${existing.id}/`, fields);
         return response.data;
     }
+    if (!hasClinicalData) return null;
     const response = await axiosInstance.post('/patient/clinique/', payload);
     return response.data;
 };
@@ -42,17 +72,26 @@ export const upsertDonneesCliniques = async (patientId, raw) => {
 const findAllergieForPatient = async (patientId) => {
     const response = await axiosInstance.get('/patient/allergies/');
     const list = response.data.results || response.data;
-    return list.find((a) => a.patient === patientId) || null;
+    const pid = String(patientId);
+    return list.find((a) => String(a.patient) === pid) || null;
 };
 
-export const upsertAllergie = async (patientId, declencheur, manifestation) => {
-    if (!declencheur?.trim() || !manifestation?.trim()) return null;
+export const upsertAllergie = async (patientId, declencheur, manifestation, aDesAllergies = true) => {
+    const existing = await findAllergieForPatient(patientId);
+    if (!aDesAllergies) {
+        if (existing?.id) {
+            await axiosInstance.delete(`/patient/allergies/${existing.id}/`);
+        }
+        return null;
+    }
+    if (!declencheur?.trim() || !manifestation?.trim()) {
+        return null;
+    }
     const payload = {
         patient: patientId,
         declencheur: declencheur.trim(),
         manifestation: manifestation.trim(),
     };
-    const existing = await findAllergieForPatient(patientId);
     if (existing) {
         const response = await axiosInstance.put(`/patient/allergies/${existing.id}/`, payload);
         return response.data;
@@ -63,13 +102,18 @@ export const upsertAllergie = async (patientId, declencheur, manifestation) => {
 
 export const createAntecedent = async (patientId, { type = 'MEDICAL', nom, date, description }) => {
     if (!nom?.trim()) return null;
-    const response = await axiosInstance.post('/patient/antecedents/', {
+    const payload = {
         patient: patientId,
         type,
         nom: nom.trim(),
-        date: date || new Date().toISOString().slice(0, 10),
         description: description?.trim() || '',
-    });
+    };
+    if (date?.trim()) {
+        payload.date = date.trim();
+    } else if (type !== 'FAMILIAL') {
+        payload.date = new Date().toISOString().slice(0, 10);
+    }
+    const response = await axiosInstance.post('/patient/antecedents/', payload);
     return response.data;
 };
 

@@ -1,5 +1,5 @@
 import axiosInstance from '../Utils/axiosInstance';
-import { getGatewayBaseUrl } from '../Utils/gatewayUrls';
+import { getGatewayBaseUrl } from '../Utils/gatewayUrls.js';
 
 /**
  * Service API pour les fonctionnalités médecin
@@ -125,6 +125,6 @@ export const getChambresDisponibles = async (serviceId = null) => {
     if (serviceId) {
         params.service = serviceId;
     }
-    const response = await axiosInstance.get('/chambres/', { params });
+    const response = await axiosInstance.get(`${getGatewayBaseUrl()}/infrastructure/salles/`, { params });
     return response.data;
 };

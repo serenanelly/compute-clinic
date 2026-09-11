@@ -29,6 +29,15 @@ class DonneesCliniquesSerializer(serializers.ModelSerializer):
         model = DonneesCliniques
         fields = '__all__'
 
+    def validate(self, attrs):
+        from .vital_thresholds import validate_clinical_data
+        merged = {**getattr(self, 'initial_data', {}), **attrs}
+        try:
+            validate_clinical_data(merged)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
+        return attrs
+
 class AllergieSerializer(serializers.ModelSerializer):
     class Meta:
         model = Allergie

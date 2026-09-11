@@ -19,6 +19,7 @@ import PropTypes from "prop-types";
 import jsPDF from "jspdf";
 import { rapportApi, personnelApi } from "../../services/comptabiliteMatiereApi";
 import { getLoggedPersonnelId, formatPersonnelOption, getPersonnelUuid } from "../../Utils/personnelUtils";
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
 
 export function AccountantReports() {
     const [loading, setLoading] = useState(true);
@@ -215,7 +216,7 @@ export function AccountantReports() {
 
         doc.setFontSize(18);
         doc.setTextColor(26, 115, 163);
-        doc.text("FULTANG CLINIC", pageWidth / 2, 20, { align: "center" });
+        doc.text(APP_NAME, pageWidth / 2, 20, { align: "center" });
 
         doc.setFontSize(14);
         doc.setTextColor(80, 194, 185);
@@ -282,7 +283,7 @@ export function AccountantReports() {
         doc.setFontSize(9);
         doc.setTextColor(100);
         doc.text(`Document généré le ${new Date().toLocaleDateString('fr-FR')}`, margin, pageHeight - 18);
-        doc.text("Fultang Clinic - Comptable Matière", pageWidth - margin, pageHeight - 18, { align: "right" });
+        doc.text(brandFooter('Comptable Matière'), pageWidth - margin, pageHeight - 18, { align: "right" });
 
         doc.save(`rapport_${report.id}.pdf`);
     }

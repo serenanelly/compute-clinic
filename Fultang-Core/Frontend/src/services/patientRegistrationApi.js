@@ -20,6 +20,7 @@
  */
 import axiosInstance from '../Utils/axiosInstance';
 import { getPatientDossier } from './medicalDossierApi';
+import { resolveProfessionValue, splitProfessionForForm } from '../constants/patientProfessions.js';
 
 export const mapSexeToApi = (sexe) => {
     if (sexe === 'MASCULIN' || sexe === 'M') return 'M';
@@ -29,11 +30,11 @@ export const mapSexeToApi = (sexe) => {
 
 export const mapSexeFromApi = (sexe) => (sexe === 'F' ? 'FEMININ' : 'MASCULIN');
 
-/** Adresse API : ville et quartier sont obligatoires (CharField sans blank=True). */
+/** Adresse API — pas de fallback silencieux (CORR-A4-007). */
 export const buildAdressePayload = (formData) => ({
-    pays: formData.pays?.trim() || 'Cameroun',
-    ville: formData.ville?.trim() || 'Yaoundé',
-    quartier: formData.quartier?.trim() || formData.ville?.trim() || 'Centre-ville',
+    pays: formData.pays?.trim() || '',
+    ville: formData.ville?.trim() || '',
+    quartier: formData.quartier?.trim() || '',
     rue: formData.rue?.trim() || '',
     code_postal: formData.code_postal?.trim() || '',
 });
@@ -43,6 +44,7 @@ export const mapDossierToForm = (dossier) => {
     const adresse = dossier.adresse || {};
     const contact = dossier.contacts?.[0];
     const pap = dossier.personnes_a_prevenir?.[0];
+    const professionParts = splitProfessionForForm(dossier.profession);
 
     return {
         nom: dossier.nom || '',
@@ -50,11 +52,14 @@ export const mapDossierToForm = (dossier) => {
         sexe: mapSexeFromApi(dossier.sexe),
         date_naissance: dossier.date_naissance || null,
         lieu_naissance: dossier.lieu_naissance || '',
+        code_identifiant: dossier.code_identifiant || '',
+        est_anonyme: Boolean(dossier.est_anonyme),
         nationalite: 'Camerounaise',
         statut_matrimonial: dossier.statut_matrimonial || 'CELIBATAIRE',
         num_securite_sociale: dossier.numero_securite_sociale || '',
         nombre_enfants: dossier.nombre_enfants ?? 0,
         profession: dossier.profession || '',
+        ...professionParts,
         email: dossier.courriel || '',
         nom_proche: pap?.nom || '',
         prenom_proche: pap?.prenom || '',
@@ -81,6 +86,7 @@ export const mapListPatientToForm = (p) => ({
     num_securite_sociale: p.numero_securite_sociale || p.num_securite_sociale || '',
     nombre_enfants: p.nombre_enfants ?? 0,
     profession: p.profession || '',
+    ...splitProfessionForForm(p.profession),
     email: p.courriel || p.email || '',
     nom_proche: '',
     prenom_proche: '',
@@ -94,19 +100,43 @@ export const mapListPatientToForm = (p) => ({
     contact: p.contact_principal || p.contacts?.[0]?.numero || p.contact || '',
 });
 
-export const buildPatientCreatePayload = (formData) => {
-    const ssn = formData.num_securite_sociale?.trim() || `FULTANG-${Date.now()}`;
+const formatBirthDate = (formData) =>
+    formData.date_naissance?.format?.('YYYY-MM-DD') || formData.date_naissance || null;
+
+/** Payload création patient — mode `code` (accueil rapide) ou `identite` (réception). */
+export const buildPatientCreatePayload = (formData, mode = 'identite') => {
+    if (mode === 'code') {
+        const code = formData.code_identifiant?.trim();
+        return {
+            code_identifiant: code,
+            est_anonyme: true,
+            dossier_incomplet: true,
+            nom: formData.nom?.trim() || code,
+            prenom: formData.prenom?.trim() || '',
+            sexe: mapSexeToApi(formData.sexe || 'MASCULIN'),
+            date_naissance: formatBirthDate(formData) || '1900-01-01',
+            lieu_naissance: formData.lieu_naissance?.trim() || '',
+            profession: '',
+            statut_matrimonial: 'CELIBATAIRE',
+            numero_securite_sociale: formData.num_securite_sociale?.trim() || undefined,
+        };
+    }
+
+    const profession = resolveProfessionValue(formData);
     const payload = {
+        dossier_incomplet: true,
         nom: formData.nom.trim(),
         prenom: formData.prenom?.trim() || '',
         sexe: mapSexeToApi(formData.sexe),
-        date_naissance: formData.date_naissance?.format?.('YYYY-MM-DD') || formData.date_naissance,
-        lieu_naissance: formData.lieu_naissance?.trim() || 'Non renseigné',
-        profession: formData.profession?.trim() || 'Non renseignée',
+        date_naissance: formatBirthDate(formData) || '1900-01-01',
+        lieu_naissance: formData.lieu_naissance?.trim() || '',
+        profession,
         statut_matrimonial: formData.statut_matrimonial || 'CELIBATAIRE',
-        numero_securite_sociale: ssn,
         nombre_enfants: Number(formData.nombre_enfants) || 0,
     };
+    if (formData.num_securite_sociale?.trim()) {
+        payload.numero_securite_sociale = formData.num_securite_sociale.trim();
+    }
     if (formData.email?.trim()) {
         payload.courriel = formData.email.trim();
     }
@@ -123,57 +153,65 @@ const dataUrlToFile = (dataUrl, filename) => {
     return new File([bytes], filename, { type: mime });
 };
 
-export const createPatientWithDetails = async (formData) => {
-    const payload = buildPatientCreatePayload(formData);
+const postOptional = async (label, fn) => {
+    try {
+        await fn();
+    } catch (err) {
+        console.warn(`${label} non enregistré :`, err.response?.data || err.message);
+    }
+};
+
+export const createPatientWithDetails = async (formData, mode = 'identite') => {
+    const payload = buildPatientCreatePayload(formData, mode);
     const patientRes = await axiosInstance.post('/patients/', payload);
     const patientId = patientRes.data.id;
 
-    // Upload de la photo en multipart/form-data (séparé du payload JSON)
-    if (formData.photo) {
-        try {
-            const file = dataUrlToFile(formData.photo, `patient_${patientId}.png`);
-            const photoForm = new FormData();
-            photoForm.append('photo', file);
-            await axiosInstance.patch(`/patients/${patientId}/`, photoForm, {
-                headers: { 'Content-Type': 'multipart/form-data' },
-            });
-        } catch (err) {
-            console.warn('Photo non enregistrée :', err);
-        }
-    }
+    const parallelTasks = [];
 
-    if (formData.pays || formData.ville) {
-        const adresseRes = await axiosInstance.post('/adresses/', buildAdressePayload(formData));
-        await axiosInstance.patch(`/patients/${patientId}/`, { adresse: adresseRes.data.id });
+    if (mode !== 'code' && formData.pays?.trim() && formData.ville?.trim() && formData.quartier?.trim()) {
+        parallelTasks.push(
+            postOptional('Adresse', async () => {
+                const adresseRes = await axiosInstance.post('/adresses/', buildAdressePayload(formData));
+                await axiosInstance.patch(`/patients/${patientId}/`, { adresse: adresseRes.data.id });
+            }),
+        );
     }
 
     if (formData.contact?.trim()) {
-        await axiosInstance.post('/contacts/', {
-            type: 'TELEPHONE',
-            numero: formData.contact.trim(),
-            patient: patientId,
-        });
+        parallelTasks.push(
+            postOptional('Contact patient', () =>
+                axiosInstance.post('/contacts/', {
+                    type: 'TELEPHONE',
+                    numero: formData.contact.trim(),
+                    patient: patientId,
+                }),
+            ),
+        );
     }
 
+    await Promise.all(parallelTasks);
+
     if (formData.nom_proche?.trim()) {
-        const papRes = await axiosInstance.post('/personnes-a-prevenir/', {
-            nom: formData.nom_proche.trim(),
-            prenom: formData.prenom_proche?.trim() || '',
-        });
-        await axiosInstance.post('/liens-parente/', {
-            patient: patientId,
-            personne_a_prevenir: papRes.data.id,
-            relation: ['PERE', 'MERE', 'FRERE_SOEUR', 'CONJOINT', 'AMI', 'AUTRE'].includes(formData.lien_parente)
-                ? formData.lien_parente
-                : 'AUTRE',
-        });
-        if (formData.contact_proche?.trim()) {
-            await axiosInstance.post('/contacts/', {
-                type: 'TELEPHONE',
-                numero: formData.contact_proche.trim(),
-                personne_a_prevenir: papRes.data.id,
+        await postOptional('Personne à prévenir', async () => {
+            const papRes = await axiosInstance.post('/personnes-a-prevenir/', {
+                nom: formData.nom_proche.trim(),
+                prenom: formData.prenom_proche?.trim() || '',
             });
-        }
+            await axiosInstance.post('/liens-parente/', {
+                patient: patientId,
+                personne_a_prevenir: papRes.data.id,
+                relation: ['PERE', 'MERE', 'FRERE_SOEUR', 'CONJOINT', 'AMI', 'AUTRE'].includes(formData.lien_parente)
+                    ? formData.lien_parente
+                    : 'AUTRE',
+            });
+            if (formData.contact_proche?.trim()) {
+                await axiosInstance.post('/contacts/', {
+                    type: 'TELEPHONE',
+                    numero: formData.contact_proche.trim(),
+                    personne_a_prevenir: papRes.data.id,
+                });
+            }
+        });
     }
 
     return patientRes.data;
@@ -196,14 +234,24 @@ export const updatePatientWithDetails = async (patientId, formData, existingDoss
         sexe: mapSexeToApi(formData.sexe),
         date_naissance: formatDate(formData, existingDossier.date_naissance),
         lieu_naissance: formData.lieu_naissance?.trim() || existingDossier.lieu_naissance || 'Non renseigné',
-        profession: formData.profession?.trim() || existingDossier.profession || 'Non renseignée',
+        profession: resolveProfessionValue(formData) || existingDossier.profession || '',
         statut_matrimonial: formData.statut_matrimonial || existingDossier.statut_matrimonial || 'CELIBATAIRE',
         nombre_enfants: Number(formData.nombre_enfants ?? existingDossier.nombre_enfants) || 0,
     };
     if (formData.email?.trim()) {
         payload.courriel = formData.email.trim();
     }
+    if (formData.num_securite_sociale?.trim()) {
+        payload.numero_securite_sociale = formData.num_securite_sociale.trim();
+    }
+    if (formData.code_identifiant?.trim()) {
+        payload.code_identifiant = formData.code_identifiant.trim();
+    }
 
+    const professionResolved = resolveProfessionValue(formData);
+    if (professionResolved && professionResolved !== 'Non renseigné') {
+        payload.dossier_incomplet = false;
+    }
     await axiosInstance.patch(`/patients/${patientId}/`, payload);
 
     const adresseObj = existingDossier.adresse;

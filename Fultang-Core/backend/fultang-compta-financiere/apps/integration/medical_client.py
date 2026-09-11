@@ -319,9 +319,7 @@ def _collect_patient_prestations(patient_id: str, snapshot: dict) -> list[dict]:
 
     consultation_to_patient = snapshot['consultation_to_patient']
     consultation_meta = snapshot['consultation_meta']
-    visites_a_facturer = snapshot['visites_a_facturer']
     visite_dates = snapshot['visite_dates']
-    consultation_ids_with_exam: set[str] = set()
 
     for exam in snapshot['examens']:
         if exam.get('statut') not in ('EN_ATTENTE', 'PRELEVE', 'REALISE', 'VALIDE'):
@@ -329,7 +327,6 @@ def _collect_patient_prestations(patient_id: str, snapshot: dict) -> list[dict]:
         cid = str(exam.get('consultation', ''))
         if consultation_to_patient.get(cid) != pid:
             continue
-        consultation_ids_with_exam.add(cid)
         nom_exam = exam.get('nom', 'Examen')
         meta = consultation_meta.get(cid, {})
         date_tri = meta.get('date_tri') or ''
@@ -349,29 +346,8 @@ def _collect_patient_prestations(patient_id: str, snapshot: dict) -> list[dict]:
             'date_heure': date_tri,
         })
 
-    for consultation in snapshot['consultations']:
-        cid = str(consultation.get('id', ''))
-        if str(consultation.get('patient', '')) != pid:
-            continue
-        visite_id = str(consultation.get('visite', ''))
-        if visite_id not in visites_a_facturer and cid not in consultation_ids_with_exam:
-            continue
-        date_tri = consultation.get('date_heure') or ''
-        _append_prestation(bucket, pid, {
-            'id': f"consultation-{cid}",
-            'type': 'consultation',
-            'libelle': 'Consultation médicale',
-            'motif': consultation.get('motif') or 'Consultation médicale',
-            'montant': _tarif_consultation(),
-            'statut_medical': 'A_FACTURER',
-            'service': 'consultation',
-            'type_recette': 'consultation',
-            'categorie': 'consultation',
-            'visite_id': visite_id,
-            'consultation_id': cid,
-            'date_tri': date_tri,
-            'date_heure': date_tri,
-        })
+    # Frais consultation : facturés au niveau visite (RG-CF-001), pas via Consultation — évite
+    # le double encaissement et le blocage médecin (consultation créée seulement après paiement).
 
     for hosp in snapshot['hospitalisations']:
         if str(hosp.get('patient', '')) != pid:
@@ -404,12 +380,24 @@ def _collect_patient_prestations(patient_id: str, snapshot: dict) -> list[dict]:
         if visite.get('statut') not in ('EN_COURS', 'TERMINE'):
             continue
         date_tri = visite.get('date_heure') or ''
+        paiement_ok = bool(visite.get('paiement_valide'))
+        urgence = bool(visite.get('mode_urgence'))
+        if paiement_ok or urgence:
+            montant_visite = 0
+        else:
+            montant_visite = _tarif_consultation()
+        motif = visite.get('motif_visite', '') or 'passage'
+        libelle = (
+            'Consultation médicale'
+            if montant_visite > 0
+            else f"Visite — {motif}"
+        )
         _append_prestation(bucket, pid, {
             'id': f"visite-{visite.get('id', '')}",
             'type': 'visite',
-            'libelle': f"Visite — {visite.get('motif_visite', 'passage')}",
-            'motif': visite.get('motif_visite', ''),
-            'montant': 0,
+            'libelle': libelle,
+            'motif': motif,
+            'montant': montant_visite,
             'statut_medical': visite.get('statut'),
             'service': 'consultation',
             'type_recette': 'consultation',

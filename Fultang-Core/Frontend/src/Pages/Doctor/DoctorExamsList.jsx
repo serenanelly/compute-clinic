@@ -4,7 +4,7 @@ import { doctorNavLink } from "./lib/doctorNavLink.js";
 import { DoctorNavBar } from "./DoctorComponents/DoctorNavBar.jsx";
 import { Loading } from "../../GlobalComponents/Loading.jsx";
 import { doctorApi } from "../../services/doctorApi.js";
-import { FlaskConical, Search, CheckCircle, Clock } from 'lucide-react';
+import { FlaskConical, Search, CheckCircle, Clock, Plus, X } from 'lucide-react';
 
 export const DoctorExamsList = () => {
     const [examens, setExamens] = useState([]);
@@ -12,6 +12,9 @@ export const DoctorExamsList = () => {
     const [isLoading, setIsLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState("");
     const [statusFilter, setStatusFilter] = useState("TOUS");
+    const [selectedExam, setSelectedExam] = useState(null);
+    const [resultForm, setResultForm] = useState({ resultats: '', observations: '', interpretation: '' });
+    const [isSaving, setIsSaving] = useState(false);
 
     useEffect(() => {
         fetchExamens();
@@ -19,15 +22,13 @@ export const DoctorExamsList = () => {
 
     useEffect(() => {
         let filtered = examens;
-
         if (statusFilter !== "TOUS") {
             filtered = filtered.filter(e => e.statut === statusFilter);
         }
-
         if (searchTerm.trim()) {
             const lowerSearch = searchTerm.toLowerCase();
-            filtered = filtered.filter(e => 
-                (e.nom?.toLowerCase().includes(lowerSearch)) || 
+            filtered = filtered.filter(e =>
+                (e.nom?.toLowerCase().includes(lowerSearch)) ||
                 (e.patient?.nom?.toLowerCase().includes(lowerSearch)) ||
                 (e.patient?.prenom?.toLowerCase().includes(lowerSearch))
             );
@@ -38,7 +39,9 @@ export const DoctorExamsList = () => {
     const fetchExamens = async () => {
         try {
             setIsLoading(true);
-            const data = await doctorApi.getExamens();
+            const medecinId = localStorage.getItem('personnel_id');
+            const params = medecinId ? { medecin: medecinId } : {};
+            const data = await doctorApi.getExamens(params);
             setExamens(data);
             setFilteredExamens(data);
         } catch (error) {
@@ -53,36 +56,56 @@ export const DoctorExamsList = () => {
         return new Date(isoString).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' });
     };
 
+    const canDoctorEnterResult = (exam) =>
+        ['IMAGERIE', 'HISTOLOGIE'].includes(exam.categorie) && !exam.resultat;
+
+    const handleSaveResult = async (e) => {
+        e.preventDefault();
+        if (!selectedExam) return;
+        try {
+            setIsSaving(true);
+            await doctorApi.saveExamResult(selectedExam.id, {
+                ...resultForm,
+                doctor_id: localStorage.getItem('personnel_id'),
+            });
+            setSelectedExam(null);
+            await fetchExamens();
+        } catch {
+            alert('Erreur lors de la saisie du résultat.');
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
     return (
         <CustomDashboard linkList={doctorNavLink} requiredRole="medecin">
             <DoctorNavBar>
                 <div className="p-6 h-[calc(100vh-100px)] flex flex-col bg-gray-50/50">
-                    
                     <div className="flex justify-between items-center mb-6">
                         <div>
                             <h2 className="text-2xl font-bold text-gray-800 flex items-center">
                                 <FlaskConical className="w-7 h-7 mr-2 text-primary-start" />
-                                Suivi des Examens
+                                Mes examens prescrits
                             </h2>
-                            <p className="text-sm text-gray-500 mt-1">Vérifiez l'arrivée des résultats du laboratoire</p>
+                            <p className="text-sm text-gray-500 mt-1">Résultats validés par le laboratoire — saisie au lit pour imagerie (CORR-A3-002)</p>
                         </div>
                     </div>
 
                     <div className="flex gap-4 mb-6">
                         <div className="flex-1 bg-white p-2 rounded-xl shadow-sm border border-gray-200 relative">
                             <Search className="absolute left-4 top-3.5 w-5 h-5 text-gray-400" />
-                            <input 
-                                type="text" 
+                            <input
+                                type="text"
                                 value={searchTerm}
                                 onChange={(e) => setSearchTerm(e.target.value)}
-                                placeholder="Rechercher par examen ou patient..." 
+                                placeholder="Rechercher par examen ou patient..."
                                 className="w-full pl-12 pr-4 py-1 bg-transparent border-none focus:ring-0 outline-none"
                             />
                         </div>
                         <div className="flex bg-white p-1 rounded-xl shadow-sm border border-gray-200">
-                            {["TOUS", "EN_ATTENTE", "REALISE"].map(stat => (
+                            {["TOUS", "EN_ATTENTE", "REALISE", "VALIDE"].map(stat => (
                                 <button key={stat} onClick={() => setStatusFilter(stat)} className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${statusFilter === stat ? 'bg-primary-start text-white shadow-md' : 'text-gray-500 hover:text-gray-700'}`}>
-                                    {stat === 'TOUS' ? 'Tous' : stat === 'EN_ATTENTE' ? 'En Attente' : 'Résultats dispo'}
+                                    {stat === 'TOUS' ? 'Tous' : stat.replace('_', ' ')}
                                 </button>
                             ))}
                         </div>
@@ -115,8 +138,8 @@ export const DoctorExamsList = () => {
                                             filteredExamens.map((exam) => (
                                                 <tr key={exam.id} className="hover:bg-gray-50 transition-colors group">
                                                     <td className="p-4 pl-6">
-                                                        <div className="font-bold text-gray-800">{exam.nom || exam.nom_examen || "Examen sans nom"}</div>
-                                                        <div className="text-xs text-gray-500 mt-0.5">{exam.motif || "Pas de motif spécifié"}</div>
+                                                        <div className="font-bold text-gray-800">{exam.nom || "Examen"}</div>
+                                                        <div className="text-xs text-gray-500 mt-0.5">{exam.categorie} — {exam.motif || "—"}</div>
                                                     </td>
                                                     <td className="p-4">
                                                         <div className="font-medium text-gray-700">{exam.patient?.nom} {exam.patient?.prenom}</div>
@@ -125,22 +148,20 @@ export const DoctorExamsList = () => {
                                                         {formatDate(exam.date_prescription)}
                                                     </td>
                                                     <td className="p-4">
-                                                        {exam.statut === 'EN_ATTENTE' ? (
-                                                            <span className="flex items-center text-xs font-bold text-yellow-700 bg-yellow-50 border border-yellow-200 px-2 py-1 rounded w-max">
-                                                                <Clock className="w-3 h-3 mr-1" /> En attente
-                                                            </span>
-                                                        ) : (
-                                                            <span className="flex items-center text-xs font-bold text-green-700 bg-green-50 border border-green-200 px-2 py-1 rounded w-max">
-                                                                <CheckCircle className="w-3 h-3 mr-1" /> Réalisé
-                                                            </span>
-                                                        )}
+                                                        <span className="flex items-center text-xs font-bold text-yellow-700 bg-yellow-50 border border-yellow-200 px-2 py-1 rounded w-max">
+                                                            {exam.statut}
+                                                        </span>
                                                     </td>
                                                     <td className="p-4 pr-6">
-                                                        {exam.statut === 'REALISE' && exam.resultat ? (
-                                                            <div className="text-sm text-gray-700 p-2 bg-gray-50 rounded border">
-                                                                <span className="font-bold">Valeur:</span> {exam.resultat.valeur_mesuree} <br/>
-                                                                <span className="text-xs text-gray-500">{exam.resultat.observations}</span>
+                                                        {exam.resultat ? (
+                                                            <div className="text-sm text-gray-700 p-2 bg-gray-50 rounded border max-w-xs">
+                                                                <span className="font-bold">Résultat :</span> {exam.resultat.resultats?.slice(0, 120)}
+                                                                {exam.resultat.resultats?.length > 120 ? '…' : ''}
                                                             </div>
+                                                        ) : canDoctorEnterResult(exam) ? (
+                                                            <button type="button" onClick={() => { setSelectedExam(exam); setResultForm({ resultats: '', observations: '', interpretation: '' }); }} className="text-xs font-bold text-primary-start underline">
+                                                                Saisir au lit
+                                                            </button>
                                                         ) : (
                                                             <span className="text-gray-400 italic text-sm">—</span>
                                                         )}
@@ -153,6 +174,22 @@ export const DoctorExamsList = () => {
                             </div>
                         )}
                     </div>
+
+                    {selectedExam && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
+                            <form onSubmit={handleSaveResult} className="bg-white rounded-xl p-6 w-full max-w-lg space-y-4">
+                                <div className="flex justify-between items-center">
+                                    <h3 className="font-bold">Résultat — {selectedExam.nom}</h3>
+                                    <button type="button" onClick={() => setSelectedExam(null)}><X className="w-5 h-5" /></button>
+                                </div>
+                                <textarea required placeholder="Résultats" value={resultForm.resultats} onChange={e => setResultForm({ ...resultForm, resultats: e.target.value })} className="w-full border rounded-lg p-3" rows={4} />
+                                <input placeholder="Observations" value={resultForm.observations} onChange={e => setResultForm({ ...resultForm, observations: e.target.value })} className="w-full border rounded-lg p-2" />
+                                <button type="submit" disabled={isSaving} className="w-full py-2 bg-primary-start text-white rounded-lg font-bold">
+                                    {isSaving ? 'Enregistrement…' : 'Enregistrer'}
+                                </button>
+                            </form>
+                        </div>
+                    )}
                 </div>
             </DoctorNavBar>
         </CustomDashboard>

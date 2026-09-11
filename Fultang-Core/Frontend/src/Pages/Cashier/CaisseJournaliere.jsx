@@ -86,10 +86,14 @@ export const CaisseJournalierePage = () => {
         }
     };
 
-    // Fonction pour obtenir le solde d'ouverture fiable
-    // Utilise la valeur du backend lorsqu'elle est disponible et valide,
-    // sinon retourne le solde physique de la dernière caisse fermée
+    // Solde de report : priorité à la valeur autoritaire du backend.
     const getFiableOpeningBalance = () => {
+        if (reportSolde.has_report && reportSolde.solde_ouverture != null) {
+            const backendVal = Number(reportSolde.solde_ouverture);
+            if (!isNaN(backendVal) && backendVal >= 0) {
+                return backendVal;
+            }
+        }
         return expectedBalance();
     };
 

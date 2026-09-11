@@ -119,8 +119,8 @@ export function AdminHomePage() {
             gradient: 'from-emerald-500 to-teal-500'
         },
         {
-            title: t('admin.manageRooms'),
-            desc: t('admin.manageHospitalRooms'),
+            title: t('admin.manageRooms', { defaultValue: 'Infrastructures' }),
+            desc: 'Salles, bâtiments et étages',
             icon: BedDouble,
             link: AppRoutesPaths.adminChambresPage,
             gradient: 'from-purple-500 to-indigo-500'

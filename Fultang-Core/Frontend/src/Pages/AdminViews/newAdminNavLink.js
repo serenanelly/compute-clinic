@@ -23,7 +23,7 @@ export const newAdminNavLink = [
         link: appRoutes.adminPersonnelPage,
     },
     {
-        name: "Salles",
+        name: "Infrastructures",
         icon: Stethoscope,
         link: appRoutes.adminChambresPage,
     },

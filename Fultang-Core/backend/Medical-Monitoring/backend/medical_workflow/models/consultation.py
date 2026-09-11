@@ -3,6 +3,7 @@ from django.db import models
 from django.utils.translation import gettext_lazy as _
 from patient.models.patient import Patient
 from .visit import Visite
+from .choices import TypeDiagnostic
 
 class Consultation(models.Model):
     """Représente une visite médicale d'un patient."""
@@ -15,6 +16,8 @@ class Consultation(models.Model):
     
     # ID du médecin (Provient d'un service externe)
     medecin_charge = models.CharField(max_length=255, verbose_name=_("Médecin en charge"), null=True, blank=True)
+    examen_physique = models.TextField(blank=True, default='', verbose_name=_("Examen physique"))
+    champs_specialite = models.JSONField(default=dict, blank=True, verbose_name=_("Champs spécialité"))
 
     class Meta:
         verbose_name = _("Consultation")
@@ -47,10 +50,31 @@ class Diagnostic(models.Model):
     description = models.TextField(blank=True, null=True, verbose_name=_("Description"))
     conclusion = models.TextField(blank=True, null=True, verbose_name=_("Conclusion"))
     niveau_certitude = models.CharField(max_length=100, blank=True, null=True, verbose_name=_("Niveau de certitude"))
+    type_diagnostic = models.CharField(
+        max_length=20,
+        choices=TypeDiagnostic.choices,
+        default=TypeDiagnostic.ETIOLOGIQUE,
+        verbose_name=_("Type de diagnostic"),
+    )
 
     class Meta:
         verbose_name = _("Diagnostic")
         verbose_name_plural = _("Diagnostics")
+
+
+class OrientationSpecialiste(models.Model):
+    """Prescription d'orientation vers un spécialiste (CORR-A2-016)."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    consultation = models.ForeignKey(
+        Consultation, on_delete=models.CASCADE, related_name='orientations',
+    )
+    specialite = models.CharField(max_length=255, verbose_name=_("Spécialité / service"))
+    motif = models.TextField(verbose_name=_("Motif de l'orientation"))
+    date_heure = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = _("Orientation spécialiste")
+        verbose_name_plural = _("Orientations spécialiste")
 
 class MedicamentPrescrit(models.Model):
     """Médicaments prescrits lors d'une consultation."""

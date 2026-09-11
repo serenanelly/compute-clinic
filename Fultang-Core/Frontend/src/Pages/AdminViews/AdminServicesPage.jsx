@@ -108,13 +108,6 @@ export function AdminServicesPage() {
             render: (text) => <span className="font-semibold text-gray-800">{text}</span>
         },
         {
-            title: t('services.serviceDescription'),
-            dataIndex: 'desc_service',
-            key: 'desc_service',
-            ellipsis: true,
-            render: (text) => <span className="text-gray-500">{text || '—'}</span>
-        },
-        {
             title: t('services.chefService'),
             key: 'chef',
             render: (_, record) => {
@@ -134,6 +127,22 @@ export function AdminServicesPage() {
                 }
                 return <Tag color="orange">Non assigné</Tag>;
             }
+        },
+        {
+            title: 'Création',
+            dataIndex: 'date_creation',
+            key: 'date_creation',
+            render: (d) => <span className="text-gray-500 text-sm">{d || '—'}</span>,
+        },
+        {
+            title: 'Décret',
+            key: 'decret',
+            render: (_, r) => (
+                <span className="text-gray-500 text-sm">
+                    {r.reference_decret || '—'}
+                    {r.date_decret ? ` (${r.date_decret})` : ''}
+                </span>
+            ),
         },
         {
             title: t('services.actions'),

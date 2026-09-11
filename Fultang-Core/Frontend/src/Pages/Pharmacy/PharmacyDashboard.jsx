@@ -1,6 +1,7 @@
 import { FiGrid, FiPlusCircle, FiList, FiFileText } from 'react-icons/fi';
 import { NavLink } from 'react-router-dom';
 import PropTypes from "prop-types";
+import { APP_NAME } from '../../constants/branding.js';
 
 export const PharmacyDashboard = ({ children }) => {
   const getLinkClass = ({ isActive }) => {
@@ -13,7 +14,7 @@ export const PharmacyDashboard = ({ children }) => {
     <div className="flex h-screen">
       {/* Sidebar */}
       <div className="h-screen w-64 bg-gradient-to-b from-[#1A73A3] to-[#50C2B9] text-white p-4 fixed">
-        <div className="text-2xl font-bold mb-8">Fultang P</div>
+        <div className="text-2xl font-bold mb-8">{APP_NAME}</div>
         <nav className="space-y-4">
           <NavLink to="/dashboard" className={getLinkClass}>
             <FiGrid />

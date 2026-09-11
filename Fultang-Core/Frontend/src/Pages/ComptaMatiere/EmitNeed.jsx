@@ -5,6 +5,7 @@ import { useState, useEffect, useMemo } from "react";
 import { FaPlus, FaTrash, FaSave, FaSpinner, FaCheckCircle } from "react-icons/fa";
 import PropTypes from "prop-types";
 import { besoinApi, ligneBesoinApi, materielMedicalApi, materielDurableApi, getPersonnelId } from "../../services/comptabiliteMatiereApi";
+import { getFournisseurs } from "../../services/accountantApi";
 import { useAuthentication } from "../../Utils/Provider.jsx";
 
 function getMaterielName(materiel) {
@@ -18,6 +19,7 @@ export function EmitNeed() {
     const [successMessage, setSuccessMessage] = useState("");
     const [error, setError] = useState(null);
     const [materiels, setMateriels] = useState([]);
+    const [fournisseurs, setFournisseurs] = useState([]);
 
     // L'émetteur est toujours l'utilisateur connecté (pas un ancien localStorage)
     const personnelId = userData?.idpersonnel || userData?.id || getPersonnelId();
@@ -33,8 +35,8 @@ export function EmitNeed() {
 
     const [needInfo, setNeedInfo] = useState({
         motif: "",
-        // Le département est le service du comptable connecté
-        departement: "Comptabilité Matière"
+        departement: "Comptabilité Matière",
+        fournisseur_souhaite: "",
     });
 
     // Charger la liste des matériels pour les suggestions
@@ -46,13 +48,16 @@ export function EmitNeed() {
         try {
             setLoading(true);
             // Charger matériels médicaux et durables
-            const [medicaux, durables] = await Promise.all([
+            const [medicaux, durables, fournisseursData] = await Promise.all([
                 materielMedicalApi.getAll(),
-                materielDurableApi.getAll()
+                materielDurableApi.getAll(),
+                getFournisseurs().catch(() => []),
             ]);
             const medData = medicaux.results || medicaux || [];
             const durData = durables.results || durables || [];
             setMateriels([...medData, ...durData]);
+            const fournRaw = Array.isArray(fournisseursData) ? fournisseursData : (fournisseursData?.results || []);
+            setFournisseurs(fournRaw.filter((f) => f.actif !== false));
         } catch (err) {
             console.error("Erreur lors du chargement des matériels:", err);
         } finally {
@@ -123,7 +128,8 @@ export function EmitNeed() {
             const besoinData = {
                 motif: needInfo.motif,
                 idPersonnel_emetteur: personnelId,
-                statut: "NON_TRAITE"
+                statut: "NON_TRAITE",
+                fournisseur_souhaite: needInfo.fournisseur_souhaite || "",
             };
 
             const newBesoin = await besoinApi.create(besoinData);
@@ -149,7 +155,7 @@ export function EmitNeed() {
 
             // Réinitialiser le formulaire
             setNeedItems([{ id: Date.now(), material: "", quantity: "", priority: "NORMAL", description: "" }]);
-            setNeedInfo({ motif: "", departement: "Comptabilité Matière" });
+            setNeedInfo({ motif: "", departement: "Comptabilité Matière", fournisseur_souhaite: "" });
 
             setSuccessMessage("Besoin envoyé avec succès ! Le directeur sera notifié.");
             setTimeout(() => setSuccessMessage(""), 5000);
@@ -234,6 +240,25 @@ export function EmitNeed() {
                                 />
                             </div>
 
+                            <div>
+                                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                                    Fournisseur souhaité <span className="text-gray-400 font-normal">(optionnel — CORR-A3-010)</span>
+                                </label>
+                                <select
+                                    value={needInfo.fournisseur_souhaite}
+                                    onChange={(e) => setNeedInfo({ ...needInfo, fournisseur_souhaite: e.target.value })}
+                                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                >
+                                    <option value="">— Aucune préférence —</option>
+                                    {fournisseurs.map((f) => (
+                                        <option key={f.id} value={f.raison_sociale || f.nom}>{f.raison_sociale || f.nom}</option>
+                                    ))}
+                                </select>
+                                {fournisseurs.length === 0 && (
+                                    <p className="text-xs text-gray-500 mt-1">Catalogue fournisseurs indisponible — saisissez le motif en détail.</p>
+                                )}
+                            </div>
+
                             {/* Date de demande (automatique) */}
                             <div>
                                 <label className="block text-sm font-semibold text-gray-700 mb-2">
@@ -283,7 +308,7 @@ export function EmitNeed() {
                             type="button"
                             onClick={() => {
                                 setNeedItems([{ id: Date.now(), material: "", quantity: "", priority: "NORMAL", description: "" }]);
-                                setNeedInfo({ motif: "", departement: "Comptabilité Matière" });
+                                setNeedInfo({ motif: "", departement: "Comptabilité Matière", fournisseur_souhaite: "" });
                             }}
                             className="px-6 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-100 transition-all duration-300"
                         >

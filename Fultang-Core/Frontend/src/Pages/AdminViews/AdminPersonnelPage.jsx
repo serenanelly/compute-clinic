@@ -7,10 +7,13 @@ import { CustomDashboard } from '../../GlobalComponents/CustomDashboard.jsx';
 import { AdminNavBar } from './AdminNavBar.jsx';
 import { newAdminNavLink } from './newAdminNavLink.js';
 import { getAllPersonnel, deletePersonnel, resetPersonnelPassword, getPersonnelDependencies } from '../../services/personnelApi';
+import { getAllServices } from '../../services/servicesApi';
 import { useAuthentication } from '../../Utils/Provider.jsx';
 import { AddPersonnelModal } from './Personnel/AddPersonnelModal.jsx';
 import { EditPersonnelModal } from './Personnel/EditPersonnelModal.jsx';
 import { PersonnelDetailsModal } from './Personnel/PersonnelDetailsModal.jsx';
+import { PersonnelPrimesModal } from './Personnel/PersonnelPrimesModal.jsx';
+import { buildPostesOptions, BACKEND_STATUTS, POSTE_CATEGORIES, getServiceId } from '../../constants/personnelPostes.js';
 
 /**
  * Page de gestion du personnel hospitalier.
@@ -25,27 +28,32 @@ export function AdminPersonnelPage() {
     const [searchText, setSearchText] = useState('');
     const [filterPoste, setFilterPoste] = useState('');
     const [filterStatut, setFilterStatut] = useState('');
+    const [filterCategorie, setFilterCategorie] = useState('');
+    const [filterService, setFilterService] = useState('');
+    const [services, setServices] = useState([]);
 
-    // Modals state
     const [addModalOpen, setAddModalOpen] = useState(false);
     const [editModalOpen, setEditModalOpen] = useState(false);
     const [detailsModalOpen, setDetailsModalOpen] = useState(false);
+    const [primesModalOpen, setPrimesModalOpen] = useState(false);
     const [selectedPersonnel, setSelectedPersonnel] = useState(null);
 
-    const POSTES = [
-        { value: 'receptioniste', label: t('personnel.positions.receptioniste') },
-        { value: 'caissier', label: t('personnel.positions.caissier') },
-        { value: 'infirmier', label: t('personnel.positions.infirmier') },
-        { value: 'medecin', label: t('personnel.positions.medecin') },
-        { value: 'laborantin', label: t('personnel.positions.laborantin') },
-        { value: 'pharmacien', label: t('personnel.positions.pharmacien') },
-        { value: 'comptable', label: t('personnel.positions.comptable') },
-        { value: 'directeur', label: t('personnel.positions.directeur') }
-    ];
+    const POSTES = buildPostesOptions(t);
 
     useEffect(() => {
         fetchPersonnel();
+        fetchServicesList();
     }, []);
+
+    const fetchServicesList = async () => {
+        try {
+            const response = await getAllServices();
+            const data = response.results || response.data || response || [];
+            setServices(Array.isArray(data) ? data : []);
+        } catch {
+            setServices([]);
+        }
+    };
 
     useEffect(() => {
         let result = [...personnel];
@@ -67,9 +75,16 @@ export function AdminPersonnelPage() {
         if (filterStatut) {
             result = result.filter(p => p.statut === filterStatut);
         }
+        if (filterCategorie) {
+            const allowed = POSTE_CATEGORIES[filterCategorie]?.postes || [];
+            result = result.filter(p => allowed.includes(p.poste));
+        }
+        if (filterService) {
+            result = result.filter(p => String(p.service) === String(filterService));
+        }
 
         setFilteredPersonnel(result);
-    }, [searchText, filterPoste, filterStatut, personnel]);
+    }, [searchText, filterPoste, filterStatut, filterCategorie, filterService, personnel]);
 
     const fetchPersonnel = async () => {
         setLoading(true);
@@ -149,16 +164,14 @@ export function AdminPersonnelPage() {
     };
 
     const getStatusTag = (statut) => {
-        switch (statut) {
-            case 'actif':
-                return <Tag color="green">{t('personnel.statuses.actif')}</Tag>;
-            case 'licencie':
-                return <Tag color="red">{t('personnel.statuses.licencie')}</Tag>;
-            case 'retraite':
-                return <Tag color="default">{t('personnel.statuses.retraite')}</Tag>;
-            default:
-                return <Tag>{statut}</Tag>;
-        }
+        const colors = { Actif: 'green', 'Congé': 'orange', Suspendu: 'red', Autre: 'default' };
+        const labels = {
+            Actif: t('personnel.statuses.actif', { defaultValue: 'Actif' }),
+            'Congé': t('personnel.statuses.conge', { defaultValue: 'Congé' }),
+            Suspendu: t('personnel.statuses.suspendu', { defaultValue: 'Suspendu' }),
+            Autre: t('personnel.statuses.autre', { defaultValue: 'Autre' }),
+        };
+        return <Tag color={colors[statut] || 'default'}>{labels[statut] || statut}</Tag>;
     };
 
     const getPosteTag = (poste) => {
@@ -170,7 +183,8 @@ export function AdminPersonnelPage() {
             laborantin: 'green',
             pharmacien: 'magenta',
             comptable: 'gold',
-            directeur: 'red'
+            directeur: 'red',
+            admin: 'volcano',
         };
         const label = POSTES.find(p => p.value === poste)?.label || poste;
         return <Tag color={colors[poste] || 'default'}>{label}</Tag>;
@@ -326,16 +340,43 @@ export function AdminPersonnelPage() {
                                 onChange={(val) => setFilterStatut(val || '')}
                                 allowClear
                                 className="min-w-[140px]"
+                                options={BACKEND_STATUTS.map(s => ({
+                                    value: s.value,
+                                    label: t(s.labelKey, { defaultValue: s.value }),
+                                }))}
+                            />
+                            <Select
+                                placeholder="Catégorie"
+                                value={filterCategorie || undefined}
+                                onChange={(val) => setFilterCategorie(val || '')}
+                                allowClear
+                                className="min-w-[160px]"
                                 options={[
-                                    { value: 'actif', label: t('personnel.statuses.actif') },
-                                    { value: 'licencie', label: t('personnel.statuses.licencie') },
-                                    { value: 'retraite', label: t('personnel.statuses.retraite') }
+                                    { value: 'medical', label: POSTE_CATEGORIES.medical.label },
+                                    { value: 'admin', label: POSTE_CATEGORIES.admin.label },
                                 ]}
                             />
-                            {(searchText || filterPoste || filterStatut) && (
+                            <Select
+                                placeholder={t('personnel.service')}
+                                value={filterService || undefined}
+                                onChange={(val) => setFilterService(val || '')}
+                                allowClear
+                                className="min-w-[160px]"
+                                options={services.map(s => ({
+                                    value: String(getServiceId(s)),
+                                    label: s.nom_service,
+                                }))}
+                            />
+                            {(searchText || filterPoste || filterStatut || filterCategorie || filterService) && (
                                 <button
                                     type="button"
-                                    onClick={() => { setSearchText(''); setFilterPoste(''); setFilterStatut(''); }}
+                                    onClick={() => {
+                                        setSearchText('');
+                                        setFilterPoste('');
+                                        setFilterStatut('');
+                                        setFilterCategorie('');
+                                        setFilterService('');
+                                    }}
                                     className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800 transition-colors"
                                     title={t('common.clearFilters')}
                                 >
@@ -383,6 +424,13 @@ export function AdminPersonnelPage() {
                 isOpen={detailsModalOpen}
                 onClose={() => { setDetailsModalOpen(false); setSelectedPersonnel(null); }}
                 personnel={selectedPersonnel}
+                onManagePrimes={(p) => { setDetailsModalOpen(false); setSelectedPersonnel(p); setPrimesModalOpen(true); }}
+            />
+            <PersonnelPrimesModal
+                isOpen={primesModalOpen}
+                onClose={() => { setPrimesModalOpen(false); setSelectedPersonnel(null); }}
+                personnel={selectedPersonnel}
+                services={services}
             />
         </CustomDashboard>
     );

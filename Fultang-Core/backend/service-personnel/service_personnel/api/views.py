@@ -5,12 +5,12 @@ from drf_spectacular.utils import extend_schema, extend_schema_view
 from .models import (
     Service, Medecin, MedecinGeneraliste, Infirmiere, Receptionniste, 
     ComptableFinancier, ComptableMatiere, Laborantin, 
-    Pharmacien, Directeur, Admin
+    Pharmacien, Directeur, Admin, Prime
 )
 from .serializers import (
     ServiceSerializer, MedecinSerializer, MedecinGeneralisteSerializer, InfirmiereSerializer, ReceptionnisteSerializer, 
     ComptableFinancierSerializer, ComptableMatiereSerializer, LaborantinSerializer, 
-    PharmacienSerializer, DirecteurSerializer, AdminSerializer
+    PharmacienSerializer, DirecteurSerializer, AdminSerializer, PrimeSerializer
 )
 from rest_framework.views import APIView
 from rest_framework import status
@@ -93,6 +93,24 @@ class ServiceViewSet(viewsets.ModelViewSet):
         infirmieres = Infirmiere.objects.filter(service=service)
         serializer = InfirmiereSerializer(infirmieres, many=True)
         return Response(serializer.data)
+
+    @extend_schema(
+        summary="Récupérer tout le personnel d'un service",
+        description="Liste polymorphe de tous les membres affectés à ce service.",
+    )
+    @action(detail=True, methods=['get'])
+    def personnel(self, request, pk=None):
+        service = self.get_object()
+        personnel_models = [
+            Medecin, MedecinGeneraliste, Infirmiere, Receptionniste,
+            ComptableFinancier, ComptableMatiere, Laborantin,
+            Pharmacien, Directeur, Admin,
+        ]
+        results = []
+        for model in personnel_models:
+            for instance in model.objects.filter(service=service):
+                results.append(serialize_personnel(instance, model))
+        return Response(results)
 
 @extend_schema_view(
     list=extend_schema(summary="Lister tous les médecins", description="Récupère la liste complète des médecins de l'hôpital Fultang."),
@@ -379,6 +397,21 @@ POSTE_MODEL_MAP = {
     'admin': Admin,
 }
 
+CATEGORIE_POSTES = {
+    'medical': {'medecin', 'infirmier', 'laborantin', 'pharmacien'},
+    'admin': {'receptioniste', 'caissier', 'comptable', 'directeur', 'admin'},
+}
+
+
+def resolve_service(service_id):
+    """Retourne le Service ou lève ValueError si l'ID est invalide (CORR-A5-003)."""
+    if service_id in (None, '', 0, '0'):
+        return None
+    try:
+        return Service.objects.get(id_service=int(service_id))
+    except (Service.DoesNotExist, ValueError, TypeError) as exc:
+        raise ValueError(f"Service introuvable (id={service_id}).") from exc
+
 def generate_matricule(poste):
     prefix = "FULT-" + (poste[:3].upper() if poste else "PER")
     random_num = random.randint(1000, 9999)
@@ -471,14 +504,21 @@ class PersonnelViewSet(viewsets.ViewSet):
         results = []
         service_id = request.query_params.get('service')
         poste_filter = request.query_params.get('poste')
+        statut_filter = request.query_params.get('statut')
+        categorie_filter = request.query_params.get('categorie')
+        allowed_postes = CATEGORIE_POSTES.get(categorie_filter) if categorie_filter else None
         
         for model in personnel_models:
             queryset = model.objects.all()
             if service_id:
                 queryset = queryset.filter(service_id=service_id)
+            if statut_filter:
+                queryset = queryset.filter(statut=statut_filter)
             for instance in queryset:
                 serialized = serialize_personnel(instance, model)
                 if poste_filter and serialized.get('poste') != poste_filter:
+                    continue
+                if allowed_postes and serialized.get('poste') not in allowed_postes:
                     continue
                 results.append(serialized)
         return Response(results)
@@ -495,6 +535,11 @@ class PersonnelViewSet(viewsets.ViewSet):
         if not poste:
             return Response(
                 {"poste": ["Ce champ est obligatoire."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not data.get('date_embauche'):
+            return Response(
+                {"date_embauche": ["La date d'embauche est obligatoire (CORR-A4-006)."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         model_class = POSTE_MODEL_MAP.get(poste)
@@ -539,7 +584,7 @@ class PersonnelViewSet(viewsets.ViewSet):
             'email': data.get('email'),
             'contact': data.get('contact', ''),
             'matricule': data.get('matricule') or generate_matricule(poste),
-            'date_embauche': data.get('date_embauche') or timezone.now().date(),
+            'date_embauche': data.get('date_embauche'),
             'statut': data.get('statut', 'Actif'),
             'mot_de_passe': make_password(temporary_password),
             'tenant_id': tenant_context.tenant_id if tenant_context else None,
@@ -548,9 +593,12 @@ class PersonnelViewSet(viewsets.ViewSet):
         service_id = data.get('service')
         if service_id:
             try:
-                create_data['service'] = Service.objects.get(id_service=service_id)
-            except Service.DoesNotExist:
-                pass
+                create_data['service'] = resolve_service(service_id)
+            except ValueError as exc:
+                return Response(
+                    {"service": [str(exc)]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
                 
         if model_class == Medecin:
             create_data['specialite'] = data.get('specialite') or 'Medecine Generale'
@@ -590,9 +638,12 @@ class PersonnelViewSet(viewsets.ViewSet):
             service_id = data.get('service')
             if service_id:
                 try:
-                    user.service = Service.objects.get(id_service=service_id)
-                except Service.DoesNotExist:
-                    user.service = None
+                    user.service = resolve_service(service_id)
+                except ValueError as exc:
+                    return Response(
+                        {"service": [str(exc)]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
             else:
                 user.service = None
                 
@@ -680,6 +731,24 @@ class PersonnelViewSet(viewsets.ViewSet):
             "consultations": 0,
             "rendezvous": 0
         })
+
+
+@extend_schema(tags=['Administration - Primes'])
+class PrimeViewSet(viewsets.ModelViewSet):
+    """Primes multi-services pour le personnel (CORR-A5-008)."""
+    queryset = Prime.objects.select_related('service').all()
+    serializer_class = PrimeSerializer
+    pagination_class = None
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        personnel_id = self.request.query_params.get('personnel_id')
+        service_id = self.request.query_params.get('service')
+        if personnel_id:
+            qs = qs.filter(personnel_id=personnel_id)
+        if service_id:
+            qs = qs.filter(service_id=service_id)
+        return qs
 
 
 class ProvisionDatabaseView(APIView):

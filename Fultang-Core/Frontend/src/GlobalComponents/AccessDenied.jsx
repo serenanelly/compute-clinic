@@ -2,6 +2,7 @@ import PropTypes from 'prop-types';
 import {useNavigate} from "react-router-dom";
 import accessDeniedImage from "../assets/accessDenied.png";
 import {AppRoutesPaths} from "../Router/appRouterPaths.js";
+import { APP_NAME } from "../constants/branding.js";
 
 
 
@@ -27,7 +28,7 @@ export function AccessDenied({Role})
             }}
             className="flex flex-col ml-5 ">
             <div>
-                <p className="mt-32  text-8xl mb-10 font-bold text-primary-start">Fultang</p>
+                <p className="mt-32  text-8xl mb-10 font-bold text-primary-start">{APP_NAME}</p>
                 <p className="text-5xl mb-6 font-bold text-red-500"> 403 ERROR : Access Denied</p>
                 <h1 className="text-2xl text-black font-bold ">
                     Access denied for {Role} view, please log in as a {Role}

@@ -7,9 +7,10 @@ import { Loading } from "../../GlobalComponents/Loading.jsx";
 import { doctorApi } from "../../services/doctorApi.js";
 import { AppRoutesPaths } from "../../Router/appRouterPaths.js";
 import { 
-    FolderOpen, ArrowLeft, Calendar, FileText, Pill, FlaskConical, Stethoscope, AlertTriangle, AlertCircle, History,
-    HeartPulse, Weight, Ruler, Thermometer, Activity
+    FolderOpen, ArrowLeft, Calendar, Pill, FlaskConical, Stethoscope, AlertTriangle, AlertCircle, History,
+    HeartPulse, Weight, Ruler, Thermometer, Activity, Download
 } from 'lucide-react';
+import { downloadPatientDossierPdf } from '../../Utils/exportPatientDossierPdf.js';
 
 export const DoctorPatientMedicalFolder = () => {
     const { id } = useParams();
@@ -18,6 +19,7 @@ export const DoctorPatientMedicalFolder = () => {
     const [patientData, setPatientData] = useState(null);
     const [visites, setVisites] = useState([]);
     const [isLoading, setIsLoading] = useState(true);
+    const [isExporting, setIsExporting] = useState(false);
 
     useEffect(() => {
         if (!id) return;
@@ -47,6 +49,19 @@ export const DoctorPatientMedicalFolder = () => {
         });
     };
 
+    const handleDownloadDossier = () => {
+        if (!patientData) return;
+        try {
+            setIsExporting(true);
+            downloadPatientDossierPdf(patientData, visites);
+        } catch (error) {
+            console.error('Export dossier impossible', error);
+            alert('Impossible de générer le dossier PDF.');
+        } finally {
+            setIsExporting(false);
+        }
+    };
+
     if (isLoading) {
         return (
             <CustomDashboard linkList={doctorNavLink} requiredRole="medecin">
@@ -61,19 +76,30 @@ export const DoctorPatientMedicalFolder = () => {
                 <div className="p-6 h-[calc(100vh-100px)] flex flex-col bg-gray-50/50 overflow-hidden">
                     
                     {/* Top Bar */}
-                    <div className="flex items-center mb-6">
-                        <button 
-                            onClick={() => navigate(-1)}
-                            className="p-2 mr-4 bg-white rounded-lg shadow-sm border border-gray-200 hover:bg-gray-50 transition-colors"
-                        >
-                            <ArrowLeft className="w-5 h-5 text-gray-600" />
-                        </button>
-                        <div>
-                            <h2 className="text-2xl font-bold text-gray-800 flex items-center">
-                                <FolderOpen className="w-6 h-6 mr-2 text-primary-start" />
-                                Dossier Médical Global
-                            </h2>
+                    <div className="flex items-center justify-between mb-6">
+                        <div className="flex items-center">
+                            <button 
+                                onClick={() => navigate(-1)}
+                                className="p-2 mr-4 bg-white rounded-lg shadow-sm border border-gray-200 hover:bg-gray-50 transition-colors"
+                            >
+                                <ArrowLeft className="w-5 h-5 text-gray-600" />
+                            </button>
+                            <div>
+                                <h2 className="text-2xl font-bold text-gray-800 flex items-center">
+                                    <FolderOpen className="w-6 h-6 mr-2 text-primary-start" />
+                                    Dossier Médical Global
+                                </h2>
+                            </div>
                         </div>
+                        <button
+                            type="button"
+                            onClick={handleDownloadDossier}
+                            disabled={isExporting || !patientData}
+                            className="px-4 py-2 bg-primary-start text-white rounded-lg font-bold flex items-center gap-2 shadow-md hover:opacity-90 disabled:opacity-50"
+                        >
+                            <Download className="w-4 h-4" />
+                            {isExporting ? 'Génération…' : 'Télécharger le dossier'}
+                        </button>
                     </div>
 
                     <div className="flex gap-6 h-full overflow-hidden">

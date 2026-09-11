@@ -94,7 +94,11 @@ export const ConsultationHistory = () => {
                                             </div>
                                             <div>
                                                 <p className="font-bold text-blue-900 text-sm">Hospitalisation — {activeHosp.motif}</p>
-                                                <p className="text-xs text-blue-600/70">Chambre assignée</p>
+                                                <p className="text-xs text-blue-600/70">
+                                                    {activeHosp.room_id
+                                                        ? (activeHosp.room_nom || activeHosp.chambre || `Chambre ${String(activeHosp.room_id).slice(0, 8)}…`)
+                                                        : 'Salle et lit à affecter (infirmier)'}
+                                                </p>
                                             </div>
                                         </div>
                                         <span className="text-[10px] font-bold px-3 py-1 rounded-full bg-blue-100 text-blue-700 uppercase">

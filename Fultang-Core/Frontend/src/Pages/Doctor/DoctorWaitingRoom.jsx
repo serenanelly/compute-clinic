@@ -42,13 +42,20 @@ export const DoctorWaitingRoom = () => {
     // Dans le cas d'un RDV, on crée d'abord une vraie visite (la consultation en a besoin),
     // on clôture le RDV, puis on ouvre la consultation sur cette visite.
     const handleConsulter = async (item) => {
+        if (item.source === 'rdv') {
+            setError("Ce patient doit d'abord être enregistré à la réception, payer à la caisse, puis apparaître en salle d'attente.");
+            return;
+        }
+        if (item.paiement_valide === false || item.paiement_actif === false) {
+            if (!item.mode_urgence) {
+                setError(item.paiement_valide
+                    ? "CORR-A2-002 : paiement expiré — orientez le patient vers la caisse."
+                    : "RG-CF-001 : consultation non payée — orientez le patient vers la caisse.");
+                return;
+            }
+        }
         try {
             let visiteId = item.id;
-            if (item.source === 'rdv') {
-                const visite = await doctorApi.createVisite(item.patient.id, item.motif_visite || "Consultation");
-                visiteId = visite.id;
-                if (item.rdvId) await doctorApi.terminerRendezVous(item.rdvId);
-            }
             navigate(`/doctor/consultation?patient=${item.patient.id}&visite=${visiteId}`);
         } catch (err) {
             setError("Impossible de démarrer la consultation pour ce patient.");

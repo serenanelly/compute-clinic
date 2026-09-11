@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Modal, Alert } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { User } from 'lucide-react';
@@ -6,6 +6,15 @@ import { createPersonnel } from '../../../services/personnelApi';
 import { createMedecin } from '../../../services/medecinsApi';
 import { getAllServices } from '../../../services/servicesApi';
 import { getMyFunctionalServices } from '../../../services/tenantConfigApi';
+import { FultangDatePicker } from '../../../GlobalComponents/FultangDatePicker.jsx';
+import { isValidPhone, phoneErrorMessage } from '../../../Utils/phoneValidation.js';
+import { formatApiError } from '../../../Utils/formatApiError.js';
+import {
+    buildPostesOptions,
+    getServiceId,
+    MEDICAL_SPECIALITES,
+    POSTE_CATEGORIES,
+} from '../../../constants/personnelPostes.js';
 
 /**
  * Correspondance poste → service fonctionnel (Tenant Configuration) —
@@ -37,9 +46,22 @@ export function AddPersonnelModal({ isOpen, onClose, onSuccess }) {
     const [loading, setLoading] = useState(false);
     const [errors, setErrors] = useState({});
     const [services, setServices] = useState([]);
+    const [servicesError, setServicesError] = useState(null);
     const [apiError, setApiError] = useState(null);
     const [createdCredentials, setCreatedCredentials] = useState(null);
     const [disabledFunctionalServices, setDisabledFunctionalServices] = useState(new Set());
+    const [categorie, setCategorie] = useState('');
+
+    const ALL_POSTES = useMemo(() => buildPostesOptions(t), [t]);
+    // Un poste dont le service fonctionnel associé est désactivé pour cet
+    // établissement n'est pas proposé — voir POSTE_TO_FUNCTIONAL_SERVICE.
+    const POSTES = ALL_POSTES.filter((p) => {
+        const serviceCode = POSTE_TO_FUNCTIONAL_SERVICE[p.value];
+        return !serviceCode || !disabledFunctionalServices.has(serviceCode);
+    });
+    const filteredPostes = categorie
+        ? POSTES.filter(p => POSTE_CATEGORIES[categorie]?.postes.includes(p.value))
+        : POSTES;
 
     const [formData, setFormData] = useState({
         nom: '',
@@ -48,43 +70,11 @@ export function AddPersonnelModal({ isOpen, onClose, onSuccess }) {
         email: '',
         contact: '',
         poste: '',
+        specialite: '',
         service: '',
-        adresse: ''
+        adresse: '',
+        date_embauche: null,
     });
-
-    const ALL_POSTES = [
-        { value: 'receptioniste', label: t('personnel.positions.receptioniste') },
-        { value: 'caissier', label: t('personnel.positions.caissier') },
-        { value: 'infirmier', label: t('personnel.positions.infirmier') },
-        { value: 'medecin', label: t('personnel.positions.medecin') },
-        { value: 'laborantin', label: t('personnel.positions.laborantin') },
-        { value: 'pharmacien', label: t('personnel.positions.pharmacien') },
-        { value: 'comptable', label: t('personnel.positions.comptable') },
-        { value: 'directeur', label: t('personnel.positions.directeur') }
-    ];
-
-    // Un poste dont le service fonctionnel associé est désactivé pour cet
-    // établissement n'est pas proposé — voir POSTE_TO_FUNCTIONAL_SERVICE.
-    const POSTES = ALL_POSTES.filter((p) => {
-        const serviceCode = POSTE_TO_FUNCTIONAL_SERVICE[p.value];
-        return !serviceCode || !disabledFunctionalServices.has(serviceCode);
-    });
-
-    // Specialites medicales courantes
-    const SPECIALITES = [
-        'Médecine Générale',
-        'Cardiologie',
-        'Dermatologie',
-        'Gynécologie',
-        'Neurologie',
-        'Ophtalmologie',
-        'Pédiatrie',
-        'Psychiatrie',
-        'Radiologie',
-        'Chirurgie',
-        'ORL',
-        'Autre'
-    ];
 
     useEffect(() => {
         if (isOpen) {
@@ -109,12 +99,15 @@ export function AddPersonnelModal({ isOpen, onClose, onSuccess }) {
     };
 
     const fetchServices = async () => {
+        setServicesError(null);
         try {
             const response = await getAllServices();
             const servicesData = response.results || response.data || response || [];
-            setServices(servicesData);
+            setServices(Array.isArray(servicesData) ? servicesData : []);
         } catch (error) {
             console.error('Error fetching services:', error);
+            setServices([]);
+            setServicesError("Impossible de charger la liste des services. Vérifiez la connexion ou créez d'abord un service.");
         }
     };
 
@@ -132,37 +125,20 @@ export function AddPersonnelModal({ isOpen, onClose, onSuccess }) {
 
         if (!formData.nom.trim()) newErrors.nom = t('services.required');
         if (!formData.date_naissance) newErrors.date_naissance = t('services.required');
+        if (!formData.date_embauche) newErrors.date_embauche = "La date d'embauche est obligatoire";
         if (!formData.email.trim()) newErrors.email = t('services.required');
         if (!formData.contact.trim()) {
             newErrors.contact = t('services.required');
-        } else if (!/^6\d{8}$/.test(formData.contact)) {
-            newErrors.contact = t('services.phoneFormat');
+        } else if (!isValidPhone(formData.contact)) {
+            newErrors.contact = phoneErrorMessage(t('personnel.contact'));
         }
         if (!formData.poste) newErrors.poste = t('services.required');
-
-
+        if (formData.poste === 'medecin' && !formData.specialite) {
+            newErrors.specialite = 'La spécialité est obligatoire pour un médecin';
+        }
 
         setErrors(newErrors);
         return Object.keys(newErrors).length === 0;
-    };
-
-    const formatErrorMessage = (errorData) => {
-        if (typeof errorData === 'string') return errorData;
-
-        if (errorData.erreurs) {
-            const erreurs = errorData.erreurs;
-            const messages = [];
-            for (const [field, fieldErrors] of Object.entries(erreurs)) {
-                const errorList = Array.isArray(fieldErrors) ? fieldErrors : [fieldErrors];
-                messages.push(`${field}: ${errorList.join(', ')}`);
-            }
-            return messages.join('\n');
-        }
-
-        if (errorData.detail) return errorData.detail;
-        if (errorData.error) return `${errorData.error}: ${errorData.detail || ''}`;
-
-        return JSON.stringify(errorData);
     };
 
     const handleSubmit = async () => {
@@ -172,27 +148,27 @@ export function AddPersonnelModal({ isOpen, onClose, onSuccess }) {
         setApiError(null);
 
         try {
-            // Preparer les donnees de base
             const dataToSend = {
                 nom: formData.nom.trim(),
                 prenom: formData.prenom.trim() || '',
                 date_naissance: formData.date_naissance,
+                date_embauche: formData.date_embauche?.format?.('YYYY-MM-DD') || formData.date_embauche,
                 email: formData.email.trim().toLowerCase(),
                 contact: formData.contact.trim(),
-                poste: formData.poste
+                poste: formData.poste,
             };
 
-            // Ajouter les champs optionnels
             if (formData.service) {
                 dataToSend.service = parseInt(formData.service, 10);
             }
-            if (formData.adresse && formData.adresse.trim()) {
+            if (formData.adresse?.trim()) {
                 dataToSend.adresse = formData.adresse.trim();
             }
 
-            console.log('Sending data:', dataToSend);
-
-            // Si le poste est medecin, utiliser l'endpoint /api/medecins/
+            // Si le poste est medecin, utiliser l'endpoint /api/medecins/ avec le champ specialite
+            if (formData.poste === 'medecin') {
+                dataToSend.specialite = formData.specialite;
+            }
             const created = formData.poste === 'medecin'
                 ? await createMedecin(dataToSend)
                 : await createPersonnel(dataToSend);
@@ -210,9 +186,7 @@ export function AddPersonnelModal({ isOpen, onClose, onSuccess }) {
             }
         } catch (error) {
             console.error('Error creating personnel:', error);
-            const errorData = error.response?.data;
-            const errorMsg = formatErrorMessage(errorData);
-            setApiError(errorMsg);
+            setApiError(formatApiError(error, t('personnel.createError')));
         } finally {
             setLoading(false);
         }
@@ -220,9 +194,10 @@ export function AddPersonnelModal({ isOpen, onClose, onSuccess }) {
 
     const resetForm = () => {
         setFormData({
-            nom: '', prenom: '', date_naissance: '', email: '',
-            contact: '', poste: '', service: '', adresse: ''
+            nom: '', prenom: '', date_naissance: '', date_embauche: null, email: '',
+            contact: '', poste: '', specialite: '', service: '', adresse: '',
         });
+        setCategorie('');
         setErrors({});
         setApiError(null);
     };
@@ -232,7 +207,6 @@ export function AddPersonnelModal({ isOpen, onClose, onSuccess }) {
         onClose();
     };
 
-    // Verifier si le poste selectionne est medecin
     const isMedecin = formData.poste === 'medecin';
 
     if (createdCredentials) {
@@ -274,16 +248,11 @@ export function AddPersonnelModal({ isOpen, onClose, onSuccess }) {
             width={700}
         >
             <div className="space-y-4 py-4">
-                {/* Affichage des erreurs API */}
                 {apiError && (
-                    <Alert
-                        type="error"
-                        message={t('common.error')}
-                        description={<pre className="whitespace-pre-wrap text-sm">{apiError}</pre>}
-                        showIcon
-                        closable
-                        onClose={() => setApiError(null)}
-                    />
+                    <Alert type="error" message={t('common.error')} description={apiError} showIcon closable onClose={() => setApiError(null)} />
+                )}
+                {servicesError && (
+                    <Alert type="warning" message="Services indisponibles" description={servicesError} showIcon />
                 )}
 
                 <div className="grid grid-cols-2 gap-4">
@@ -296,9 +265,7 @@ export function AddPersonnelModal({ isOpen, onClose, onSuccess }) {
                         {errors.nom && <p className="text-red-500 text-xs mt-1">{errors.nom}</p>}
                     </div>
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                            {t('personnel.firstName')}
-                        </label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">{t('personnel.firstName')}</label>
                         <input type="text" name="prenom" value={formData.prenom} onChange={handleChange}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-end" />
                     </div>
@@ -309,6 +276,19 @@ export function AddPersonnelModal({ isOpen, onClose, onSuccess }) {
                         <input type="date" name="date_naissance" value={formData.date_naissance} onChange={handleChange}
                             className={`w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-primary-end ${errors.date_naissance ? 'border-red-500' : 'border-gray-300'}`} />
                         {errors.date_naissance && <p className="text-red-500 text-xs mt-1">{errors.date_naissance}</p>}
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                            {t('personnel.hireDate')} <span className="text-red-500">*</span>
+                        </label>
+                        <FultangDatePicker
+                            value={formData.date_embauche}
+                            onChange={(d) => {
+                                setFormData(prev => ({ ...prev, date_embauche: d }));
+                                if (errors.date_embauche) setErrors(prev => ({ ...prev, date_embauche: null }));
+                            }}
+                        />
+                        {errors.date_embauche && <p className="text-red-500 text-xs mt-1">{errors.date_embauche}</p>}
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -324,10 +304,19 @@ export function AddPersonnelModal({ isOpen, onClose, onSuccess }) {
                             {t('personnel.phone')} <span className="text-red-500">*</span>
                         </label>
                         <input type="text" name="contact" value={formData.contact} onChange={handleChange}
-                            placeholder="677123456" maxLength={9}
+                            placeholder="677123456 ou +33…" maxLength={16}
                             className={`w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-primary-end ${errors.contact ? 'border-red-500' : 'border-gray-300'}`} />
                         <p className="text-xs text-gray-500 mt-1">{t('services.phoneFormat')}</p>
                         {errors.contact && <p className="text-red-500 text-xs mt-1">{errors.contact}</p>}
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Catégorie</label>
+                        <select value={categorie} onChange={(e) => { setCategorie(e.target.value); setFormData(prev => ({ ...prev, poste: '' })); }}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-end">
+                            <option value="">Toutes</option>
+                            <option value="medical">{POSTE_CATEGORIES.medical.label}</option>
+                            <option value="admin">{POSTE_CATEGORIES.admin.label}</option>
+                        </select>
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -336,17 +325,32 @@ export function AddPersonnelModal({ isOpen, onClose, onSuccess }) {
                         <select name="poste" value={formData.poste} onChange={handleChange}
                             className={`w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-primary-end ${errors.poste ? 'border-red-500' : 'border-gray-300'}`}>
                             <option value="">{t('services.selectPosition')}</option>
-                            {POSTES.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                            {filteredPostes.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
                         </select>
                         {errors.poste && <p className="text-red-500 text-xs mt-1">{errors.poste}</p>}
                     </div>
-
+                    {isMedecin && (
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                                Spécialité <span className="text-red-500">*</span>
+                            </label>
+                            <select name="specialite" value={formData.specialite} onChange={handleChange}
+                                className={`w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-primary-end ${errors.specialite ? 'border-red-500' : 'border-gray-300'}`}>
+                                <option value="">— Sélectionner —</option>
+                                {MEDICAL_SPECIALITES.map(s => <option key={s} value={s}>{s}</option>)}
+                            </select>
+                            {errors.specialite && <p className="text-red-500 text-xs mt-1">{errors.specialite}</p>}
+                        </div>
+                    )}
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">{t('personnel.service')}</label>
                         <select name="service" value={formData.service} onChange={handleChange}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-end">
-                            <option value="">{t('personnel.selectService')}</option>
-                            {services.map(s => <option key={s.id} value={s.id}>{s.nom_service}</option>)}
+                            <option value="">{services.length === 0 ? '— Aucun service —' : t('personnel.selectService')}</option>
+                            {services.map(s => {
+                                const sid = getServiceId(s);
+                                return <option key={sid} value={sid}>{s.nom_service}</option>;
+                            })}
                         </select>
                     </div>
                     <div className="col-span-2">

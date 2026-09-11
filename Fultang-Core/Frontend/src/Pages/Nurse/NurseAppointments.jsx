@@ -9,17 +9,9 @@ import { AppRoutesPaths } from "../../Router/appRouterPaths.js";
 import { Calendar, Clock, User, MessageSquare, ChevronRight, Plus, CalendarDays, X, Search, CheckCircle2 } from 'lucide-react';
 import axiosInstance from "../../Utils/axiosInstance.js";
 import { getGatewayBaseUrl } from "../../Utils/gatewayUrls.js";
-import { STATUT_CONFIG, isOverdue } from "../../Utils/statutRdv.js";
-
-const StatutBadge = ({ statut }) => {
-    const cfg = STATUT_CONFIG[statut] || { label: statut || '—', color: 'bg-gray-50 text-gray-600 border-gray-200' };
-    return <span className={`px-3 py-1 rounded-full text-[10px] font-bold border uppercase ${cfg.color}`}>{cfg.label}</span>;
-};
-
 export const NurseAppointments = () => {
     const [appointments, setAppointments] = useState([]);
     const [isLoading, setIsLoading] = useState(true);
-    const [statusFilter, setStatusFilter] = useState("TOUS");
     const [timeFilter, setTimeFilter] = useState("TODAY");
     const navigate = useNavigate();
 
@@ -91,12 +83,11 @@ export const NurseAppointments = () => {
     // -------------------------------------------------------
     // Filtering
     // -------------------------------------------------------
-    const filteredAppointments = appointments.filter(apt => {
-        const matchesStatus = statusFilter === "TOUS" ? true : apt.statut === statusFilter;
+    const filteredAppointments = appointments.filter((apt) => {
         let matchesTime = true;
         if (timeFilter === "TODAY") matchesTime = isToday(apt.date_heure);
         else if (timeFilter === "WEEK") matchesTime = isThisWeek(apt.date_heure);
-        return matchesStatus && matchesTime;
+        return matchesTime;
     });
 
     // -------------------------------------------------------
@@ -260,6 +251,9 @@ export const NurseAppointments = () => {
                                 <Calendar className="w-7 h-7 mr-2 text-primary-start" />
                                 Planning des Rendez-vous
                             </h2>
+                            <p className="text-sm text-gray-500 mt-1">
+                                Rendez-vous programmés — consultation et suivi des patients
+                            </p>
                         </div>
                         <div className="flex gap-4">
                             {/* Time filter */}
@@ -282,19 +276,6 @@ export const NurseAppointments = () => {
                                 Fixer un RDV
                             </button>
                         </div>
-                    </div>
-
-                    {/* Status Tabs */}
-                    <div className="flex flex-wrap gap-2 mb-6">
-                        {["TOUS", "PROGRAMME", "TERMINE", "REPORTE", "ANNULE"].map((stat) => (
-                            <button
-                                key={stat}
-                                onClick={() => setStatusFilter(stat)}
-                                className={`px-6 py-2 rounded-full text-sm font-bold border transition-all ${statusFilter === stat ? 'bg-white border-primary-start text-primary-start shadow-sm' : 'bg-transparent border-gray-200 text-gray-500'}`}
-                            >
-                                {stat === 'TOUS' ? 'Tous' : stat === 'PROGRAMME' ? 'Programmés' : stat === 'TERMINE' ? 'Terminés' : stat === 'REPORTE' ? 'Reportés' : 'Annulés'}
-                            </button>
-                        ))}
                     </div>
 
                     {/* Appointment List */}
@@ -333,10 +314,6 @@ export const NurseAppointments = () => {
                                                     </div>
                                                 </div>
                                                 <div className="flex items-center gap-3">
-                                                    {isOverdue(apt) && (
-                                                        <span className="px-3 py-1 rounded-full text-[10px] font-bold border bg-orange-50 text-orange-700 border-orange-200 uppercase">En retard</span>
-                                                    )}
-                                                    <StatutBadge statut={apt.statut} />
                                                     <button
                                                         onClick={() => navigate(AppRoutesPaths.consultationHistoryPage.replace(':id', apt.patient?.id))}
                                                         className="p-2 text-gray-300 hover:text-primary-start hover:bg-gray-100 rounded-lg transition-all"

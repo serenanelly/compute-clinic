@@ -4,7 +4,7 @@ from drf_spectacular.utils import extend_schema_serializer, OpenApiExample
 from .models import (
     Service, Medecin, MedecinGeneraliste, Infirmiere, Receptionniste,
     ComptableFinancier, ComptableMatiere, Laborantin,
-    Pharmacien, Directeur, Admin,
+    Pharmacien, Directeur, Admin, Prime,
     GradeInfirmier, Langue, NiveauAccreditation, SpecialiteLabo, Statut
 )
 from .tenant_routing.context import get_current_tenant_context
@@ -85,7 +85,39 @@ class ServiceSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Service
-        fields = ['id', 'id_service', 'nom_service', 'code_analytique', 'desc_service', 'chef_service_id', 'chef_service_details']
+        fields = [
+            'id', 'id_service', 'nom_service', 'code_analytique', 'desc_service',
+            'chef_service_id', 'chef_service_details',
+            'date_creation', 'date_decret', 'reference_decret',
+        ]
+
+    def _assign_chef_to_service(self, service):
+        """Affecte le chef désigné au service créé ou modifié (CORR-A5-002)."""
+        if not service.chef_service_id:
+            return
+        personnel_models = [
+            Medecin, MedecinGeneraliste, Infirmiere, Receptionniste,
+            ComptableFinancier, ComptableMatiere, Laborantin,
+            Pharmacien, Directeur, Admin,
+        ]
+        for model in personnel_models:
+            try:
+                person = model.objects.get(id_personnel=service.chef_service_id)
+                person.service = service
+                person.save(update_fields=['service'])
+                return
+            except model.DoesNotExist:
+                continue
+
+    def create(self, validated_data):
+        service = super().create(validated_data)
+        self._assign_chef_to_service(service)
+        return service
+
+    def update(self, instance, validated_data):
+        service = super().update(instance, validated_data)
+        self._assign_chef_to_service(service)
+        return service
 
     def validate(self, attrs):
         # 1. Génération automatique du code analytique si absent
@@ -429,3 +461,14 @@ class AdminSerializer(BasePersonnelSerializer):
     class Meta(BasePersonnelSerializer.Meta):
         model = Admin
         fields = '__all__'
+
+
+class PrimeSerializer(serializers.ModelSerializer):
+    service_nom = serializers.CharField(source='service.nom_service', read_only=True)
+
+    class Meta:
+        model = Prime
+        fields = [
+            'id_prime', 'personnel_id', 'service', 'service_nom',
+            'montant_fcfa', 'motif', 'date_debut', 'date_fin',
+        ]

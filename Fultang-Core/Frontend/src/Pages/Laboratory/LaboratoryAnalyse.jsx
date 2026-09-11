@@ -5,6 +5,7 @@ import { LaboratoryNavLink } from "./LaboratoryNavLink.js";
 import { Filter, Activity, X, Loader2, CheckCircle, User } from "lucide-react";
 import { useLaboratoryData } from "../../hooks/useLaboratoryData";
 import './LaboratoryStyles.css';
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
 
 export const LaboratoryAnalyse = () => {
   const [selectedPatient, setSelectedPatient] = useState(null);
@@ -50,7 +51,7 @@ export const LaboratoryAnalyse = () => {
           icon={Activity}
           title="Analyse"
           subtitle="Saisie des résultats d'examens."
-          tagText="Laboratoire Fultang Actif"
+          tagText={`Laboratoire ${APP_NAME} Actif`}
         />
 
         <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm flex flex-col">

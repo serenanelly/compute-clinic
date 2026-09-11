@@ -27,16 +27,16 @@ export function SuccessModal ({ isOpen, canOpenSuccessModal, message, makeAction
                 <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center">
                         <CheckCircle className="w-12 h-12 text-primary-end mr-2 animate-success-check" />
-                        <h3 className="text-2xl font-bold text-gray-900">Success</h3>
+                        <h3 className="text-2xl font-bold text-gray-900">Succès</h3>
                     </div>
                 </div>
-                <p className="mb-6 mt-3 text-md">{message}</p>
+                <p className="mb-6 mt-3 text-md whitespace-pre-line">{message}</p>
                 <div className="flex justify-center">
                     <button
                         onClick={() => onCloseModal()}
                         className="px-4 py-1 bg-primary-end font-bold text-md text-white  rounded-md  transition-colors duration-300"
                     >
-                        Continue
+                        Continuer
                     </button>
                 </div>
             </div>

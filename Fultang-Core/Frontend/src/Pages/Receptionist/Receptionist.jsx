@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
-import { UserPlus, Search, MoreHorizontal, Phone, MapPin, ClipboardList, Calendar, Bed, User, LayoutGrid, List as ListIcon, ChevronLeft, ChevronRight, Mail, Users } from 'lucide-react';
+import { UserPlus, Search, MoreHorizontal, Phone, MapPin, ClipboardList, Bed, User, LayoutGrid, List as ListIcon, ChevronLeft, ChevronRight, Mail, Users } from 'lucide-react';
 import { AddNewPatientModal } from './addNewPatientModal';
 import { CreateVisitModal } from './CreateVisitModal';
+import { SuccessModal } from '../Modals/SuccessModal';
 import { ViewPatientDetailsModal } from './ViewPatientDetailsModal';
 import { EditPatientInfosModal } from './EditPatientInfosModal';
-import { ScheduleAppointmentModal } from './ScheduleAppointmentModal';
 import { DashBoard } from '../../GlobalComponents/DashBoard';
 import { ReceptionistNavBar } from './ReceptionistNavBar';
 import { receptionistNavLink } from './receptionistNavLink';
@@ -22,7 +22,6 @@ export const Receptionist = () => {
     const [isVisitModalOpen, setIsVisitModalOpen] = useState(false);
     const [isViewModalOpen, setIsViewModalOpen] = useState(false);
     const [isEditModalOpen, setIsEditModalOpen] = useState(false);
-    const [isApptModalOpen, setIsApptModalOpen] = useState(false);
     
     const [selectedPatient, setSelectedPatient] = useState(null);
     const [canOpenSuccessModal, setCanOpenSuccessModal] = useState(false);
@@ -38,13 +37,29 @@ export const Receptionist = () => {
     const [currentPage, setCurrentPage] = useState(1);
     const pageSize = 10;
     const [totalPatients, setTotalPatients] = useState(0);
+    const [filterDateType, setFilterDateType] = useState('birth'); // birth | created
+    const [filterYear, setFilterYear] = useState('');
+    const [filterMonth, setFilterMonth] = useState('');
+    const [filterDay, setFilterDay] = useState('');
+
+    const currentYear = new Date().getFullYear();
+    const yearOptions = Array.from({ length: 80 }, (_, i) => currentYear - i);
 
     const fetchPatients = useCallback(async () => {
         setIsSearching(true);
         setError(null);
         try {
-            const params = { page: currentPage, page_size: pageSize };
+            const params = {
+                page: currentPage,
+                page_size: pageSize,
+                ordering: 'nom,prenom',
+            };
             if (searchQuery) params.search = searchQuery;
+
+            const prefix = filterDateType === 'created' ? 'created' : 'birth';
+            if (filterYear) params[`${prefix}_year`] = filterYear;
+            if (filterMonth) params[`${prefix}_month`] = filterMonth;
+            if (filterDay) params[`${prefix}_day`] = filterDay;
 
             const response = await axiosInstance.get("/patients/", { params });
             const data = response.data;
@@ -63,11 +78,25 @@ export const Receptionist = () => {
             }
         } catch (err) {
             console.error("Erreur chargement patients:", err);
-            setError("Impossible de charger la liste des patients. Vérifiez que le serveur est démarré.");
+            const status = err.response?.status;
+            if (status === 401 || status === 403) {
+                setError("Session expirée — reconnectez-vous.");
+            } else if (status >= 502) {
+                setError("Service medical indisponible. Vérifiez que fultang-medical-backend est démarré.");
+            } else {
+                setError("Impossible de charger la liste des patients.");
+            }
         } finally {
             setIsSearching(false);
         }
-    }, [searchQuery, currentPage]);
+    }, [searchQuery, currentPage, filterDateType, filterYear, filterMonth, filterDay]);
+
+    const resetDateFilters = () => {
+        setFilterYear('');
+        setFilterMonth('');
+        setFilterDay('');
+        setCurrentPage(1);
+    };
 
     useEffect(() => {
         const timeoutId = setTimeout(fetchPatients, searchQuery ? 300 : 0);
@@ -80,12 +109,9 @@ export const Receptionist = () => {
     const openViewModal = (p) => { setSelectedPatient(p); setIsViewModalOpen(true); };
     const openEditModal = (p) => { setSelectedPatient(p); setIsEditModalOpen(true); };
     const openVisitModal = (p) => { setSelectedPatient(p); setIsVisitModalOpen(true); };
-    const openApptModal = (p) => { setSelectedPatient(p); setIsApptModalOpen(true); };
-
     const getPatientActions = (p) => [
         { key: 'edit', label: 'Modifier le dossier', icon: <User className="w-4 h-4" />, onClick: () => openEditModal(p) },
         { key: 'visit', label: 'Créer une visite', icon: <ClipboardList className="w-4 h-4" />, onClick: () => openVisitModal(p) },
-        { key: 'appointment', label: 'Prendre Rendez-vous', icon: <Calendar className="w-4 h-4" />, onClick: () => openApptModal(p) },
     ];
 
     return (
@@ -126,6 +152,70 @@ export const Receptionist = () => {
                             Nouveau Patient
                         </button>
                     </div>
+                </div>
+
+                {/* Filtres date + tri alphabétique (backend ordering=nom,prenom) */}
+                <div className="mb-6 flex flex-wrap items-end gap-3 bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+                    <div>
+                        <label className="block text-[10px] font-black uppercase text-gray-400 mb-1">Filtrer par</label>
+                        <select
+                            value={filterDateType}
+                            onChange={(e) => { setFilterDateType(e.target.value); setCurrentPage(1); }}
+                            className="px-3 py-2 border border-gray-200 rounded-xl text-sm font-semibold"
+                        >
+                            <option value="birth">Date de naissance</option>
+                            <option value="created">Date d&apos;enregistrement</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label className="block text-[10px] font-black uppercase text-gray-400 mb-1">Année</label>
+                        <select
+                            value={filterYear}
+                            onChange={(e) => { setFilterYear(e.target.value); setCurrentPage(1); }}
+                            className="px-3 py-2 border border-gray-200 rounded-xl text-sm"
+                        >
+                            <option value="">Toutes</option>
+                            {yearOptions.map((y) => (
+                                <option key={y} value={y}>{y}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div>
+                        <label className="block text-[10px] font-black uppercase text-gray-400 mb-1">Mois</label>
+                        <select
+                            value={filterMonth}
+                            onChange={(e) => { setFilterMonth(e.target.value); setCurrentPage(1); }}
+                            className="px-3 py-2 border border-gray-200 rounded-xl text-sm"
+                        >
+                            <option value="">Tous</option>
+                            {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                                <option key={m} value={m}>{String(m).padStart(2, '0')}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div>
+                        <label className="block text-[10px] font-black uppercase text-gray-400 mb-1">Jour</label>
+                        <select
+                            value={filterDay}
+                            onChange={(e) => { setFilterDay(e.target.value); setCurrentPage(1); }}
+                            className="px-3 py-2 border border-gray-200 rounded-xl text-sm"
+                        >
+                            <option value="">Tous</option>
+                            {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
+                                <option key={d} value={d}>{String(d).padStart(2, '0')}</option>
+                            ))}
+                        </select>
+                    </div>
+                    {(filterYear || filterMonth || filterDay) && (
+                        <button
+                            type="button"
+                            onClick={resetDateFilters}
+                            className="px-4 py-2 text-sm font-bold text-primary-start hover:bg-primary-start/5 rounded-xl"
+                        >
+                            Effacer filtres
+                        </button>
+                    )}
+                    <p className="text-xs text-gray-400 ml-auto self-center">Tri alphabétique (nom, prénom)</p>
                 </div>
 
                 {/* Barre de Recherche */}
@@ -172,7 +262,12 @@ export const Receptionist = () => {
                                                     <div className="flex items-center gap-4">
                                                         <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-primary-start/5 to-primary-end/5 flex items-center justify-center text-primary-start font-black text-xl border border-primary-start/10 group-hover:scale-110 transition-transform">{p.nom[0]}</div>
                                                         <div>
-                                                            <p className="font-black text-gray-900 text-base">{p.nom} {p.prenom}</p>
+                                                            <p className="font-black text-gray-900 text-base">
+                                                                {p.nom} {p.prenom}
+                                                                {p.est_anonyme && (
+                                                                    <span className="ml-2 text-[10px] font-bold text-orange-600 uppercase">Anonyme</span>
+                                                                )}
+                                                            </p>
                                                             <div className="flex gap-2 mt-1">
                                                                 <Tag color={getSexeTagColor(p.sexe)} className="rounded-lg font-black text-[9px] border-none px-2 uppercase tracking-tighter">{formatSexeLabel(p.sexe)}</Tag>
                                                                 <span className="text-[10px] text-gray-400 font-bold uppercase">{p.date_naissance}</span>
@@ -214,7 +309,12 @@ export const Receptionist = () => {
                                             </div>
                                             <div className="flex-1">
                                                 <div className="flex items-center gap-3 mb-1">
-                                                    <h3 className="font-black text-gray-900 text-xl tracking-tight">{p.nom} {p.prenom}</h3>
+                                                    <h3 className="font-black text-gray-900 text-xl tracking-tight">
+                                                        {p.nom} {p.prenom}
+                                                        {p.est_anonyme && (
+                                                            <span className="ml-2 text-[10px] font-bold text-orange-600 uppercase">Anonyme</span>
+                                                        )}
+                                                    </h3>
                                                     <Tag color={getSexeTagColor(p.sexe)} className="rounded-lg font-black text-[9px] border-none px-3 py-0.5 uppercase tracking-widest">{formatSexeLabel(p.sexe)}</Tag>
                                                 </div>
                                                 <div className="flex flex-wrap gap-6 text-xs font-bold text-gray-400 uppercase tracking-wider">
@@ -276,7 +376,11 @@ export const Receptionist = () => {
                 <CreateVisitModal isOpen={isVisitModalOpen} onClose={() => setIsVisitModalOpen(false)} patient={selectedPatient} setCanOpenSuccessModal={setCanOpenSuccessModal} setSuccessMessage={setSuccessMessage} />
                 <ViewPatientDetailsModal isOpen={isViewModalOpen} patient={selectedPatient} onClose={() => setIsViewModalOpen(false)} />
                 <EditPatientInfosModal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} patientData={selectedPatient} setCanOpenSuccessModal={setCanOpenSuccessModal} setSuccessMessage={setSuccessMessage} setIsLoading={setIsLoading} onUpdateSuccess={fetchPatients} />
-                <ScheduleAppointmentModal isOpen={isApptModalOpen} onClose={() => setIsApptModalOpen(false)} patient={selectedPatient} onAppointmentScheduled={() => { setSuccessMessage("Rendez-vous programmé avec succès !"); setCanOpenSuccessModal(true); }} />
+                <SuccessModal
+                    isOpen={canOpenSuccessModal}
+                    canOpenSuccessModal={setCanOpenSuccessModal}
+                    message={successMessage}
+                />
             </div>
             </ReceptionistNavBar>
         </DashBoard>

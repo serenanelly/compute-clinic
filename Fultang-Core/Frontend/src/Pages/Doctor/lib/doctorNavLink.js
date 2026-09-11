@@ -1,4 +1,4 @@
-import { LayoutGrid, UserRound, Stethoscope, Calendar, FlaskConical, History, HelpCircle } from 'lucide-react';
+import { LayoutGrid, UserRound, Calendar, FlaskConical, History, HelpCircle } from 'lucide-react';
 import { AppRoutesPaths } from "../../../Router/appRouterPaths.js";
 
 export const doctorNavLink = [
@@ -11,11 +11,6 @@ export const doctorNavLink = [
         name: "Mes Patients",
         icon: UserRound,
         link: AppRoutesPaths.doctorPatientList,
-    },
-    {
-        name: "Consultations",
-        icon: Stethoscope,
-        link: AppRoutesPaths.doctorConsultationList,
     },
     {
         name: "Rendez-vous",

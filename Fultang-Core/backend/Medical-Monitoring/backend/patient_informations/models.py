@@ -17,7 +17,7 @@ class Antecedent(models.Model):
         verbose_name=_("Type d'antécédent")
     )
     nom = models.CharField(max_length=255, verbose_name=_("Nom de l'antécédent"))
-    date = models.DateField(verbose_name=_("Date de l'antécédent"))
+    date = models.DateField(blank=True, null=True, verbose_name=_("Date de l'antécédent"))
     description = models.TextField(blank=True, null=True, verbose_name=_("Description"))
 
     class Meta:
@@ -33,16 +33,24 @@ class DonneesCliniques(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     patient = models.OneToOneField(Patient, on_delete=models.CASCADE, related_name='donnees_cliniques')
     
-    groupe_sanguin = models.CharField(max_length=2, choices=GroupeSanguin.choices, verbose_name=_("Groupe sanguin"))
-    facteur_rhesus = models.CharField(max_length=10, choices=FacteurRhesus.choices, verbose_name=_("Facteur rhésus"))
+    groupe_sanguin = models.CharField(
+        max_length=2, choices=GroupeSanguin.choices,
+        blank=True, null=True, verbose_name=_("Groupe sanguin"),
+    )
+    facteur_rhesus = models.CharField(
+        max_length=10, choices=FacteurRhesus.choices,
+        blank=True, null=True, verbose_name=_("Facteur rhésus"),
+    )
     electrophorese_hb = models.CharField(max_length=50, blank=True, null=True, verbose_name=_("Electrophorèse d'Hb"))
     
-    poids = models.CharField(max_length=50, verbose_name=_("Poids"))
-    taille = models.CharField(max_length=50, verbose_name=_("Taille"))
-    pouls = models.CharField(max_length=50, verbose_name=_("Pouls"))
-    taux_oxygene = models.CharField(max_length=50, verbose_name=_("Taux d'oxygène"))
+    poids = models.CharField(max_length=50, blank=True, default='', verbose_name=_("Poids"))
+    taille = models.CharField(max_length=50, blank=True, default='', verbose_name=_("Taille"))
+    pouls = models.CharField(max_length=50, blank=True, default='', verbose_name=_("Pouls"))
+    taux_oxygene = models.CharField(max_length=50, blank=True, default='', verbose_name=_("Taux d'oxygène"))
     temperature = models.CharField(max_length=50, blank=True, null=True, verbose_name=_("Température"))
     tension_arterielle = models.CharField(max_length=50, blank=True, null=True, verbose_name=_("Tension artérielle"))
+    frequence_respiratoire = models.CharField(max_length=50, blank=True, null=True, verbose_name=_("Fréquence respiratoire"))
+    glycemie = models.CharField(max_length=50, blank=True, null=True, verbose_name=_("Glycémie (g/L)"))
 
     class Meta:
         verbose_name = _("Données Cliniques")

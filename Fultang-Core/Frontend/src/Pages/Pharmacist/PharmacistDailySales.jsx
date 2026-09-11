@@ -14,6 +14,7 @@ import {
 } from "react-icons/fa";
 import jsPDF from "jspdf";
 import { materielMedicalApi, sortieApi, ligneSortieApi, getPersonnelId } from "../../services/comptabiliteMatiereApi";
+import { APP_NAME, brandFooter } from '../../constants/branding.js';
 
 export function PharmacistDailySales() {
     // États
@@ -259,7 +260,7 @@ export function PharmacistDailySales() {
         // En-tête
         doc.setFontSize(18);
         doc.setTextColor(26, 115, 163);
-        doc.text("FULTANG CLINIC - PHARMACIE", pageWidth / 2, 20, { align: "center" });
+        doc.text(brandFooter("PHARMACIE"), pageWidth / 2, 20, { align: "center" });
 
         doc.setFontSize(14);
         doc.setTextColor(80, 194, 185);

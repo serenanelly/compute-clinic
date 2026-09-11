@@ -108,11 +108,20 @@ export const doctorApi = {
     getWaitingPatients: async () => {
         try {
             clearPatientCache();
+            const medecinId = localStorage.getItem('personnel_id');
             const response = await axiosInstance.get('/visites/');
             const allVisites = response.data.results || response.data;
 
-            // Filtrer côté client les visites en cours
-            const visitesEnCours = allVisites.filter(v => v.statut === 'EN_COURS');
+            // CORR-A3-004/011 : triage OK ou urgence ; paiement sauf urgence ; médecin orienté
+            const visitesEnCours = allVisites.filter((v) => {
+                if (v.statut !== 'EN_COURS') return false;
+                if (medecinId && v.medecin_oriente_id && String(v.medecin_oriente_id) !== String(medecinId)) {
+                    return false;
+                }
+                if (!v.parametres_complets && !v.mode_urgence) return false;
+                if (v.mode_urgence) return true;
+                return v.paiement_actif === true || (v.paiement_valide === true && v.paiement_actif !== false);
+            });
 
             // Enrichir chaque visite avec les détails du patient et les données cliniques
             const enriched = await Promise.all(
@@ -158,12 +167,8 @@ export const doctorApi = {
                 })
             );
 
-            // Le médecin reçoit les RDV actifs, qu'ils viennent de la réception OU de l'infirmier.
-            const rdvItems = await fetchRendezVousWaiting(['RECEPTIONNISTE', 'INFIRMIER']);
-            const dejaPresents = new Set(enriched.map(v => String(v.patient.id)));
-            const rdvUniques = rdvItems.filter(r => !dejaPresents.has(String(r.patient.id)));
-
-            return [...enriched, ...rdvUniques];
+            // RDV non payés exclus : la réception doit ouvrir une visite et encaisser avant le médecin.
+            return enriched;
         } catch (error) {
             console.error("Erreur lors de la récupération de la salle d'attente (médecin):", error);
             throw error;
@@ -221,6 +226,26 @@ export const doctorApi = {
     /**
      * Récupérer les consultations (avec filtres optionnels).
      */
+    getConsultationByVisite: async (visiteId) => {
+        if (!visiteId) return null;
+        try {
+            const response = await axiosInstance.get('/consultations/', {
+                params: { visite: visiteId },
+            });
+            const consultations = response.data.results || response.data;
+            if (!Array.isArray(consultations) || consultations.length === 0) return null;
+            const vid = String(visiteId);
+            const matches = consultations.filter((c) => String(c.visite) === vid);
+            if (matches.length === 0) return null;
+            return matches.sort(
+                (a, b) => new Date(b.date_heure || 0) - new Date(a.date_heure || 0)
+            )[0];
+        } catch (error) {
+            console.error('Erreur consultation par visite:', error);
+            throw error;
+        }
+    },
+
     getConsultations: async (params = {}) => {
         try {
             clearPatientCache();
@@ -345,6 +370,11 @@ export const doctorApi = {
         }
     },
 
+    updateConsultation: async (consultationId, data) => {
+        const response = await axiosInstance.patch(`/consultations/${consultationId}/`, data);
+        return response.data;
+    },
+
     addDiagnostic: async (consultationId, data) => {
         try {
             const response = await axiosInstance.post(`/consultations/${consultationId}/diagnostics/`, data);
@@ -373,6 +403,21 @@ export const doctorApi = {
             console.error("Erreur prescription examen:", error);
             throw error;
         }
+    },
+
+    addOrientation: async (consultationId, data) => {
+        const response = await axiosInstance.post(`/consultations/${consultationId}/orientations/`, data);
+        return response.data;
+    },
+
+    saveExamResult: async (examenId, { resultats, observations = '', interpretation = '', doctor_id }) => {
+        const response = await axiosInstance.post(`/examens/${examenId}/resultat/`, {
+            resultats,
+            observations,
+            interpretation,
+            doctor_id: doctor_id || '00000000-0000-0000-0000-000000000001',
+        });
+        return response.data;
     },
 
     // --------------------------------------------------------

@@ -30,8 +30,27 @@ class Patient(models.Model):
     prenom = models.CharField(max_length=100, blank=True, null=True, verbose_name=_("Prénom"))
     sexe = models.CharField(max_length=1, choices=Sexe.choices, verbose_name=_("Sexe"))
     date_naissance = models.DateField(verbose_name=_("Date de naissance"))
-    lieu_naissance = models.CharField(max_length=100, verbose_name=_("Lieu de naissance"))
-    profession = models.CharField(max_length=100, verbose_name=_("Profession"))
+    lieu_naissance = models.CharField(
+        max_length=100, blank=True, default='', verbose_name=_("Lieu de naissance")
+    )
+    profession = models.CharField(
+        max_length=100, blank=True, default='', verbose_name=_("Profession")
+    )
+    code_identifiant = models.CharField(
+        max_length=50,
+        unique=True,
+        blank=True,
+        null=True,
+        verbose_name=_("Code identifiant (accueil rapide)"),
+    )
+    est_anonyme = models.BooleanField(
+        default=False,
+        verbose_name=_("Dossier anonyme / identité minimale"),
+    )
+    dossier_incomplet = models.BooleanField(
+        default=False,
+        verbose_name=_("Dossier à compléter par le personnel soignant"),
+    )
     statut_matrimonial = models.CharField(
         max_length=20, 
         choices=StatutMatrimonial.choices, 
@@ -77,7 +96,7 @@ class Patient(models.Model):
     class Meta:
         verbose_name = _("Patient")
         verbose_name_plural = _("Patients")
-        ordering = ['-created_at']
+        ordering = ['nom', 'prenom']
 
     @classmethod
     def generate_next_matricule(cls):

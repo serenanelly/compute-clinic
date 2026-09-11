@@ -4,7 +4,12 @@ import { useTranslation } from 'react-i18next';
 import { Building2, User, UserCheck, UserPlus } from 'lucide-react';
 import { createService } from '../../../services/servicesApi';
 import { getAllPersonnel, createPersonnel } from '../../../services/personnelApi';
+import { createMedecin } from '../../../services/medecinsApi';
 import { useAuthentication } from '../../../Utils/Provider.jsx';
+import { FultangDatePicker } from '../../../GlobalComponents/FultangDatePicker.jsx';
+import { isValidPhone, phoneErrorMessage } from '../../../Utils/phoneValidation.js';
+import { formatApiError } from '../../../Utils/formatApiError.js';
+import { buildPostesOptions, MEDICAL_SPECIALITES } from '../../../constants/personnelPostes.js';
 
 /**
  * Modal pour ajouter un nouveau service avec son chef.
@@ -25,24 +30,19 @@ export function AddServiceModal({ isOpen, onClose, onSuccess }) {
     const [formData, setFormData] = useState({
         nom_service: '',
         desc_service: '',
+        date_decret: '',
+        reference_decret: '',
         chef_nom: '',
         chef_prenom: '',
         chef_date_naissance: '',
+        chef_date_embauche: null,
         chef_email: '',
         chef_contact: '',
-        chef_poste: ''
+        chef_poste: '',
+        chef_specialite: '',
     });
 
-    const POSTES = [
-        { value: 'receptioniste', label: t('personnel.positions.receptioniste') },
-        { value: 'caissier', label: t('personnel.positions.caissier') },
-        { value: 'infirmier', label: t('personnel.positions.infirmier') },
-        { value: 'medecin', label: t('personnel.positions.medecin') },
-        { value: 'laborantin', label: t('personnel.positions.laborantin') },
-        { value: 'pharmacien', label: t('personnel.positions.pharmacien') },
-        { value: 'comptable', label: t('personnel.positions.comptable') },
-        { value: 'directeur', label: t('personnel.positions.directeur') }
-    ];
+    const POSTES = buildPostesOptions(t);
 
     // Charger la liste du personnel quand le modal s'ouvre
     useEffect(() => {
@@ -107,10 +107,14 @@ export function AddServiceModal({ isOpen, onClose, onSuccess }) {
             if (!formData.chef_email.trim()) newErrors.chef_email = t('services.required');
             if (!formData.chef_contact.trim()) {
                 newErrors.chef_contact = t('services.required');
-            } else if (!/^6\d{8}$/.test(formData.chef_contact)) {
-                newErrors.chef_contact = t('services.phoneFormat');
+            } else if (!isValidPhone(formData.chef_contact)) {
+                newErrors.chef_contact = phoneErrorMessage(t('personnel.contact'));
             }
             if (!formData.chef_poste) newErrors.chef_poste = t('services.required');
+            if (!formData.chef_date_embauche) newErrors.chef_date_embauche = "La date d'embauche est obligatoire";
+            if (formData.chef_poste === 'medecin' && !formData.chef_specialite) {
+                newErrors.chef_specialite = 'Spécialité obligatoire pour un médecin';
+            }
         }
 
         setErrors(newErrors);
@@ -151,26 +155,32 @@ export function AddServiceModal({ isOpen, onClose, onSuccess }) {
                 }
                 chefEmail = chef.email;
             } else if (chefMode === 'new') {
-                // Étape 1 : créer le nouveau personnel d'abord
                 const newPersonnelData = {
                     nom: formData.chef_nom.trim(),
                     prenom: formData.chef_prenom.trim(),
                     date_naissance: formData.chef_date_naissance,
+                    date_embauche: formData.chef_date_embauche?.format?.('YYYY-MM-DD') || formData.chef_date_embauche,
                     email: formData.chef_email.trim().toLowerCase(),
                     contact: formData.chef_contact.trim(),
                     poste: formData.chef_poste,
                     adresse: '',
                     statut: 'Actif',
                 };
-                const createdPersonnel = await createPersonnel(newPersonnelData);
-                chefEmail = createdPersonnel?.email || formData.chef_email.trim().toLowerCase();
+                if (formData.chef_poste === 'medecin') {
+                    newPersonnelData.specialite = formData.chef_specialite;
+                    const created = await createMedecin(newPersonnelData);
+                    chefEmail = created?.email || newPersonnelData.email;
+                } else {
+                    const created = await createPersonnel(newPersonnelData);
+                    chefEmail = created?.email || newPersonnelData.email;
+                }
             }
 
-            // Étape 2 : créer le service en passant chef_email pour que le backend
-            // résolve automatiquement le chef_service_id
             const dataToSend = {
                 nom_service: formData.nom_service.trim(),
                 desc_service: formData.desc_service.trim(),
+                ...(formData.date_decret ? { date_decret: formData.date_decret } : {}),
+                ...(formData.reference_decret?.trim() ? { reference_decret: formData.reference_decret.trim() } : {}),
                 ...(chefEmail ? { chef_email: chefEmail } : {}),
             };
 
@@ -181,9 +191,7 @@ export function AddServiceModal({ isOpen, onClose, onSuccess }) {
             onClose();
         } catch (error) {
             console.error('Error creating service:', error);
-            const errorData = error.response?.data;
-            const errorMsg = formatErrorMessage(errorData);
-            setApiError(errorMsg);
+            setApiError(formatApiError(error, t('services.createError')));
         } finally {
             setLoading(false);
         }
@@ -193,12 +201,16 @@ export function AddServiceModal({ isOpen, onClose, onSuccess }) {
         setFormData({
             nom_service: '',
             desc_service: '',
+            date_decret: '',
+            reference_decret: '',
             chef_nom: '',
             chef_prenom: '',
             chef_date_naissance: '',
+            chef_date_embauche: null,
             chef_email: '',
             chef_contact: '',
-            chef_poste: ''
+            chef_poste: '',
+            chef_specialite: '',
         });
         setSelectedChefId(null);
         setChefSearch('');
@@ -285,6 +297,19 @@ export function AddServiceModal({ isOpen, onClose, onSuccess }) {
                                 rows={2}
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-end focus:border-primary-end"
                             />
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Date du décret</label>
+                                <input type="date" name="date_decret" value={formData.date_decret} onChange={handleChange}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-end" />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Référence décret</label>
+                                <input type="text" name="reference_decret" value={formData.reference_decret} onChange={handleChange}
+                                    placeholder="Ex: Déc. n° 2024/…"
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-end" />
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -454,6 +479,19 @@ export function AddServiceModal({ isOpen, onClose, onSuccess }) {
                                 </div>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 mb-1">
+                                        Date d'embauche <span className="text-red-500">*</span>
+                                    </label>
+                                    <FultangDatePicker
+                                        value={formData.chef_date_embauche}
+                                        onChange={(d) => {
+                                            setFormData(prev => ({ ...prev, chef_date_embauche: d }));
+                                            if (errors.chef_date_embauche) setErrors(prev => ({ ...prev, chef_date_embauche: null }));
+                                        }}
+                                    />
+                                    {errors.chef_date_embauche && <p className="text-red-500 text-xs mt-1">{errors.chef_date_embauche}</p>}
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">
                                         Téléphone <span className="text-red-500">*</span>
                                     </label>
                                     <input
@@ -461,11 +499,11 @@ export function AddServiceModal({ isOpen, onClose, onSuccess }) {
                                         name="chef_contact"
                                         value={formData.chef_contact}
                                         onChange={handleChange}
-                                        placeholder="677123456"
-                                        maxLength={9}
+                                        placeholder="677123456 ou +33…"
+                                        maxLength={16}
                                         className={`w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-primary-end ${errors.chef_contact ? 'border-red-500' : 'border-gray-300'}`}
                                     />
-                                    <p className="text-xs text-gray-500 mt-1">9 chiffres, commence par 6</p>
+                                    <p className="text-xs text-gray-500 mt-1">{t('services.phoneFormat')}</p>
                                     {errors.chef_contact && <p className="text-red-500 text-xs mt-1">{errors.chef_contact}</p>}
                                 </div>
                                 <div>
@@ -485,6 +523,23 @@ export function AddServiceModal({ isOpen, onClose, onSuccess }) {
                                     </select>
                                     {errors.chef_poste && <p className="text-red-500 text-xs mt-1">{errors.chef_poste}</p>}
                                 </div>
+                                {formData.chef_poste === 'medecin' && (
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                                            Spécialité <span className="text-red-500">*</span>
+                                        </label>
+                                        <select
+                                            name="chef_specialite"
+                                            value={formData.chef_specialite}
+                                            onChange={handleChange}
+                                            className={`w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-primary-end ${errors.chef_specialite ? 'border-red-500' : 'border-gray-300'}`}
+                                        >
+                                            <option value="">— Sélectionner —</option>
+                                            {MEDICAL_SPECIALITES.map(s => <option key={s} value={s}>{s}</option>)}
+                                        </select>
+                                        {errors.chef_specialite && <p className="text-red-500 text-xs mt-1">{errors.chef_specialite}</p>}
+                                    </div>
+                                )}
 
                             </div>
                         </div>

@@ -7,10 +7,8 @@ import { Eye, EyeOff } from 'lucide-react';
 import { AppRoutesPaths as appRouterPaths } from "../../Router/appRouterPaths.js";
 import { useAuthentication } from "../../Utils/Provider.jsx";
 import { ChangePasswordModal } from "../../GlobalComponents/ChangePasswordModal.jsx";
-
-
-
-
+import { useTranslation } from "react-i18next";
+import { APP_NAME } from "../../constants/branding.js";
 export function LoginPage() {
 
 
@@ -23,9 +21,7 @@ export function LoginPage() {
     const [pendingRole, setPendingRole] = useState(null);
     const { isLoading, setIsLoading, login, userData } = useAuthentication();
     const navigate = useNavigate();
-
-
-
+    const { t } = useTranslation();
     const data = {
         email: username,
         password: password
@@ -105,6 +101,9 @@ export function LoginPage() {
             case 'directeur':
                 navigate(appRouterPaths.directorDashboard);
                 break;
+            case 'platform_admin':
+                navigate(appRouterPaths.platformAdminDashboardPage);
+                break;
             default:
                 console.warn('Role non reconnu:', role);
                 alert(`Connexion réussie mais redirection non configurée pour le rôle: ${role}`);
@@ -133,22 +132,19 @@ export function LoginPage() {
                 }}
             >
                 <p onClick={() => navigate("/")} className="text-3xl text-white font-bold mt-6 ml-8 cursor-pointer">
-                    FullTang
+                    {APP_NAME}
                 </p>
                 <div className="flex-1 flex flex-col items-center justify-center">
                     <div className="flex ml-56 mt-28 w-[1400px] h-[480px]">
                         <div className="flex flex-col w-[620px]">
                             <p className="text-white mt-28 mb-2 font-bold text-5xl ml-4">
-                                WELCOME ON FULTANG
+                                {t('auth.welcomeTitle')}
                             </p>
                             <p className="text-justify font-bold text-md leading-10">
-                                Polyclinic fultang is a hospital management application, providing care and monitoring of patients from arrival to discharge,
-                                this via the platform. We first register the patient at the reception level, then follow the chain of follow-up according to his problem or his situation.
-                                Polyclinic Fultang has several departments namely the dental service, the ophthalmology service, the general medicine, the laboratory,
-                                as well as a pharmacy.
+                                {t('auth.welcomeDescription')}
                             </p>
                             <p className="italic mt-4 text-blue-400 text-xl ">
-                                Note: this page is the hospital staff login page
+                                {t('auth.noteStaff')}
                             </p>
                             <button onClick={() => navigate(appRouterPaths.helpCenterPage)} className="w-44 h-14  py-2 border-secondary border-2 text-secondary rounded-lg px-1 mt-4 font-bold hover:text-white hover:bg-secondary transition-all duration-300">
                                 <div className="flex justify-center items-center">

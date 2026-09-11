@@ -44,7 +44,7 @@ fi
 # 4. Démarrage du Frontend dans Docker
 echo -e "\n${CYAN}➔ Démarrage du Frontend React/Vite (Docker)...${NC}"
 if [ -d "Frontend" ] && [ -f "Frontend/docker-compose.yml" ]; then
-    if (cd Frontend && docker compose up -d --build); then
+    if (cd Frontend && docker compose build --pull=false && docker compose up -d); then
         echo -e "${GREEN}✓ Frontend démarré et servi sur le port 3000.${NC}"
     else
         echo -e "${RED}✗ Échec du démarrage du Frontend.${NC}"
