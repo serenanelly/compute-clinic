@@ -4,6 +4,7 @@ import {
     FULTANG_SERVICE_UNAVAILABLE_EVENT,
     FULTANG_TENANT_DELETED_EVENT,
 } from "../Utils/fultangErrorEvents";
+import { setupTenantLifecycleBroadcastListener } from "../Utils/tenantLifecycleBroadcast.js";
 import { TenantSuspendedScreen } from "./TenantSuspendedScreen.jsx";
 import { ServiceUnavailableScreen } from "./ServiceUnavailableScreen.jsx";
 import { TenantDeletedScreen } from "./TenantDeletedScreen.jsx";
@@ -31,10 +32,16 @@ export function FultangGlobalErrorOverlay() {
         window.addEventListener(FULTANG_TENANT_SUSPENDED_EVENT, onSuspended);
         window.addEventListener(FULTANG_SERVICE_UNAVAILABLE_EVENT, onUnavailable);
         window.addEventListener(FULTANG_TENANT_DELETED_EVENT, onDeleted);
+        // Propagation immédiate depuis un autre onglet de la même origine
+        // (ex. Platform Admin) sans attendre la prochaine requête réelle —
+        // voir Utils/tenantLifecycleBroadcast.js pour la portée exacte et
+        // sa limite honnête (ne traverse jamais une origine différente).
+        const stopBroadcastListener = setupTenantLifecycleBroadcastListener();
         return () => {
             window.removeEventListener(FULTANG_TENANT_SUSPENDED_EVENT, onSuspended);
             window.removeEventListener(FULTANG_SERVICE_UNAVAILABLE_EVENT, onUnavailable);
             window.removeEventListener(FULTANG_TENANT_DELETED_EVENT, onDeleted);
+            stopBroadcastListener();
         };
     }, []);
 

@@ -2,6 +2,7 @@ import constate from "constate";
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { getGatewayBaseUrl } from "./gatewayUrls";
+import { normalizeAuthErrorDetail } from "./authErrorFormatter.js";
 
 export const [FultangProvider, useAuthentication] = constate(
   useLogin,
@@ -158,11 +159,15 @@ function useLogin() {
       if (error.response) {
         console.error('Réponse erreur du serveur:', error.response.data);
         console.error('Status:', error.response.status);
+
+        const backendDetail = error.response.data?.detail;
+        const backendError = error.response.data?.error;
+
         return {
           success: false,
           status: error.response.status,
-          error: error.response.data.error || "Erreur d'authentification",
-          detail: error.response.data.detail || "Identifiants invalides"
+          error: backendError || "Erreur d'authentification",
+          detail: normalizeAuthErrorDetail(backendDetail, "Identifiants invalides")
         };
       } else if (error.request) {
         console.error('Pas de réponse du serveur');
@@ -227,11 +232,13 @@ function useLogin() {
     } catch (error) {
       setIsLoading(false);
       if (error.response) {
+        const backendDetail = error.response.data?.detail;
+        const backendError = error.response.data?.error;
         return {
           success: false,
           status: error.response.status,
-          error: error.response.data.error || "Erreur d'authentification",
-          detail: error.response.data.detail || "Identifiants invalides"
+          error: backendError || "Erreur d'authentification",
+          detail: normalizeAuthErrorDetail(backendDetail, "Identifiants invalides")
         };
       } else if (error.request) {
         return {

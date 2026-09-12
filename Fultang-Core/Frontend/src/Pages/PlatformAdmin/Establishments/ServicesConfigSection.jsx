@@ -5,6 +5,7 @@ import { getTenantFunctionalServices, bulkSetTenantFunctionalServices } from "..
 import { ServicesChecklist } from "../CreateTenant/ServicesChecklist.jsx";
 import { ConfirmationModal } from "../../Modals/ConfirmAction.Modal.jsx";
 import { useFeedback } from "../../../contexts/FeedbackContext.jsx";
+import { broadcastFunctionalServiceChanged } from "../../../Utils/tenantLifecycleBroadcast.js";
 
 /**
  * Section "Services" de la configuration d'un établissement existant.
@@ -104,7 +105,11 @@ export function ServicesConfigSection({ tenantId }) {
         if (toDisableNames.length > 0 && toEnableNames.length === 0) {
             return {
                 title: "Voulez-vous vraiment désactiver ce service ?",
-                message: "Cette action rendra immédiatement ce service indisponible pour les utilisateurs de cet établissement.",
+                message: (
+                    <p className="text-red-600 font-bold">
+                        Les utilisateurs ne pourront plus accéder à ce service tant qu&apos;il restera désactivé.
+                    </p>
+                ),
                 confirmText: "Oui, désactiver",
             };
         }
@@ -125,6 +130,11 @@ export function ServicesConfigSection({ tenantId }) {
             const list = Array.isArray(updated) ? updated : draftServices;
             setSavedServices(list);
             setDraftServices(list);
+            // Propagation immédiate (même origine) vers un onglet hospitalier
+            // déjà ouvert sur ce service précis — voir tenantLifecycleBroadcast.js.
+            pendingChanges.forEach(({ code, enabled }) => {
+                broadcastFunctionalServiceChanged(tenantId, code, enabled);
+            });
             showSuccess(
                 pendingChanges.length === 1
                     ? pendingChanges[0].enabled

@@ -12,6 +12,11 @@ import { LogoUploader } from "./LogoUploader.jsx";
 import { TechnicalSheet } from "./TechnicalSheet.jsx";
 import { ConfirmationModal } from "../../Modals/ConfirmAction.Modal.jsx";
 import { useFeedback } from "../../../contexts/FeedbackContext.jsx";
+import {
+    broadcastTenantSuspended,
+    broadcastTenantReactivated,
+    broadcastTenantDeleted,
+} from "../../../Utils/tenantLifecycleBroadcast.js";
 
 const EMPTY_PROFILE = { address: "", phone: "", email: "" };
 
@@ -133,6 +138,15 @@ export function EstablishmentDetailPage() {
         try {
             const updated = await updateTenantStatus(tenantId, targetTenantStatus);
             setTenant(updated);
+            // Propagation immédiate (même origine, voir tenantLifecycleBroadcast.js)
+            // vers un onglet hospitalier déjà ouvert sur ce tenant — réutilise
+            // l'écran de blocage déjà existant, sans attendre sa prochaine
+            // requête ou un rafraîchissement.
+            if (targetTenantStatus === "INACTIVE") {
+                broadcastTenantSuspended(tenantId);
+            } else {
+                broadcastTenantReactivated(tenantId);
+            }
             showSuccess(targetTenantStatus === "INACTIVE" ? "Établissement suspendu" : "Établissement réactivé");
         } catch (error) {
             console.error("Erreur lors du changement de statut de l'établissement:", error);
@@ -147,6 +161,9 @@ export function EstablishmentDetailPage() {
         setDeleting(true);
         try {
             await deleteTenantPermanently(tenantId);
+            // Idem : propagation immédiate même origine avant même la
+            // redirection Platform Admin.
+            broadcastTenantDeleted(tenantId);
             showSuccess("Établissement supprimé définitivement");
             navigate(AppRoutesPaths.platformAdminEstablishmentsPage);
         } catch (error) {
@@ -251,7 +268,7 @@ export function EstablishmentDetailPage() {
                             onConfirm={handleStatusConfirmed}
                             title={isTenantActive ? "Voulez-vous vraiment suspendre cet établissement ?" : "Voulez-vous vraiment réactiver cet établissement ?"}
                             message={isTenantActive
-                                ? "Cette action désactivera immédiatement l'accès à ComputeClinic pour tous les utilisateurs de cet établissement. Les données et les bases de données seront conservées."
+                                ? <p className="text-red-600 font-bold">Les utilisateurs de cet établissement ne pourront plus accéder à la plateforme tant que l&apos;établissement restera suspendu.</p>
                                 : "Cette action rétablira immédiatement l'accès à ComputeClinic pour les utilisateurs de cet établissement."}
                             confirmText={isTenantActive ? "Oui, suspendre l'établissement" : "Oui, réactiver l'établissement"}
                             cancelText="Annuler"
@@ -489,15 +506,10 @@ export function EstablishmentDetailPage() {
                             onConfirm={() => setDeleteConfirmStep(2)}
                             title="Supprimer définitivement cet établissement ?"
                             message={
-                                <div className="space-y-2">
-                                    <p>
-                                        <span className="font-bold">{tenant.name}</span> ({tenant.identifier}) sera
-                                        archivé puis effacé définitivement.
-                                    </p>
-                                    <p className="text-red-600 font-bold">
-                                        Cette action est irréversible. Une confirmation supplémentaire vous sera demandée.
-                                    </p>
-                                </div>
+                                <p>
+                                    Un instantané des données sera archivé à des fins d&apos;audit, puis cet
+                                    établissement sera supprimé définitivement. Cette action ne peut pas être annulée.
+                                </p>
                             }
                             confirmText="Continuer"
                             cancelText="Annuler"
@@ -507,12 +519,7 @@ export function EstablishmentDetailPage() {
                             onClose={() => setDeleteConfirmStep(0)}
                             onConfirm={handleDeleteConfirmed}
                             title="Confirmer la suppression définitive"
-                            message={
-                                <p>
-                                    Un instantané des données sera archivé à des fins d&apos;audit, puis cet
-                                    établissement sera supprimé définitivement. Cette action ne peut pas être annulée.
-                                </p>
-                            }
+                            message={<p className="text-red-600 font-bold">Cette action ne peut pas être annulée.</p>}
                             confirmText="Oui, supprimer définitivement"
                             cancelText="Annuler"
                             requireTypedConfirmation={tenant.name}
