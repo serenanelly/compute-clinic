@@ -19,6 +19,7 @@
 
 export const FULTANG_TENANT_SUSPENDED_EVENT = 'fultang:tenant-suspended';
 export const FULTANG_SERVICE_UNAVAILABLE_EVENT = 'fultang:service-unavailable';
+export const FULTANG_TENANT_DELETED_EVENT = 'fultang:tenant-deleted';
 
 export function extractFultangErrorType(error) {
     const data = error?.response?.data;
@@ -42,6 +43,14 @@ export function dispatchFultangErrorEvent(error) {
     }
     if (errorType === 'SERVICE_UNAVAILABLE') {
         window.dispatchEvent(new CustomEvent(FULTANG_SERVICE_UNAVAILABLE_EVENT));
+        return true;
+    }
+    if (errorType === 'TENANT_DELETED') {
+        // Suppression DÉFINITIVE d'un tenant (Cycle de vie du tenant,
+        // Phase 4) — onglet resté ouvert au moment de la suppression :
+        // même mécanisme que TENANT_SUSPENDED, écran dédié (message exact
+        // distinct : "n'existe plus", jamais "suspendu").
+        window.dispatchEvent(new CustomEvent(FULTANG_TENANT_DELETED_EVENT));
         return true;
     }
     return false;

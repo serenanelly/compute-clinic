@@ -1850,6 +1850,22 @@ Restauration automatique, réactivation d'un tenant supprimé, destruction de l'
 - Champs de rétention de `TenantDeletionRecord` volontairement non exploités par une politique automatique (aucune durée codée en dur) — laissés pour un futur mécanisme de purge d'archive, non construit ici.
 - Non re-testé dans un navigateur réel (flux de clic complet sur "Supprimer définitivement") — vérifié par build + lint + contenu du bundle déployé + validation complète de l'API sous-jacente.
 
+#### 14.14.1 Correctif — session déjà ouverte non coupée après suppression
+
+**Rapporté** : contrairement à la suspension, un onglet déjà ouvert sur l'établissement au moment de sa suppression définitive continuait de fonctionner après une action ou un rafraîchissement, au lieu d'être immédiatement bloqué.
+
+**Cause réelle** : deux chemins existent déjà côté Gateway (`api-gateway/app/main.py::proxy_catch_all`) pour couper l'accès d'une session déjà ouverte : (1) résolution par le VRAI hostname du tenant (`TenantResolver.resolve()`), utilisé par une page réellement servie depuis le sous-domaine de l'établissement ; (2) vérification du statut porté par le JWT quand le hostname est hors convention (`get_tenant_status()`, mécanisme de suspension existant, §14.10). Pour un tenant SUSPENDU, les deux chemins renvoient déjà un corps structuré `{"error_type": "TENANT_SUSPENDED", ...}`, détecté par le mécanisme frontend existant (`Utils/fultangErrorEvents.js`) qui affiche l'écran de blocage. Pour un tenant SUPPRIMÉ, seul le chemin (2) renvoyait ce corps structuré (en le confondant à tort avec une suspension) — le chemin (1), le plus courant en usage réel, renvoyait un 404 avec un `detail` en **texte brut** (`str(exc)`), une forme que le détecteur frontend ne reconnaît pas. La requête échouait donc silencieusement, sans jamais déclencher l'écran de blocage : la page semblait "continuer de fonctionner".
+
+**Correction** (aucune logique métier touchée — uniquement la FORME du corps d'erreur déjà renvoyé, sur les deux chemins existants) :
+- Nouveau `_tenant_deleted_detail()` (`{"error_type": "TENANT_DELETED", "message": "Cet établissement n'existe plus."}`), distinct de `_tenant_suspended_detail()` — un tenant supprimé n'est pas correctement décrit comme "suspendu".
+- Chemin (1) : `TenantNotFoundError` renvoie désormais ce corps structuré (toujours 404) au lieu d'une chaîne brute.
+- Chemin (2) : `get_tenant_status()` retournant `None` (tenant absent du Registre) renvoie désormais 404 + `TENANT_DELETED`, au lieu d'être confondu avec 403 + `TENANT_SUSPENDED` (une vraie suspension, `status="INACTIVE"`, continue de renvoyer 403 + `TENANT_SUSPENDED`, inchangé).
+- Frontend : nouvel event `fultang:tenant-deleted` (`fultangErrorEvents.js`) et nouvel écran `TenantDeletedScreen.jsx` (message distinct de `TenantSuspendedScreen.jsx`), câblés dans `FultangGlobalErrorOverlay.jsx` — même mécanisme que l'existant, aucune nouvelle interception ajoutée dans les intercepteurs axios.
+
+**Tests** : non-régression `api-gateway` (`pytest`, 34 passés / 9 échecs — les 9 mêmes échecs, identiques avant/après ce changement via `git stash`, confirmés préexistants et dus à un problème de configuration d'environnement de test sans rapport) ; live, nouveau script (`e2e_open_session_after_deletion.py`, 4/4 PASS) couvrant EXPLICITEMENT les deux chemins avec un JWT émis avant suppression ; re-exécution complète de `e2e_tenant_deletion.py` (23/23, assertion du test 7 mise à jour pour refléter la distinction désormais correcte 404 `TENANT_DELETED` vs 403 `TENANT_SUSPENDED`) et `e2e_partial_tenant_deletion.py` (4/4).
+
+**Limite assumée** : le blocage reste déclenché par la PROCHAINE requête (action ou rafraîchissement) — comme pour la suspension, aucun mécanisme de coupure "instantanée" sans action de l'utilisateur (push temps réel/WebSocket) n'existe dans l'architecture actuelle ; en ajouter un serait une nouvelle brique d'infrastructure, hors périmètre de ce correctif.
+
 ---
 
 ## 15. Sécurité

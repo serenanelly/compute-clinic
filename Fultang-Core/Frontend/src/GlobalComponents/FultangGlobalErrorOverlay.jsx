@@ -2,9 +2,11 @@ import { useEffect, useState } from "react";
 import {
     FULTANG_TENANT_SUSPENDED_EVENT,
     FULTANG_SERVICE_UNAVAILABLE_EVENT,
+    FULTANG_TENANT_DELETED_EVENT,
 } from "../Utils/fultangErrorEvents";
 import { TenantSuspendedScreen } from "./TenantSuspendedScreen.jsx";
 import { ServiceUnavailableScreen } from "./ServiceUnavailableScreen.jsx";
+import { TenantDeletedScreen } from "./TenantDeletedScreen.jsx";
 
 /**
  * Monté UNE SEULE FOIS près de la racine de l'app (App.jsx), à côté de
@@ -19,22 +21,26 @@ import { ServiceUnavailableScreen } from "./ServiceUnavailableScreen.jsx";
  * l'état de navigation sous-jacent soit perturbé.
  */
 export function FultangGlobalErrorOverlay() {
-    const [screen, setScreen] = useState(null); // null | 'suspended' | 'unavailable'
+    const [screen, setScreen] = useState(null); // null | 'suspended' | 'unavailable' | 'deleted'
 
     useEffect(() => {
         const onSuspended = () => setScreen('suspended');
         const onUnavailable = () => setScreen('unavailable');
+        const onDeleted = () => setScreen('deleted');
 
         window.addEventListener(FULTANG_TENANT_SUSPENDED_EVENT, onSuspended);
         window.addEventListener(FULTANG_SERVICE_UNAVAILABLE_EVENT, onUnavailable);
+        window.addEventListener(FULTANG_TENANT_DELETED_EVENT, onDeleted);
         return () => {
             window.removeEventListener(FULTANG_TENANT_SUSPENDED_EVENT, onSuspended);
             window.removeEventListener(FULTANG_SERVICE_UNAVAILABLE_EVENT, onUnavailable);
+            window.removeEventListener(FULTANG_TENANT_DELETED_EVENT, onDeleted);
         };
     }, []);
 
     if (screen === 'suspended') return <TenantSuspendedScreen />;
     if (screen === 'unavailable') return <ServiceUnavailableScreen />;
+    if (screen === 'deleted') return <TenantDeletedScreen />;
     return null;
 }
 

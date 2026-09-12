@@ -525,6 +525,19 @@ def _tenant_suspended_detail() -> dict:
     return {"error_type": "TENANT_SUSPENDED", "message": "Vous avez été suspendu."}
 
 
+def _tenant_deleted_detail() -> dict:
+    """
+    Corps structuré d'une suppression DÉFINITIVE de tenant (Cycle de vie
+    du tenant, Phase 4) — même mécanisme de détection frontend que
+    `_tenant_suspended_detail()` (voir Utils/fultangErrorEvents.js),
+    error_type distinct pour un message exact ("n'existe plus", jamais
+    "suspendu"). Utilisé partout où une requête proxyfiée référence un
+    tenant qui n'existe plus du tout dans le Registre — jamais pour un
+    tenant simplement inactif (voir `_tenant_suspended_detail`).
+    """
+    return {"error_type": "TENANT_DELETED", "message": "Cet établissement n'existe plus."}
+
+
 def _decode_bearer_token(request: Request) -> Optional[dict]:
     """Décode le JWT porté par le header Authorization, s'il y en a un de valide."""
     auth_header = request.headers.get("Authorization", "")
@@ -832,8 +845,14 @@ async def proxy_catch_all(path: str, request: Request):
     hostname = request.headers.get("host", "")
     try:
         tenant_context = await tenant_resolver.resolve(hostname)
-    except TenantNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+    except TenantNotFoundError:
+        # Corps structuré (pas juste `str(exc)`) : une session déjà ouverte
+        # sur ce sous-domaine (onglet resté ouvert au moment d'une
+        # suppression définitive, §14.14) doit être coupée par le même
+        # mécanisme frontend qu'une suspension (voir
+        # Utils/fultangErrorEvents.js) — jusqu'ici seul le chemin JWT hors
+        # convention hostname (ci-dessous) le faisait, jamais celui-ci.
+        raise HTTPException(status_code=404, detail=_tenant_deleted_detail())
     except TenantInactiveError as exc:
         raise HTTPException(status_code=403, detail=_tenant_suspended_detail())
     except TenantResolutionError as exc:
@@ -871,6 +890,12 @@ async def proxy_catch_all(path: str, request: Request):
             live_status = await tenant_resolver.get_tenant_status(user_payload["tenant_id"])
         except TenantResolutionError as exc:
             raise HTTPException(status_code=503, detail=str(exc))
+        if live_status is None:
+            # Tenant absent du Registre — supprimé définitivement (§14.14),
+            # jamais simplement inactif : message distinct de la suspension
+            # (voir _tenant_deleted_detail), même mécanisme de détection
+            # frontend.
+            raise HTTPException(status_code=404, detail=_tenant_deleted_detail())
         if live_status != "ACTIVE":
             raise HTTPException(status_code=403, detail=_tenant_suspended_detail())
 

@@ -6,7 +6,7 @@ import { CustomDashboard } from "../../../GlobalComponents/CustomDashboard.jsx";
 import { AppHeader } from "../../../GlobalComponents/AppHeader.jsx";
 import { platformAdminNavLink } from "../platformAdminNavLink.js";
 import { AppRoutesPaths } from "../../../Router/appRouterPaths.js";
-import { getTenant, updateTenant, updateTenantStatus, getTenantDatabases, deleteTenantPermanently } from "../../../services/platformAdminApi.js";
+import { getTenant, updateTenant, updateTenantStatus, deleteTenantPermanently } from "../../../services/platformAdminApi.js";
 import { establishmentConfigCategories } from "./configCategories.js";
 import { LogoUploader } from "./LogoUploader.jsx";
 import { TechnicalSheet } from "./TechnicalSheet.jsx";
@@ -42,7 +42,6 @@ export function EstablishmentDetailPage() {
     const [tenant, setTenant] = useState(null);
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState("");
-    const [databaseCount, setDatabaseCount] = useState(null);
 
     // Suppression définitive de l'établissement (Cycle de vie du tenant,
     // Phase 4) — même mécanique de double confirmation que la suspension
@@ -89,12 +88,6 @@ export function EstablishmentDetailPage() {
                 if (!cancelled) setLoadError("Impossible de charger cet établissement pour le moment.");
             } finally {
                 if (!cancelled) setLoading(false);
-            }
-            try {
-                const databases = await getTenantDatabases(tenantId);
-                if (!cancelled) setDatabaseCount(Array.isArray(databases) ? databases.length : null);
-            } catch (error) {
-                console.error("Erreur de chargement des bases de données du tenant:", error);
             }
         })();
         return () => { cancelled = true; };
@@ -498,9 +491,8 @@ export function EstablishmentDetailPage() {
                             message={
                                 <div className="space-y-2">
                                     <p>
-                                        <span className="font-bold">{tenant.name}</span> ({tenant.identifier}) —
-                                        {databaseCount !== null ? ` ses ${databaseCount} bases de données` : " ses bases de données"} et
-                                        tous ses comptes utilisateurs seront archivés puis effacés définitivement.
+                                        <span className="font-bold">{tenant.name}</span> ({tenant.identifier}) sera
+                                        archivé puis effacé définitivement.
                                     </p>
                                     <p className="text-red-600 font-bold">
                                         Cette action est irréversible. Une confirmation supplémentaire vous sera demandée.
@@ -517,10 +509,8 @@ export function EstablishmentDetailPage() {
                             title="Confirmer la suppression définitive"
                             message={
                                 <p>
-                                    Un instantané des données sera archivé à des fins d&apos;audit, puis
-                                    {databaseCount !== null ? ` les ${databaseCount} bases de données` : " les bases de données"} de
-                                    cet établissement et tous ses comptes utilisateurs seront supprimés
-                                    définitivement. Cette action ne peut pas être annulée.
+                                    Un instantané des données sera archivé à des fins d&apos;audit, puis cet
+                                    établissement sera supprimé définitivement. Cette action ne peut pas être annulée.
                                 </p>
                             }
                             confirmText="Oui, supprimer définitivement"
