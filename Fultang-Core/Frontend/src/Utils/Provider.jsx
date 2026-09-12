@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { getGatewayBaseUrl } from "./gatewayUrls";
 import { normalizeAuthErrorDetail } from "./authErrorFormatter.js";
+import { dispatchFultangErrorEvent } from "./fultangErrorEvents.js";
 
 export const [FultangProvider, useAuthentication] = constate(
   useLogin,
@@ -162,12 +163,18 @@ function useLogin() {
 
         const backendDetail = error.response.data?.detail;
         const backendError = error.response.data?.error;
+        const errorType = error.response.data?.detail?.error_type || error.response.data?.error_type || null;
+
+        if (errorType === 'TENANT_SUSPENDED') {
+          dispatchFultangErrorEvent(error);
+        }
 
         return {
           success: false,
           status: error.response.status,
           error: backendError || "Erreur d'authentification",
-          detail: normalizeAuthErrorDetail(backendDetail, "Identifiants invalides")
+          detail: normalizeAuthErrorDetail(backendDetail, "Identifiants invalides"),
+          errorType,
         };
       } else if (error.request) {
         console.error('Pas de réponse du serveur');

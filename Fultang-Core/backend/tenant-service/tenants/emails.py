@@ -38,17 +38,17 @@ def send_tenant_admin_welcome_email(
     "email envoyé" affiché sans que l'opération d'envoi ait réellement
     été déclenchée avec succès.
     """
-    subject = f"Accès à votre établissement FullTang — {tenant_name}"
+    subject = f"Accès à votre établissement ComputeClinic — {tenant_name}"
     message = (
         f"Bonjour,\n\n"
-        f"Votre établissement « {tenant_name} » est prêt sur FullTang.\n\n"
+        f"Votre établissement « {tenant_name} » est prêt sur ComputeClinic.\n\n"
         f"Adresse de votre établissement :\n{establishment_url}\n\n"
         f"Votre compte administrateur :\n"
         f"  Identifiant (email) : {admin_email}\n"
         f"  Mot de passe temporaire : {temporary_password}\n\n"
         "Merci de vous connecter puis de changer ce mot de passe dès que "
         "possible depuis l'écran « Mot de passe oublié ».\n\n"
-        "— L'équipe FullTang"
+        "— L'équipe ComputeClinic"
     )
     send_mail(
         subject, message, settings.DEFAULT_FROM_EMAIL, [admin_email],

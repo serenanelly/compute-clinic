@@ -104,7 +104,9 @@ export function ServicesConfigSection({ tenantId }) {
         }
         if (toDisableNames.length > 0 && toEnableNames.length === 0) {
             return {
-                title: "Voulez-vous vraiment désactiver ce service ?",
+                title: toDisableNames.length > 1
+                    ? "Voulez-vous vraiment désactiver ces services ?"
+                    : "Voulez-vous vraiment désactiver ce service ?",
                 message: (
                     <p className="text-red-600 font-bold">
                         Les utilisateurs ne pourront plus accéder à ce service tant qu&apos;il restera désactivé.

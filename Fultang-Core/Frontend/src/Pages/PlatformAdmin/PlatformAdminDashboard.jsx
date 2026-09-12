@@ -133,7 +133,7 @@ export function PlatformAdminDashboard() {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {tenants.map((tenant) => (
+                                        {tenants.slice(0, 5).map((tenant) => (
                                             <tr key={tenant.id} className="border-b border-gray-50 last:border-0">
                                                 <td className="py-2.5 font-medium text-gray-800">{tenant.name}</td>
                                                 <td className="py-2.5 text-gray-500">{tenant.identifier}</td>
@@ -160,7 +160,7 @@ export function PlatformAdminDashboard() {
                                     to={AppRoutesPaths.platformAdminEstablishmentsPage}
                                     className="inline-flex items-center gap-1.5 text-sm font-semibold text-primary-start hover:text-primary-end transition-colors"
                                 >
-                                    Voir tous les établissements
+                                    Voir les établissements
                                     <ArrowRight className="w-4 h-4" />
                                 </Link>
                             </div>

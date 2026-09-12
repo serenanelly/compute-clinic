@@ -317,6 +317,26 @@ export function EstablishmentDetailPage() {
                                 </div>
                             </div>
 
+                            {(tenant.admin_name || tenant.admin_email || tenant.admin?.name || tenant.admin?.email || tenant.admin_nom || tenant.admin_email) && (
+                                <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 mb-4">
+                                    <div className="flex items-center justify-between gap-4">
+                                        <div>
+                                            <span className="block text-xs font-bold text-gray-400 uppercase mb-1">
+                                                Administrateur du tenant
+                                            </span>
+                                            <span className="block text-sm font-semibold text-gray-800">
+                                                {(tenant.admin_name || tenant.admin?.name || tenant.admin_nom || "")}
+                                            </span>
+                                            {(tenant.admin_email || tenant.admin?.email || tenant.admin_email) && (
+                                                <span className="block text-sm text-gray-500">
+                                                    {(tenant.admin_email || tenant.admin?.email || tenant.admin_email)}
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
                             <div className="mb-4">
                                 <label className="block text-sm font-bold text-gray-700 mb-1.5">Adresse</label>
                                 <textarea
@@ -507,8 +527,7 @@ export function EstablishmentDetailPage() {
                             title="Supprimer définitivement cet établissement ?"
                             message={
                                 <p>
-                                    Un instantané des données sera archivé à des fins d&apos;audit, puis cet
-                                    établissement sera supprimé définitivement. Cette action ne peut pas être annulée.
+                                    Les données de cet établissement seront archivées avant sa suppression définitive. Cette action est irréversible.
                                 </p>
                             }
                             confirmText="Continuer"

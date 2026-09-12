@@ -53,12 +53,18 @@ export function LoginPage() {
             // Redirection selon le role/poste
             navigateToRole(role);
         } else {
-            // Afficher l'erreur
-            setIsLoginErrorPresent(true);
-            if (response && response.error) {
-                setLoginError(`${response.error}: ${response.detail}`);
+            // Ignore l'affichage formulaire si l'erreur métier est un tenant suspendu :
+            // l'écran existant TenantSuspendedScreen doit être rendu par l'overlay global.
+            if (response?.errorType === 'TENANT_SUSPENDED') {
+                setIsLoginErrorPresent(false);
+                setLoginError("");
             } else {
-                setLoginError("Une erreur inconnue s'est produite");
+                setIsLoginErrorPresent(true);
+                if (response && response.error) {
+                    setLoginError(`${response.error}: ${response.detail}`);
+                } else {
+                    setLoginError("Une erreur inconnue s'est produite");
+                }
             }
         }
 
