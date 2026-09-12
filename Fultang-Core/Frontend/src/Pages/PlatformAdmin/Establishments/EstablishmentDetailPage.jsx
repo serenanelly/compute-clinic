@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Building2, CheckCircle2, XCircle, ArrowLeft, Save, Loader2, ExternalLink, Ban, RotateCcw } from "lucide-react";
+import { Building2, CheckCircle2, XCircle, ArrowLeft, Save, Loader2, ExternalLink, Ban, RotateCcw, Trash2, AlertTriangle } from "lucide-react";
 import { CustomDashboard } from "../../../GlobalComponents/CustomDashboard.jsx";
 import { AppHeader } from "../../../GlobalComponents/AppHeader.jsx";
 import { platformAdminNavLink } from "../platformAdminNavLink.js";
 import { AppRoutesPaths } from "../../../Router/appRouterPaths.js";
-import { getTenant, updateTenant, updateTenantStatus } from "../../../services/platformAdminApi.js";
+import { getTenant, updateTenant, updateTenantStatus, getTenantDatabases, deleteTenantPermanently } from "../../../services/platformAdminApi.js";
 import { establishmentConfigCategories } from "./configCategories.js";
 import { LogoUploader } from "./LogoUploader.jsx";
 import { TechnicalSheet } from "./TechnicalSheet.jsx";
@@ -37,10 +37,19 @@ const EMPTY_PROFILE = { address: "", phone: "", email: "" };
  */
 export function EstablishmentDetailPage() {
     const { tenantId } = useParams();
+    const navigate = useNavigate();
     const { showSuccess, showError } = useFeedback();
     const [tenant, setTenant] = useState(null);
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState("");
+    const [databaseCount, setDatabaseCount] = useState(null);
+
+    // Suppression définitive de l'établissement (Cycle de vie du tenant,
+    // Phase 4) — même mécanique de double confirmation que la suspension
+    // (§4 ci-dessus), avec en plus une saisie du nom exact du tenant à
+    // l'étape 2 (irréversible, jamais un simple clic).
+    const [deleteConfirmStep, setDeleteConfirmStep] = useState(0);
+    const [deleting, setDeleting] = useState(false);
 
     const [profileForm, setProfileForm] = useState(EMPTY_PROFILE);
     const [profileSaving, setProfileSaving] = useState(false);
@@ -80,6 +89,12 @@ export function EstablishmentDetailPage() {
                 if (!cancelled) setLoadError("Impossible de charger cet établissement pour le moment.");
             } finally {
                 if (!cancelled) setLoading(false);
+            }
+            try {
+                const databases = await getTenantDatabases(tenantId);
+                if (!cancelled) setDatabaseCount(Array.isArray(databases) ? databases.length : null);
+            } catch (error) {
+                console.error("Erreur de chargement des bases de données du tenant:", error);
             }
         })();
         return () => { cancelled = true; };
@@ -132,6 +147,22 @@ export function EstablishmentDetailPage() {
         } finally {
             setStatusSaving(false);
             setStatusConfirmStep(0);
+        }
+    };
+
+    const handleDeleteConfirmed = async () => {
+        setDeleting(true);
+        try {
+            await deleteTenantPermanently(tenantId);
+            showSuccess("Établissement supprimé définitivement");
+            navigate(AppRoutesPaths.platformAdminEstablishmentsPage);
+        } catch (error) {
+            console.error("Erreur lors de la suppression définitive de l'établissement:", error);
+            const backendMessage = error?.response?.data?.detail;
+            showError(typeof backendMessage === "string" ? backendMessage : "Impossible de supprimer définitivement cet établissement");
+        } finally {
+            setDeleting(false);
+            setDeleteConfirmStep(0);
         }
     };
 
@@ -437,6 +468,65 @@ export function EstablishmentDetailPage() {
                             <h3 className="text-lg font-semibold text-gray-800 mb-4">Fiche technique</h3>
                             <TechnicalSheet tenantId={tenantId} />
                         </div>
+
+                        {/* Zone de danger : suppression définitive (Cycle de vie du tenant, Phase 4) */}
+                        <div className="bg-white rounded-xl shadow-md border border-red-200 p-6">
+                            <h3 className="text-lg font-semibold text-red-600 mb-1 flex items-center gap-2">
+                                <AlertTriangle className="w-5 h-5" />
+                                Zone de danger
+                            </h3>
+                            <p className="text-sm text-gray-500 mb-4">
+                                Contrairement à la suspension (réversible, tout est conservé), la suppression
+                                définitive efface irréversiblement les données de cet établissement.
+                            </p>
+                            <button
+                                type="button"
+                                onClick={() => setDeleteConfirmStep(1)}
+                                disabled={deleting}
+                                className="inline-flex items-center gap-2 text-sm font-bold px-4 py-2.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50"
+                            >
+                                {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                                Supprimer définitivement
+                            </button>
+                        </div>
+
+                        <ConfirmationModal
+                            isOpen={deleteConfirmStep === 1}
+                            onClose={() => setDeleteConfirmStep((step) => (step === 1 ? 0 : step))}
+                            onConfirm={() => setDeleteConfirmStep(2)}
+                            title="Supprimer définitivement cet établissement ?"
+                            message={
+                                <div className="space-y-2">
+                                    <p>
+                                        <span className="font-bold">{tenant.name}</span> ({tenant.identifier}) —
+                                        {databaseCount !== null ? ` ses ${databaseCount} bases de données` : " ses bases de données"} et
+                                        tous ses comptes utilisateurs seront archivés puis effacés définitivement.
+                                    </p>
+                                    <p className="text-red-600 font-bold">
+                                        Cette action est irréversible. Une confirmation supplémentaire vous sera demandée.
+                                    </p>
+                                </div>
+                            }
+                            confirmText="Continuer"
+                            cancelText="Annuler"
+                        />
+                        <ConfirmationModal
+                            isOpen={deleteConfirmStep === 2}
+                            onClose={() => setDeleteConfirmStep(0)}
+                            onConfirm={handleDeleteConfirmed}
+                            title="Confirmer la suppression définitive"
+                            message={
+                                <p>
+                                    Un instantané des données sera archivé à des fins d&apos;audit, puis
+                                    {databaseCount !== null ? ` les ${databaseCount} bases de données` : " les bases de données"} de
+                                    cet établissement et tous ses comptes utilisateurs seront supprimés
+                                    définitivement. Cette action ne peut pas être annulée.
+                                </p>
+                            }
+                            confirmText="Oui, supprimer définitivement"
+                            cancelText="Annuler"
+                            requireTypedConfirmation={tenant.name}
+                        />
                     </motion.div>
                 ) : null}
             </div>

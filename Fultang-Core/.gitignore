@@ -25,3 +25,7 @@ yarn-error.log*
 
 # Test-upload artifacts (manual testing of tenant logo upload), never real assets
 backend/tenant-service/media/tenants/logos/
+
+# Archives de suppression définitive de tenant (données réelles/de test,
+# jamais du code) — voir tenants/archiving.py, settings.ARCHIVE_ROOT.
+backend/tenant-service/archives/

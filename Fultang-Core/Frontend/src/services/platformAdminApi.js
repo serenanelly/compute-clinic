@@ -173,6 +173,19 @@ export const getTenantDatabases = async (id) => {
 };
 
 /**
+ * Supprime DÉFINITIVEMENT un tenant (Cycle de vie du tenant, Phase 4) :
+ * archive puis efface irréversiblement ses 5 bases de données et son
+ * entrée du registre. Différent de `updateTenantStatus(id, "INACTIVE")`
+ * (suspension, réversible, tout est conservé) — voir MULTITENANT_ARCHITECTURE.md.
+ * @param {string} id
+ * @returns {Promise<Object>} {deletion_record_id, tenant_id, tenant_identifier, status, archive_reference, completed_at}
+ */
+export const deleteTenantPermanently = async (id) => {
+    const response = await axiosInstance.post(`${BASE_URL()}/tenants/${id}/delete/`);
+    return response.data;
+};
+
+/**
  * Liste le journal des actions d'administration (audit trail).
  * @param {Object} [params] {tenant?, actor?, action?, date_from?, date_to?}
  * @returns {Promise<Array>} [{id, actor_id, actor_email, action, target_tenant_id, target_tenant_identifier, description, metadata, created_at}, ...]

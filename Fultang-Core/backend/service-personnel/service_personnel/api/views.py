@@ -21,7 +21,10 @@ from rest_framework.permissions import IsAuthenticated
 from .permissions import HasFunctionalServiceEnabled, IsInternalService
 from .tenant_routing.context import get_current_tenant_context, set_tenant_context
 from .utils import generate_temporary_password
-from .tenant_routing.pool_registry import DatabaseProvisioningError, provision_database
+from .tenant_routing.pool_registry import (
+    DatabaseProvisioningError, deprovision_database, ensure_connection_alias, provision_database,
+)
+from .tenant_routing.router import TENANT_SCOPED_APPS
 from django.db import IntegrityError
 
 class TemporaryPasswordResponseMixin:
@@ -937,3 +940,127 @@ class FunctionalServiceInvalidateView(APIView):
 
         functional_service_cache.invalidate(tenant_id, code)
         return Response({}, status=status.HTTP_200_OK)
+
+
+class ArchiveTenantDataView(APIView):
+    """
+    POST /api/internal/archive-tenant-data/ — Suppression définitive de
+    tenant (tenant-service, `TenantDeletionService`) : exporte TOUTES les
+    données de ce service pour `tenant_id`, AVANT toute suppression
+    destructive.
+
+    Endpoint interne symétrique de `ProvisionDatabaseView` (même
+    protection `IsInternalService`, jamais appelé via la Gateway).
+
+    Réutilise `ensure_connection_alias` (chemin de résolution ORDINAIRE,
+    inchangé — pas une nouvelle logique de connexion) pour obtenir
+    l'alias du tenant, puis `dumpdata` (commande Django déjà intégrée,
+    AUCUNE nouvelle dépendance/infrastructure — `pg_dump` n'est
+    disponible que dans l'image de Medical-Monitoring, pas dans celle-ci,
+    voir MULTITENANT_ARCHITECTURE.md pour la vérification faite avant ce
+    choix) sur EXACTEMENT les apps de `TENANT_SCOPED_APPS` (même
+    périmètre que le Database Router lui-même — une seule source de
+    vérité pour "quelles données appartiennent à ce tenant").
+
+    Ne supprime, ne modifie, ni ne verrouille RIEN — lecture seule.
+    """
+    authentication_classes = []
+    permission_classes = [IsInternalService]
+
+    def post(self, request):
+        import io
+        import json as json_module
+
+        from django.core.management import call_command
+
+        tenant_id = request.data.get('tenant_id')
+        if not tenant_id:
+            return Response({'detail': "Le champ 'tenant_id' est requis."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            alias = ensure_connection_alias(tenant_id)
+        except Exception as exc:
+            return Response(
+                {'detail': "Résolution de la base du tenant échouée.", 'error': str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        buffer = io.StringIO()
+        try:
+            call_command(
+                'dumpdata', *sorted(TENANT_SCOPED_APPS),
+                database=alias, indent=2, stdout=buffer,
+            )
+        except Exception as exc:
+            return Response(
+                {'detail': "Export des données du tenant échoué.", 'error': str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        dump_text = buffer.getvalue()
+        try:
+            object_count = len(json_module.loads(dump_text)) if dump_text.strip() else 0
+        except (ValueError, TypeError):
+            object_count = None
+
+        # Garde-fou "pool historique" (Suppression définitive de tenant,
+        # audit initial) : ce service est le SEUL des 5 à posséder une
+        # base 'default' partagée (compte non encore rattaché à un
+        # tenant — voir Personnel.tenant_id). Un compte de CE tenant
+        # égaré là-bas ne serait jamais couvert par la suppression de sa
+        # base dédiée ci-dessus. Vérifié vide empiriquement à ce jour
+        # (voir rapport d'audit) — contrôlé ici À CHAQUE suppression,
+        # jamais supposé, pour ne jamais devenir un oubli silencieux.
+        pool_leftover_accounts = []
+        for model in (
+            Medecin, MedecinGeneraliste, Infirmiere, Receptionniste, ComptableFinancier,
+            ComptableMatiere, Caissier, Laborantin, Pharmacien, Directeur, Admin,
+        ):
+            for person in model.objects.using('default').filter(tenant_id=tenant_id):
+                pool_leftover_accounts.append({
+                    'model': model.__name__,
+                    'id_personnel': str(person.id_personnel),
+                    'email': person.email,
+                })
+
+        return Response(
+            {
+                'database_name': alias,
+                'app_labels': sorted(TENANT_SCOPED_APPS),
+                'object_count': object_count,
+                'data': dump_text,
+                'pool_leftover_accounts': pool_leftover_accounts,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class DeprovisionTenantDataView(APIView):
+    """
+    POST /api/internal/deprovision-tenant-data/ — Suppression définitive
+    de tenant : DROP réel de la base PostgreSQL de `tenant_id` pour ce
+    service.
+
+    Endpoint interne symétrique de `ProvisionDatabaseView`/
+    `ArchiveTenantDataView` (même protection `IsInternalService`).
+    N'EXISTE QUE parce que `TenantDeletionService` l'appelle
+    explicitement, TOUJOURS après un archivage validé — jamais depuis le
+    chemin de requête ordinaire.
+    """
+    authentication_classes = []
+    permission_classes = [IsInternalService]
+
+    def post(self, request):
+        tenant_id = request.data.get('tenant_id')
+        if not tenant_id:
+            return Response({'detail': "Le champ 'tenant_id' est requis."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            dropped = deprovision_database(tenant_id)
+        except DatabaseProvisioningError as exc:
+            return Response(
+                {'detail': "Suppression physique échouée.", 'error': str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response({'dropped': dropped}, status=status.HTTP_200_OK)

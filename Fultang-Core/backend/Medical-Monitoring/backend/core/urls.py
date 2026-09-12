@@ -21,7 +21,10 @@ from django.conf.urls.static import static
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 
-from core.views import ProvisionDatabaseView, FunctionalServiceInvalidateView
+from core.views import (
+    ProvisionDatabaseView, FunctionalServiceInvalidateView,
+    ArchiveTenantDataView, DeprovisionTenantDataView,
+)
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -44,6 +47,16 @@ urlpatterns = [
         'api/medical-monitoring/internal/functional-services/invalidate/',
         FunctionalServiceInvalidateView.as_view(),
         name='internal-functional-services-invalidate',
+    ),
+    path(
+        'api/medical-monitoring/internal/archive-tenant-data/',
+        ArchiveTenantDataView.as_view(),
+        name='internal-archive-tenant-data',
+    ),
+    path(
+        'api/medical-monitoring/internal/deprovision-tenant-data/',
+        DeprovisionTenantDataView.as_view(),
+        name='internal-deprovision-tenant-data',
     ),
 
     # ------------------------------------------------------------

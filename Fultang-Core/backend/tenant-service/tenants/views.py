@@ -93,7 +93,9 @@ from .services import (
     AdminActionLogService,
     ImmutableFunctionalServiceError,
     PlatformServiceCatalog,
+    TenantAlreadyBeingDeletedError,
     TenantDatabaseService,
+    TenantDeletionService,
     TenantFunctionalServiceService,
     TenantService,
     UnknownFunctionalServiceError,
@@ -123,6 +125,10 @@ class TenantViewSet(mixins.CreateModelMixin,
     @property
     def admin_action_log_service(self) -> AdminActionLogService:
         return AdminActionLogService()
+
+    @property
+    def deletion_service(self) -> TenantDeletionService:
+        return TenantDeletionService()
 
     def _log(self, action_type: str, tenant: Tenant, description: str, **metadata):
         """Raccourci pour journaliser une action de ce ViewSet (Logs d'administration, Phase 2)."""
@@ -206,6 +212,68 @@ class TenantViewSet(mixins.CreateModelMixin,
         )
 
         return Response(TenantSerializer(tenant).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='delete')
+    def delete_tenant_permanently(self, request, id=None):
+        """
+        POST /tenants/{id}/delete/ — Suppression DÉFINITIVE d'un tenant.
+
+        DIFFÉRENT de `update_status` (suspension/réactivation, ci-dessus,
+        INCHANGÉ par cette action) : ici, à la fin d'un succès, la ligne
+        Tenant elle-même n'existe plus — voir `TenantDeletionService`
+        pour le déroulement complet (archivage → validation → nettoyage
+        physique → suppression du registre, dans cet ordre précis).
+
+        Même protection que le reste de ce ViewSet (`IsPlatformAdmin`,
+        permission de classe) — aucune permission nouvelle. Aucun corps
+        de requête attendu : la confirmation forte (saisie du nom exact)
+        est un contrôle FRONTEND (UX) — reproduit ici uniquement par le
+        fait que cette action est irréversible et volontairement séparée
+        de `update_status`, jamais un second contrôle serveur redondant.
+
+        Réponses :
+          - 200 : suppression COMPLETED, corps = résumé du
+            TenantDeletionRecord (jamais un simple booléen — la tâche
+            exige de ne jamais renvoyer un succès masquant un échec
+            partiel, donc le statut réel est toujours explicite).
+          - 404 : tenant introuvable.
+          - 409 : une suppression est déjà en cours pour ce tenant.
+          - 502 : échec d'une étape (archivage, validation, ou nettoyage
+            physique) — AUCUNE ressource n'a alors été détruite au-delà
+            de ce qui est explicitement documenté dans `error_message`
+            du `TenantDeletionRecord` (voir son statut FAILED) ; le
+            tenant reste présent dans le registre dans ce cas, jamais
+            supprimé "à moitié".
+        """
+        tenant = self.get_object()  # 404 DRF standard si absent — cohérent avec le reste du ViewSet.
+
+        try:
+            record = self.deletion_service.delete_tenant(tenant.id, actor=request.user)
+        except TenantAlreadyBeingDeletedError:
+            return Response(
+                {'detail': "Une suppression définitive est déjà en cours pour cet établissement."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except Exception as exc:  # Archivage/validation/nettoyage échoué — TenantDeletionService a déjà audité le détail.
+            return Response(
+                {
+                    'detail': "Suppression définitive échouée — aucune ressource n'a été détruite au-delà de ce qui est documenté.",
+                    'error': str(exc),
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response(
+            {
+                'deletion_record_id': str(record.id),
+                'tenant_id': str(record.tenant_id),
+                'tenant_identifier': record.tenant_identifier,
+                'status': record.status,
+                'archive_reference': record.archive_reference,
+                'completed_at': record.completed_at,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=['post'], url_path='provision')
     def provision(self, request, id=None):

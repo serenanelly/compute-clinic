@@ -32,6 +32,8 @@ from .models import (
     Tenant,
     TenantDatabase,
     TenantDatabaseStatus,
+    TenantDeletionRecord,
+    TenantDeletionStatus,
     TenantFunctionalService,
     TenantStatus,
 )
@@ -129,6 +131,26 @@ class TenantRepository:
         tenant.logo = None
         tenant.save(update_fields=['logo'])
         return tenant
+
+    def delete(self, tenant_id: UUID) -> None:
+        """
+        Supprime DÉFINITIVEMENT la ligne Tenant du registre opérationnel
+        (Suppression définitive — jamais un changement de `status`, voir
+        `TenantDeletionService`). CASCADE déjà configuré au niveau modèle
+        supprime `TenantDatabase`/`TenantFunctionalService` associés.
+
+        N'APPELER QU'APRÈS que `TenantDeletionService` a terminé
+        l'archivage validé ET la suppression physique des ressources —
+        jamais avant (voir son docstring pour l'ordre exact et pourquoi).
+
+        Le fichier logo, s'il existe, est effacé du disque (même geste
+        que `remove_logo` — Django ne supprime jamais un fichier
+        FileField automatiquement à la suppression de la ligne).
+        """
+        tenant = self.get_by_id(tenant_id)
+        if tenant.logo:
+            tenant.logo.delete(save=False)
+        tenant.delete()
 
 
 class PlatformServiceRepository:
@@ -418,4 +440,68 @@ class AdminActionLogRepository:
             # était exclu, ce qui pouvait facilement ressembler à "le
             # filtre ne renvoie rien" pour l'utilisateur.
             queryset = queryset.filter(created_at__date__lte=date_to)
+        return queryset
+
+
+class TenantDeletionRecordRepository:
+    """
+    Encapsule les opérations de lecture/écriture de
+    `TenantDeletionRecord` (Suppression définitive — voir son docstring
+    de modèle pour le choix de ne jamais lier ce modèle à `Tenant` par
+    ForeignKey).
+    """
+
+    def create(
+        self, *, tenant_id: UUID, tenant_identifier: str, tenant_name: str,
+        initiated_by_id: str = '', initiated_by_email: str = '',
+        retention_policy: str = '',
+    ) -> TenantDeletionRecord:
+        return TenantDeletionRecord.objects.create(
+            tenant_id=tenant_id,
+            tenant_identifier=tenant_identifier,
+            tenant_name=tenant_name,
+            initiated_by_id=initiated_by_id or '',
+            initiated_by_email=initiated_by_email or '',
+            retention_policy=retention_policy or '',
+        )
+
+    def get(self, record_id: UUID) -> TenantDeletionRecord:
+        return TenantDeletionRecord.objects.get(id=record_id)
+
+    def has_active_deletion(self, tenant_id: UUID) -> bool:
+        """
+        True si une suppression est déjà en cours pour ce tenant (statut
+        PENDING/ARCHIVING/ARCHIVED/CLEANING) — exclusion mutuelle : deux
+        suppressions concurrentes du même tenant ne doivent jamais
+        s'entrelacer (§11 de la tâche).
+        """
+        active_statuses = [
+            TenantDeletionStatus.PENDING, TenantDeletionStatus.ARCHIVING,
+            TenantDeletionStatus.ARCHIVED, TenantDeletionStatus.CLEANING,
+        ]
+        return TenantDeletionRecord.objects.filter(tenant_id=tenant_id, status__in=active_statuses).exists()
+
+    def update_status(
+        self, record_id: UUID, status: str, *, error_message: Optional[str] = None,
+        archive_reference: Optional[str] = None, archive_version: Optional[str] = None,
+        completed: bool = False,
+    ) -> TenantDeletionRecord:
+        record = self.get(record_id)
+        record.status = status
+        if error_message is not None:
+            record.error_message = error_message
+        if archive_reference is not None:
+            record.archive_reference = archive_reference
+        if archive_version is not None:
+            record.archive_version = archive_version
+        if completed:
+            from django.utils import timezone
+            record.completed_at = timezone.now()
+        record.save()
+        return record
+
+    def list(self, *, tenant_id: Optional[UUID] = None) -> QuerySet[TenantDeletionRecord]:
+        queryset = TenantDeletionRecord.objects.all()
+        if tenant_id is not None:
+            queryset = queryset.filter(tenant_id=tenant_id)
         return queryset

@@ -137,6 +137,14 @@ class AdminAction(models.TextChoices):
     TENANT_PROFILE_UPDATED = 'TENANT_PROFILE_UPDATED', 'Profil de l\'établissement modifié'
     TENANT_TECHNICAL_CONFIG_UPDATED = 'TENANT_TECHNICAL_CONFIG_UPDATED', 'Configuration technique modifiée'
     TENANT_STATUS_CHANGED = 'TENANT_STATUS_CHANGED', 'Statut de l\'établissement modifié'
+    # Suppression définitive (extension de l'AdminActionLog existant,
+    # jamais un second système d'audit) — voir TenantDeletionRecord et
+    # TenantDeletionService (services.py).
+    TENANT_DELETION_STARTED = 'TENANT_DELETION_STARTED', 'Suppression définitive démarrée'
+    TENANT_DELETION_ARCHIVED = 'TENANT_DELETION_ARCHIVED', 'Archive de suppression validée'
+    TENANT_DELETION_CLEANED = 'TENANT_DELETION_CLEANED', 'Ressources physiques du tenant supprimées'
+    TENANT_DELETION_COMPLETED = 'TENANT_DELETION_COMPLETED', 'Suppression définitive terminée'
+    TENANT_DELETION_FAILED = 'TENANT_DELETION_FAILED', 'Suppression définitive échouée'
     TENANT_PROVISIONED = 'TENANT_PROVISIONED', 'Provisioning déclenché'
     TENANT_ADMIN_PROVISIONED = 'TENANT_ADMIN_PROVISIONED', 'Compte administrateur provisionné'
     TENANT_LOGO_UPDATED = 'TENANT_LOGO_UPDATED', 'Logo mis à jour'
@@ -515,3 +523,97 @@ class TenantFunctionalService(models.Model):
 
     def __str__(self):
         return f"{self.tenant.identifier} / {self.service.code} = {self.enabled}"
+
+
+class TenantDeletionStatus(models.TextChoices):
+    """
+    États du cycle de vie d'une suppression définitive de tenant (une
+    opération distincte de `TenantStatus` — voir `TenantDeletionRecord`).
+    """
+    PENDING = 'PENDING', 'En attente'
+    ARCHIVING = 'ARCHIVING', 'Archivage en cours'
+    ARCHIVED = 'ARCHIVED', 'Archive validée'
+    CLEANING = 'CLEANING', 'Nettoyage des ressources en cours'
+    COMPLETED = 'COMPLETED', 'Terminée'
+    FAILED = 'FAILED', 'Échouée'
+
+
+class TenantDeletionRecord(models.Model):
+    """
+    Trace du cycle de vie d'une suppression définitive de tenant
+    (Suppression définitive — distincte de la suspension, `Tenant.status`).
+
+    DÉLIBÉRÉMENT AUCUNE ForeignKey vers `Tenant` : le tenant ciblé sera
+    supprimé du registre à la fin d'une suppression réussie (voir
+    `TenantDeletionService`) — un enregistrement dont l'existence même
+    dépendrait, via CASCADE, du tenant qu'il décrit disparaîtrait avec
+    lui, rendant impossible toute preuve a posteriori qu'une suppression
+    a eu lieu. Même principe déjà appliqué à `AdminActionLog`
+    (`target_tenant_id`/`target_tenant_identifier` dupliqués à plat) —
+    ce modèle en est un complément plus détaillé, spécifique au
+    déroulement (étape par étape) d'UNE opération de suppression
+    précise, là où `AdminActionLog` n'enregistre que des évènements
+    ponctuels.
+
+    Un seul enregistrement actif (statut PENDING/ARCHIVING/ARCHIVED/
+    CLEANING) par tenant_id à la fois — voir
+    `TenantDeletionService.delete_tenant` pour la vérification
+    d'exclusion mutuelle (§11 de la tâche : "empêcher deux suppressions
+    simultanées du même tenant").
+
+    Champs de rétention volontairement neutres (§Rétention de la tâche) :
+    aucune durée n'est fixée ici, ni ailleurs dans le code —
+    `retention_policy` est une simple étiquette libre (ex. "standard"),
+    `retention_until`/`deletion_eligible_at` restent NULL tant qu'une
+    politique réelle n'est pas décidée hors du périmètre technique.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # Identité du tenant, dupliquée à plat (voir docstring) — snapshot au
+    # moment du déclenchement, stable même après suppression du Tenant.
+    tenant_id = models.UUIDField(db_index=True)
+    tenant_identifier = models.CharField(max_length=100)
+    tenant_name = models.CharField(max_length=255)
+
+    # Qui a déclenché l'opération (même convention que AdminActionLog :
+    # extrait de request.user, jamais l'objet complet).
+    initiated_by_id = models.CharField(max_length=100, blank=True, default='')
+    initiated_by_email = models.CharField(max_length=255, blank=True, default='')
+
+    status = models.CharField(
+        max_length=20,
+        choices=TenantDeletionStatus.choices,
+        default=TenantDeletionStatus.PENDING,
+    )
+
+    # Référence vers l'archive constituée avant toute suppression
+    # destructive (voir archiving.py) — un chemin relatif sous
+    # settings.ARCHIVE_ROOT, jamais un chemin absolu (portable entre
+    # environnements).
+    archive_reference = models.CharField(max_length=255, blank=True, default='')
+    archive_version = models.CharField(max_length=20, blank=True, default='')
+
+    # Rétention — volontairement non peuplés par une durée codée en dur
+    # (voir docstring). `retention_policy` : étiquette libre documentant
+    # QUELLE politique s'applique (à définir hors du périmètre technique) ;
+    # `retention_until`/`deletion_eligible_at` restent NULL tant qu'aucune
+    # politique réelle n'a fixé de date.
+    retention_policy = models.CharField(max_length=100, blank=True, default='')
+    retention_until = models.DateTimeField(null=True, blank=True)
+    deletion_eligible_at = models.DateTimeField(null=True, blank=True)
+
+    error_message = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['tenant_id', 'status']),
+        ]
+
+    def __str__(self):
+        return f"Suppression {self.tenant_identifier} — {self.status}"

@@ -1782,6 +1782,74 @@ Build + lint frontend propres sur tous les fichiers touchés ; bundle déployé 
 - Non re-testé dans un navigateur réel (rendu visuel du logo/nom en situation, responsive de la nouvelle landing) — vérifié par API + build + lint + contenu du bundle uniquement.
 - Le tenant de test ayant reçu un logo (`brand-a-*`) n'a pas été nettoyé.
 
+### 14.14 Phase 4 — Suppression DÉFINITIVE d'un tenant
+
+#### AVANT
+
+Seule la **suspension** (`Tenant.status = INACTIVE`, §14.10) existait : réversible, tout est conservé (tenant, 5 bases, comptes, données). Aucun mécanisme ne permettait de retirer un tenant **définitivement** du registre opérationnel — ni d'effacer physiquement ses 5 bases de données ni ses comptes utilisateurs.
+
+#### PRINCIPE — SUSPENSION vs SUPPRESSION
+
+| | Suspension (existant, INCHANGÉ) | Suppression définitive (nouveau) |
+|---|---|---|
+| Réversible | Oui (`status` → `ACTIVE`) | **Non** |
+| Tenant/bases/comptes | Conservés | Détruits |
+| Historique | Vivant | Uniquement dans une **archive** séparée |
+| Accès | Bloqué tant que suspendu | Bloqué définitivement (tenant introuvable) |
+
+La suspension n'a **pas été retouchée** : `TenantService.activate_tenant`/`deactivate_tenant` restent la seule voie de suspension/réactivation.
+
+#### MODIFICATIONS
+
+**1. Modèles** (`tenant-service/tenants/models.py`) :
+- `TenantDeletionStatus` (TextChoices) : PENDING → ARCHIVING → ARCHIVED → CLEANING → COMPLETED, ou FAILED à toute étape.
+- `TenantDeletionRecord` — **sans ForeignKey vers Tenant** (mêmes principes que `AdminActionLog`, §14.9 : un enregistrement de suppression doit rester lisible même une fois le tenant disparu) : `tenant_id`/`tenant_identifier`/`tenant_name` à plat, `status`, `archive_reference`, `archive_version`, `error_message`, `initiated_by_id`/`initiated_by_email`, horodatages.
+- `AdminAction` étendu de 5 valeurs : `TENANT_DELETION_STARTED`/`ARCHIVED`/`CLEANED`/`COMPLETED`/`FAILED` — le journal d'audit existant (`AdminActionLog`, déjà sans FK vers Tenant) trace la suppression sans dépendre d'aucune base tenant.
+
+**2. Archivage** (`tenant-service/tenants/archiving.py`, nouveau) — choix **`dumpdata` Django plutôt que `pg_dump`** : `pg_dump` était la première option envisagée, mais vérifié absent de 4 des 5 images de service (seul `fultang-medical-backend` l'a) — décision changée après vérification de l'infrastructure réelle, jamais supposée. `archive_tenant_data()` appelle, pour chaque service **réellement provisionné pour ce tenant** (voir point 5 ci-dessous), un nouvel endpoint interne `internal/archive-tenant-data/` (lecture seule, `IsInternalService`), écrit le dump JSON reçu + un `manifest.json` (checksums SHA-256 par fichier) sous `ARCHIVE_ROOT` (répertoire sibling du `MEDIA_ROOT` déjà bind-monté, jamais exposé par une URL). `validate_archive()` relit chaque fichier et revérifie son checksum — détecte toute corruption avant de poursuivre. Échec sur un seul service → `ArchivingError`, répertoire partiel nettoyé, **rien n'est détruit**.
+
+**« Pool historique »** : dans service-personnel uniquement (seul service avec un pool `default` partagé significatif), `ArchiveTenantDataView` vérifie qu'aucun compte du tenant ne traîne hors de sa base dédiée avant d'archiver — si trouvé, `ArchivingError` immédiate (jamais ignoré ni supprimé à l'aveugle).
+
+**3. Nettoyage physique** — `deprovision_database(tenant_id)` ajouté au `pool_registry.py` de **chacun des 5 services** (mécaniquement répliqué, sur le modèle exact de `provision_database` déjà existant) : ferme les connexions actives (`pg_terminate_backend`) puis `DROP DATABASE IF EXISTS` (idempotent — `dropped=False` si déjà absente n'est jamais traité comme un échec). Exposé via un nouvel endpoint interne `internal/deprovision-tenant-data/` par service.
+
+**4. Orchestration** (`tenant-service/tenants/services.py::TenantDeletionService.delete_tenant`) — ordre **volontairement différent** d'une première intuition : **ARCHIVER → VALIDER → NETTOYER/DROP → SUPPRIMER LE TENANT EN DERNIER**. Tant que `Tenant`/`TenantDatabase` existent encore, on dispose des métadonnées nécessaires pour identifier sans ambiguïté les ressources physiques à traiter ; les supprimer trop tôt (CASCADE `TenantDatabase`) reviendrait à perdre cette carte avant d'avoir fini de s'en servir. Réutilise sans dupliquer : `TenantRepository`/`TenantDatabaseRepository`, `AdminActionLogService`, `provisioning.PROVISIONING_CAPABLE_SERVICES`/`invalidate_functional_service_cache`, `internal_clients.call_internal_service`. Exclusion mutuelle : `has_active_deletion()` refuse une seconde suppression en cours pour le même tenant. Toute exception à n'importe quelle étape → statut `FAILED`, audité, **jamais un succès partiel silencieux**.
+
+**5. Correction en cours de test — tenants partiellement provisionnés** : la première version bouclait sur les **5 services connus de la plateforme** (`PROVISIONING_CAPABLE_SERVICES`), sans considérer que le wizard de création permet de ne provisionner qu'un sous-ensemble de services pour un tenant donné. Un tenant provisionné avec seulement PERSONNEL+MEDICAL (par exemple) ne pouvait alors **jamais** être supprimé définitivement (échec systématique : "Aucune configuration TenantDatabase" pour COMPTA/COMPTA_MATIERE/INFRASTRUCTURE). Corrigé : `delete_tenant()` calcule d'abord la liste des services **réellement provisionnés** pour ce tenant (`TenantDatabaseRepository.list(tenant_id=...)`) et la transmet explicitement à l'archivage, la validation, et le nettoyage physique — jamais la liste fixe des 5 services connus.
+
+**6. Gateway — AUCUNE modification.** Vérifié live : `TenantResolver.get_tenant_status()` (§14.10) traite déjà "tenant absent du registre" (`None`) exactement comme "INACTIVE" pour l'accès (`api-gateway/app/main.py` ligne ~874), et `resolve()` lève déjà `TenantNotFoundError` sur un hostname disparu. La suppression bénéficie donc gratuitement du même blocage d'accès que la suspension, sans aucun changement côté Gateway.
+
+**7. API** : `POST /tenants/tenants/{id}/delete/` (`TenantViewSet.delete_tenant_permanently`), réutilise `IsPlatformAdmin` tel quel. Synchrone (comme le provisioning existant) — limite documentée pour un tenant au volume de données très important. Idempotent côté sécurité : une seconde suppression sur un tenant déjà supprimé renvoie 404 (jamais un faux succès), une suppression déjà en cours renvoie une erreur explicite (jamais deux suppressions concurrentes sur le même tenant).
+
+**8. Frontend** : `ConfirmationModal` (`Pages/Modals/ConfirmAction.Modal.jsx`) étendu d'un prop optionnel `requireTypedConfirmation` (aucun appelant existant ne le passe — comportement par défaut inchangé) : quand renseigné, le bouton de confirmation reste désactivé tant que la saisie ne correspond pas exactement au nom du tenant. `EstablishmentDetailPage.jsx` — nouvelle section "Zone de danger" avec bouton "Supprimer définitivement", double confirmation (résumé puis saisie du nom exact), affichant nom/identifiant/nombre de bases de données réel (`getTenantDatabases`), avis d'archivage et avertissement d'irréversibilité. `platformAdminApi.js::deleteTenantPermanently(id)` ajouté.
+
+#### TESTS
+
+Non-régression (`git stash`/`pop` des changements Task 4, comparaison directe) — **identique avant/après** sur les 5 services :
+- `tenant-service` : 164/164 OK.
+- `service-personnel` : 4 échecs + 1 erreur, **préexistants** (bug de validation de mot de passe à la création de personnel, hors périmètre de cette tâche).
+- `Medical-Monitoring` : 6 échecs + 3 erreurs, **préexistants**.
+- `fultang-compta-financiere` : 38 échecs + 7 erreurs, **préexistants**.
+- `ComptaMatiere` : erreur de découverte de tests (`ImportError` structurel), **préexistante**.
+- `Gestion-Infrastructures` : 7 échecs, **préexistants**.
+
+Live, deux tenants réels (`e2e_tenant_deletion.py`) — **23/23 PASS** : données réelles créées puis suppression de A → 200 COMPLETED (≈2s) ; A absent du registre et de la liste Platform Admin ; ancien hostname de A refusé (tenant introuvable) ; ancien JWT de A refusé (403 `TENANT_SUSPENDED` — même traitement qu'un tenant suspendu) ; les 5 bases physiques de A confirmées absentes par requête SQL directe ; archive présente sur disque (5 fichiers + manifest) ; `AdminActionLog` contient `TENANT_DELETION_STARTED`/`ARCHIVED`/`CLEANED`/`COMPLETED` ; **isolation confirmée** — B reste présent, actif, ses données restent accessibles, ses 5 bases physiques restent intactes ; re-suppression de A déjà supprimé → 404 (jamais un faux succès).
+
+Live, tenant partiellement provisionné (`e2e_partial_tenant_deletion.py`, nouveau) — **4/4 PASS**, validant le correctif du point 5 : tenant provisionné PERSONNEL+MEDIAL uniquement, supprimé définitivement avec succès (200 COMPLETED), absent du registre ensuite.
+
+Corrections apportées suite aux tests (documentées honnêtement, jamais silencieuses) :
+- `AdminActionLog` de l'entrée `TENANT_DELETION_COMPLETED` : après `tenant.delete()`, Django remet `tenant.pk`/`.id` à `None` — l'enregistrer avec `tenant=tenant` aurait produit un `target_tenant_id` NULL, invisible au filtre `?tenant=<uuid>` de `/tenants/admin-logs/`. Corrigé en passant un objet léger (`SimpleNamespace`) portant l'id/l'identifiant capturés juste avant la suppression.
+- Bug de script de test (pas produit) : mauvais utilisateur `psql` par conteneur PostgreSQL (chaque service a son propre `POSTGRES_USER`) faisait faussement remonter "base absente" pour Tenant B — corrigé côté script uniquement.
+
+#### CE QUI N'A PAS ÉTÉ IMPLÉMENTÉ (hors périmètre, par instruction explicite)
+
+Restauration automatique, réactivation d'un tenant supprimé, destruction de l'archive, politique légale de rétention automatique, nouveau système d'authentification/routage.
+
+#### LIMITATIONS
+
+- Suppression **synchrone** — pour un tenant au volume de données très important, l'appel HTTP peut prendre plusieurs secondes (≈2s observé en test ; le timeout configurable `TENANT_DELETION_TIMEOUT_SECONDS` protège chaque appel interne).
+- Champs de rétention de `TenantDeletionRecord` volontairement non exploités par une politique automatique (aucune durée codée en dur) — laissés pour un futur mécanisme de purge d'archive, non construit ici.
+- Non re-testé dans un navigateur réel (flux de clic complet sur "Supprimer définitivement") — vérifié par build + lint + contenu du bundle déployé + validation complète de l'API sous-jacente.
+
 ---
 
 ## 15. Sécurité

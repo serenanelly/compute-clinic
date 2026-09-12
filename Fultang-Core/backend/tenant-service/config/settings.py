@@ -131,6 +131,20 @@ PROVISIONING_SERVICE_INFRASTRUCTURE_URL = os.environ.get(
     'PROVISIONING_SERVICE_INFRASTRUCTURE_URL', 'http://fultang-infrastructure-web:8000',
 )
 PROVISIONING_TIMEOUT_SECONDS = int(os.environ.get('PROVISIONING_TIMEOUT_SECONDS', '30'))
+# Suppression définitive de tenant : timeout plus généreux que le
+# provisioning (un dumpdata peut prendre plus longtemps qu'une simple
+# création de base + migration).
+TENANT_DELETION_TIMEOUT_SECONDS = int(os.environ.get('TENANT_DELETION_TIMEOUT_SECONDS', '60'))
+
+# Racine de stockage des archives de suppression définitive (Suppression
+# définitive — jamais une base de données, jamais partagé avec
+# MEDIA_ROOT) : même mécanisme de stockage disque local que MEDIA_ROOT
+# ci-dessus (bind-mount du projet dans le container, voir
+# docker-compose.yml de ce service) — aucune nouvelle infrastructure de
+# stockage introduite. Volontairement PAS exposé via une URL
+# (contrairement à MEDIA_ROOT/MEDIA_URL) : une archive ne doit jamais
+# être accessible publiquement.
+ARCHIVE_ROOT = BASE_DIR / 'archives'
 
 # Cycle de vie complet du tenant (Phase 2) : gabarit de l'URL réelle d'un
 # établissement, affichée dans le Tenant Management et envoyée dans

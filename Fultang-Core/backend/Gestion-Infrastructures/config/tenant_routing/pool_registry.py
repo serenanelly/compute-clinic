@@ -290,3 +290,75 @@ def provision_database(tenant_id: str) -> dict:
         logger.info("Schéma initialisé pour tenant_id=%s alias=%s", tenant_id, alias)
 
         return {'database_name': database_name, 'host': host, 'port': int(port)}
+
+
+def deprovision_database(tenant_id: str) -> bool:
+    """
+    Suppression physique réelle (Suppression définitive de tenant) : DROP
+    de la base PostgreSQL de 'tenant_id' pour CE service, si elle existe.
+
+    Symétrique de 'provision_database' ci-dessus, réutilisant les mêmes
+    briques ('_alias_for', '_admin_connection_params', même verrou par
+    tenant) — jamais une seconde logique de résolution de nom/connexion.
+    C'EST l'opération délibérément non automatisée mentionnée dans la
+    docstring de 'provision_database' : elle n'existe QUE parce que
+    'TenantDeletionService' (tenant-service) l'appelle explicitement,
+    APRÈS archivage validé — jamais depuis le chemin de requête ordinaire
+    ni depuis le provisioning.
+
+    1. Désenregistre et ferme l'alias s'il est présent dans
+       'connections.databases' de CE PROCESSUS (même pattern que le
+       nettoyage d'échec de migration dans 'provision_database') —
+       nécessaire : PostgreSQL refuse 'DROP DATABASE' tant qu'une
+       connexion reste ouverte dessus.
+    2. Termine, via la connexion admin, toute AUTRE connexion active
+       encore ouverte sur cette base ('pg_terminate_backend' — un autre
+       processus/thread a pu enregistrer son propre alias) : sans cela,
+       'DROP DATABASE' échouerait avec "database is being accessed by
+       other users" même après l'étape 1.
+    3. 'DROP DATABASE IF EXISTS' — idempotent par construction, comme
+       '_create_database_if_missing' (vérifie l'existence avant d'agir).
+
+    Retourne True si la base a été supprimée, False si elle n'existait
+    déjà plus (idempotent : un appel répété n'est jamais une erreur).
+    Lève DatabaseProvisioningError en cas d'échec réel.
+    """
+    alias = _alias_for(tenant_id)
+    database_name = alias  # nom physique = alias (voir _alias_for).
+
+    lock = _get_creation_lock(tenant_id)
+    with lock:
+        if alias in connections.databases:
+            try:
+                connections[alias].close()
+            except Exception:  # noqa: BLE001 — best-effort, la connexion peut déjà être fermée
+                pass
+            del connections.databases[alias]
+
+        try:
+            conn = psycopg2.connect(**_admin_connection_params())
+            try:
+                conn.autocommit = True
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (database_name,))
+                    if cursor.fetchone() is None:
+                        logger.info("Base %s pour tenant_id=%s déjà absente (idempotent).", database_name, tenant_id)
+                        return False
+
+                    cursor.execute(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = %s AND pid <> pg_backend_pid()",
+                        (database_name,),
+                    )
+                    drop_statement = psycopg2.sql.SQL("DROP DATABASE IF EXISTS {}").format(
+                        psycopg2.sql.Identifier(database_name)
+                    )
+                    cursor.execute(drop_statement)
+                    logger.info("Base %s pour tenant_id=%s supprimée.", database_name, tenant_id)
+                    return True
+            finally:
+                conn.close()
+        except psycopg2.Error as exc:
+            logger.error("Échec de suppression de la base pour tenant_id=%s : %s", tenant_id, exc.__class__.__name__)
+            raise DatabaseProvisioningError(f"Suppression de la base échouée : {exc.__class__.__name__}") from exc
+

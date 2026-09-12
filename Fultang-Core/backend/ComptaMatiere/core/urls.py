@@ -11,7 +11,10 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 
-from core.views import ProvisionDatabaseView, FunctionalServiceInvalidateView
+from core.views import (
+    ProvisionDatabaseView, FunctionalServiceInvalidateView,
+    ArchiveTenantDataView, DeprovisionTenantDataView,
+)
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -28,6 +31,16 @@ urlpatterns = [
         'api/compta_matiere/internal/functional-services/invalidate/',
         FunctionalServiceInvalidateView.as_view(),
         name='internal-functional-services-invalidate',
+    ),
+    path(
+        'api/compta_matiere/internal/archive-tenant-data/',
+        ArchiveTenantDataView.as_view(),
+        name='internal-archive-tenant-data',
+    ),
+    path(
+        'api/compta_matiere/internal/deprovision-tenant-data/',
+        DeprovisionTenantDataView.as_view(),
+        name='internal-deprovision-tenant-data',
     ),
 
     path('api/compta_matiere/', include('apps.comptabilite_matiere.urls')),

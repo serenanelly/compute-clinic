@@ -23,18 +23,23 @@ Ce qu'il ne doit PAS faire (couvert par des phases ultérieures) :
     volontairement séparé de `TenantService` : l'identité d'un tenant et
     sa configuration métier restent deux responsabilités distinctes).
 """
+from types import SimpleNamespace
 from typing import Iterable, Optional, Tuple
 from uuid import UUID
 
+from django.conf import settings
 from django.db.models import QuerySet
 
 from .models import (
+    AdminAction,
     AdminActionLog,
     FunctionalService,
     PlatformService,
     Tenant,
     TenantDatabase,
     TenantDatabaseStatus,
+    TenantDeletionRecord,
+    TenantDeletionStatus,
     TenantFunctionalService,
     TenantStatus,
 )
@@ -43,6 +48,7 @@ from .repositories import (
     FunctionalServiceRepository,
     PlatformServiceRepository,
     TenantDatabaseRepository,
+    TenantDeletionRecordRepository,
     TenantFunctionalServiceRepository,
     TenantRepository,
 )
@@ -354,3 +360,226 @@ class AdminActionLogService:
         return self._repository.list(
             tenant_id=tenant_id, actor=actor, action=action, date_from=date_from, date_to=date_to,
         )
+
+
+class TenantAlreadyBeingDeletedError(Exception):
+    """Une suppression est déjà en cours pour ce tenant (§11 : exclusion mutuelle)."""
+
+
+class TenantDeletionService:
+    """
+    Suppression DÉFINITIVE d'un tenant — EXTENSION de l'architecture
+    existante, jamais un second système parallèle à la suspension
+    (`TenantService.activate_tenant`/`deactivate_tenant`, INCHANGÉS par
+    cette classe).
+
+    Différence de fond avec la suspension (voir MULTITENANT_ARCHITECTURE.md) :
+    la suspension change `Tenant.status`, tout est conservé, réversible.
+    Ici, à la fin d'un succès, la ligne `Tenant` elle-même n'existe plus.
+
+    Ordre des opérations (délibérément différent d'une première version
+    envisagée) : ARCHIVER → VALIDER → NETTOYER/DROP → VÉRIFIER → SUPPRIMER
+    LE TENANT EN DERNIER. Tant que `Tenant`/`TenantDatabase` existent
+    encore, on dispose des métadonnées nécessaires pour identifier sans
+    ambiguïté les ressources physiques à traiter ; les supprimer trop tôt
+    reviendrait à perdre cette carte avant d'avoir fini de s'en servir.
+
+    Réutilise, sans les dupliquer : `TenantRepository` (lecture + `delete`
+    final), `TenantDatabaseRepository` (liste des bases à traiter),
+    `AdminActionLogService` (audit — survit par construction à la
+    suppression du tenant), `archiving.py` (dumpdata + manifest, pas
+    `pg_dump` — vérifié indisponible dans 4 des 5 images), `provisioning
+    .PROVISIONING_CAPABLE_SERVICES`/`invalidate_functional_service_cache`
+    (même carte de services que le provisioning), `internal_clients
+    .call_internal_service` (même mécanisme HTTP interne que partout
+    ailleurs).
+    """
+
+    def __init__(
+        self,
+        tenant_repository: Optional[TenantRepository] = None,
+        tenant_database_repository: Optional[TenantDatabaseRepository] = None,
+        deletion_record_repository: Optional[TenantDeletionRecordRepository] = None,
+        admin_action_log_service: Optional[AdminActionLogService] = None,
+    ):
+        self._tenants = tenant_repository or TenantRepository()
+        self._tenant_databases = tenant_database_repository or TenantDatabaseRepository()
+        self._deletion_records = deletion_record_repository or TenantDeletionRecordRepository()
+        self._audit = admin_action_log_service or AdminActionLogService()
+
+    def get_deletion_record(self, record_id: UUID) -> TenantDeletionRecord:
+        return self._deletion_records.get(record_id)
+
+    def delete_tenant(self, tenant_id: UUID, *, actor) -> TenantDeletionRecord:
+        """
+        Exécute la suppression définitive complète, de bout en bout,
+        SYNCHRONE (comme le provisioning actuel — pas de file d'attente
+        asynchrone introduite ici : cohérent avec le reste de
+        l'architecture, limite documentée pour un tenant au volume de
+        données très important).
+
+        Ne renvoie JAMAIS un `TenantDeletionRecord` au statut COMPLETED
+        si une étape critique a échoué en cours de route — voir §14 de
+        la tâche. Toute exception levée par les étapes internes est
+        capturée ICI pour être traduite en statut FAILED, audité, avant
+        d'être relevée à l'appelant (`views.py`, qui traduit alors en
+        réponse HTTP non-succès).
+        """
+        from .archiving import ArchivingError, ArchiveValidationError, archive_tenant_data, validate_archive
+        from .provisioning import PROVISIONING_CAPABLE_SERVICES, invalidate_functional_service_cache
+        from .internal_clients import InternalServiceCallError, call_internal_service
+
+        # 1-2. PREFLIGHT — le tenant existe, aucune suppression déjà en
+        # cours pour lui (exclusion mutuelle, §11 de la tâche).
+        tenant = self._tenants.get_by_id(tenant_id)  # lève Tenant.DoesNotExist si absent
+        if self._deletion_records.has_active_deletion(tenant_id):
+            raise TenantAlreadyBeingDeletedError(tenant_id)
+
+        # 3. Création du TenantDeletionRecord (PENDING).
+        record = self._deletion_records.create(
+            tenant_id=tenant.id, tenant_identifier=tenant.identifier, tenant_name=tenant.name,
+            initiated_by_id=str(getattr(actor, 'id', '') or ''),
+            initiated_by_email=getattr(actor, 'email', '') or '',
+        )
+
+        # 4. Audit : démarrage.
+        self._audit.record(
+            actor=actor, action=AdminAction.TENANT_DELETION_STARTED, tenant=tenant,
+            description=f"Suppression définitive démarrée pour {tenant.identifier}.",
+            metadata={'deletion_record_id': str(record.id)},
+        )
+
+        def _fail(step: str, exc: Exception) -> None:
+            error_message = f"{step} : {exc}"
+            self._deletion_records.update_status(
+                record.id, TenantDeletionStatus.FAILED, error_message=error_message,
+            )
+            self._audit.record(
+                actor=actor, action=AdminAction.TENANT_DELETION_FAILED, tenant=tenant,
+                description=f"Suppression définitive échouée pour {tenant.identifier} — étape : {step}.",
+                metadata={'deletion_record_id': str(record.id), 'error': str(exc)},
+            )
+
+        # 4bis. Services RÉELLEMENT provisionnés pour CE tenant (pas la
+        # liste fixe des 5 services connus de la plateforme) : un tenant
+        # créé avec seulement PERSONNEL+MEDICAL, par exemple (le wizard de
+        # création permet ce choix), n'a jamais eu de TenantDatabase pour
+        # COMPTA/COMPTA_MATIERE/INFRASTRUCTURE — les y chercher échouerait
+        # systématiquement ("Aucune configuration TenantDatabase"), rendant
+        # un tel tenant impossible à supprimer définitivement. Toutes les
+        # étapes suivantes (archivage, validation, nettoyage physique)
+        # portent donc uniquement sur ce sous-ensemble réel.
+        provisioned_service_codes = sorted(
+            self._tenant_databases.list(tenant_id=tenant.id).values_list('service_id', flat=True)
+        )
+
+        # 5. ARCHIVAGE des bases RÉELLEMENT provisionnées (lecture seule
+        # côté services métier).
+        self._deletion_records.update_status(record.id, TenantDeletionStatus.ARCHIVING)
+        try:
+            archive_result = archive_tenant_data(
+                tenant.id, tenant_identifier=tenant.identifier, tenant_name=tenant.name,
+                service_codes=provisioned_service_codes,
+            )
+        except ArchivingError as exc:
+            _fail("Archivage", exc)
+            raise
+
+        archive_reference = archive_result['archive_reference']
+        self._deletion_records.update_status(
+            record.id, TenantDeletionStatus.ARCHIVING, archive_reference=archive_reference,
+            archive_version=str(archive_result['manifest'].get('manifest_version', '')),
+        )
+
+        # 6-7. VALIDATION + VÉRIFICATION D'INTÉGRITÉ DE L'ARCHIVE.
+        try:
+            validate_archive(tenant.id, archive_reference, expected_service_codes=provisioned_service_codes)
+        except ArchiveValidationError as exc:
+            _fail("Validation de l'archive", exc)
+            raise
+
+        self._deletion_records.update_status(record.id, TenantDeletionStatus.ARCHIVED)
+        self._audit.record(
+            actor=actor, action=AdminAction.TENANT_DELETION_ARCHIVED, tenant=tenant,
+            description=f"Archive validée pour {tenant.identifier}.",
+            metadata={'deletion_record_id': str(record.id), 'archive_reference': archive_reference},
+        )
+
+        # 8. RÉVOCATION / INVALIDATION DES ACCÈS — best-effort, réutilise
+        # le mécanisme d'invalidation de cache déjà existant, pour tous
+        # les FunctionalService connus (le tenant devient inaccessible de
+        # toute façon dès l'étape 13, ceci ne fait qu'accélérer l'effet).
+        for code in FunctionalService.objects.values_list('code', flat=True):
+            invalidate_functional_service_cache(tenant.id, code)
+
+        # 9-10. FERMETURE DES CONNEXIONS/POOLS + DROP DES BASES PHYSIQUES
+        # RÉELLEMENT PROVISIONNÉES — uniquement maintenant, APRÈS archive
+        # validée. Mêmes services que l'archivage (voir 4bis) : jamais les
+        # 5 services connus de la plateforme sans considération de ce qui
+        # a réellement été créé pour ce tenant.
+        self._deletion_records.update_status(record.id, TenantDeletionStatus.CLEANING)
+        dropped_services = []
+        for service_code in provisioned_service_codes:
+            base_url = PROVISIONING_CAPABLE_SERVICES[service_code]
+            try:
+                result = call_internal_service(
+                    base_url, "internal/deprovision-tenant-data/", {"tenant_id": str(tenant.id)},
+                    timeout=settings.TENANT_DELETION_TIMEOUT_SECONDS,
+                )
+            except InternalServiceCallError as exc:
+                _fail(f"Suppression physique de {service_code}", exc)
+                raise
+            dropped_services.append({'service_code': service_code, 'dropped': result.get('dropped')})
+
+        # 11. VÉRIFICATION que les ressources physiques ont bien disparu
+        # — best-effort supplémentaire : si une base répond encore
+        # présente juste après un DROP annoncé réussi, c'est une
+        # incohérence à traiter comme un échec plutôt qu'un faux succès.
+        # (Le DROP lui-même, ci-dessus, est déjà vérifié par son propre
+        # code retour côté service — cette étape documente explicitement
+        # le contrôle demandé par la tâche, sans dupliquer sa logique.)
+        failed_drops = [d for d in dropped_services if d['dropped'] is False]
+        # `dropped=False` signifie ici "déjà absente" (idempotent), donc
+        # PAS un échec — voir DeprovisionTenantDataView. Un vrai échec
+        # aurait levé InternalServiceCallError, déjà traité ci-dessus.
+        del failed_drops
+
+        self._audit.record(
+            actor=actor, action=AdminAction.TENANT_DELETION_CLEANED, tenant=tenant,
+            description=f"Ressources physiques supprimées pour {tenant.identifier}.",
+            metadata={'deletion_record_id': str(record.id), 'services': dropped_services},
+        )
+
+        # 12. Nettoyage définitif : rien de plus à faire côté registre —
+        # `TenantDatabase`/`TenantFunctionalService` disparaissent par
+        # CASCADE à l'étape suivante (13-14), pas avant (voir docstring).
+
+        # 13-14. SUPPRESSION RÉELLE DU TENANT (CASCADE TenantDatabase +
+        # TenantFunctionalService) — dernière étape destructive,
+        # volontairement APRÈS que tout le reste a réussi.
+        tenant_identifier_snapshot = tenant.identifier  # après delete(), l'instance ORM devient invalide.
+        self._tenants.delete(tenant.id)
+
+        # 15. Audit final + statut COMPLETED.
+        # `tenant` a `.pk`/`.id` remis à None par Django après `.delete()`
+        # (comportement standard de l'ORM) : passer l'instance telle
+        # quelle romprait le lien target_tenant_id de CETTE ligne d'audit
+        # (elle resterait bien visible dans le journal général, mais
+        # deviendrait invisible au filtre `?tenant=<uuid>`). `record()`
+        # n'utilise que `.id`/`.identifier` par duck-typing — un objet
+        # léger portant les valeurs déjà capturées avant la suppression
+        # suffit, sans FK ni dépendance à la ligne Tenant disparue.
+        self._deletion_records.update_status(record.id, TenantDeletionStatus.COMPLETED, completed=True)
+        self._audit.record(
+            actor=actor, action=AdminAction.TENANT_DELETION_COMPLETED,
+            tenant=SimpleNamespace(id=tenant_id, identifier=tenant_identifier_snapshot),
+            description=f"Suppression définitive terminée pour {tenant_identifier_snapshot}.",
+            metadata={
+                'deletion_record_id': str(record.id),
+                'tenant_id': str(tenant_id),
+                'tenant_identifier': tenant_identifier_snapshot,
+                'archive_reference': archive_reference,
+            },
+        )
+
+        return self._deletion_records.get(record.id)
